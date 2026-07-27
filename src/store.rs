@@ -405,12 +405,14 @@ impl Store {
     }
 
     fn resolve_calls(tx: &Transaction<'_>) -> Result<usize> {
+        let mut resolved = Self::resolve_structural_references(tx)?;
         tx.execute(
             "DELETE FROM relationships WHERE provenance = 'tree-sitter/name-resolution'",
             [],
         )?;
         let mut calls_statement = tx.prepare(
-            "SELECT u.caller_public_id,u.callee_name,u.evidence_file,u.evidence_line,s.language
+            "SELECT u.caller_public_id,u.callee_name,u.evidence_file,u.evidence_line,
+                    s.language,u.file_id
              FROM unresolved_calls u
              JOIN symbols s ON s.public_id=u.caller_public_id
              ORDER BY u.evidence_file,u.evidence_line,u.id",
@@ -423,29 +425,57 @@ impl Store {
                     row.get::<_, String>(2)?,
                     row.get::<_, i64>(3)? as usize,
                     row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(calls_statement);
 
-        let mut resolved = 0;
-        for (caller_id, callee_name, file, line, language) in calls {
+        for (caller_id, callee_name, file, line, language, file_id) in calls {
             let mut target_statement = tx.prepare(
-                "SELECT public_id,qualified_name FROM symbols
+                "SELECT s.public_id,s.qualified_name,
+                        CASE
+                          WHEN s.file_id=?4 THEN 0
+                          WHEN EXISTS (
+                            SELECT 1 FROM relationships r
+                            JOIN symbols owner ON owner.public_id=r.source_public_id
+                            WHERE r.target_public_id=s.public_id
+                              AND r.kind='imports'
+                              AND owner.file_id=?4
+                              AND owner.kind='file'
+                          ) THEN 1
+                          ELSE 2
+                        END AS scope_rank
+                 FROM symbols s
                  WHERE name=?1 AND public_id<>?2 AND language=?3
-                 ORDER BY qualified_name,public_id",
+                 ORDER BY scope_rank,qualified_name,public_id",
             )?;
-            let targets = target_statement
-                .query_map(params![callee_name, caller_id, language], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            let mut targets = target_statement
+                .query_map(params![callee_name, caller_id, language, file_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            let confidence = match targets.len() {
-                0 => continue,
-                1 => 0.95,
-                _ => 0.55,
+            let Some(best_rank) = targets.first().map(|target| target.2) else {
+                continue;
             };
-            for (target_id, qualified_name) in targets {
+            targets.retain(|target| target.2 == best_rank);
+            let confidence = match (best_rank, targets.len()) {
+                (0, 1) => 0.99,
+                (1, 1) => 0.97,
+                (0 | 1, _) => 0.65,
+                (2, 1) => 0.75,
+                _ => 0.35,
+            };
+            let scope = match best_rank {
+                0 => "same-file lexical scope",
+                1 => "explicit import scope",
+                _ => "language-wide fallback",
+            };
+            for (target_id, qualified_name, _) in targets {
                 Self::insert_relationship(
                     tx,
                     &Relationship {
@@ -455,11 +485,11 @@ impl Store {
                         evidence: Evidence::new(
                             "tree-sitter/name-resolution",
                             confidence,
-                            if confidence > 0.9 {
-                                format!("call name uniquely resolves to {qualified_name}")
+                            if confidence >= 0.75 {
+                                format!("call name resolves to {qualified_name} through {scope}")
                             } else {
                                 format!(
-                                    "call name has multiple candidates; {qualified_name} is a possible target"
+                                    "{scope} has multiple candidates; {qualified_name} is a possible target"
                                 )
                             },
                             &file,
@@ -470,7 +500,6 @@ impl Store {
                 resolved += 1;
             }
         }
-        resolved += Self::resolve_structural_references(tx)?;
         Ok(resolved)
     }
 

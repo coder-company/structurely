@@ -543,7 +543,7 @@ mod tests {
         let a = result.iter().find(|hit| hit.symbol.name == "a").unwrap();
         let callees = engine.callees(&a.symbol.id).unwrap();
         assert_eq!(callees[0].0.name, "b");
-        assert_eq!(callees[0].1.confidence, 0.95);
+        assert_eq!(callees[0].1.confidence, 0.75);
     }
 
     #[test]
@@ -622,7 +622,7 @@ mod tests {
             let callees = engine.callees(&caller.symbol.id).unwrap();
             assert_eq!(callees.len(), 1);
             assert_eq!(callees[0].0.language, caller.symbol.language);
-            assert_eq!(callees[0].1.confidence, 0.95);
+            assert_eq!(callees[0].1.confidence, 0.99);
         }
     }
 
@@ -780,5 +780,49 @@ mod tests {
             assert!(relationship.evidence.provenance.starts_with("tree-sitter/"));
             assert!(relationship.evidence.confidence >= 0.9);
         }
+    }
+
+    #[test]
+    fn lexical_scope_beats_same_named_global_candidates() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("local.ts"),
+            "function helper() {}\nfunction caller() { helper(); }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("remote.ts"),
+            "function helper() { return 2; }\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let callees = engine.callees_named("caller", None, 10).unwrap();
+        assert_eq!(callees.len(), 1);
+        assert_eq!(callees[0].symbol.file, "local.ts");
+        assert_eq!(callees[0].evidence.confidence, 0.99);
+        assert!(callees[0]
+            .evidence
+            .explanation
+            .contains("same-file lexical scope"));
+    }
+
+    #[test]
+    fn explicit_import_scope_beats_global_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("defs.ts"), "export function helper() {}\n").unwrap();
+        fs::write(
+            temp.path().join("main.ts"),
+            "import { helper } from './defs';\nfunction caller() { helper(); }\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let callees = engine.callees_named("caller", None, 10).unwrap();
+        assert_eq!(callees.len(), 1);
+        assert_eq!(callees[0].symbol.file, "defs.ts");
+        assert_eq!(callees[0].evidence.confidence, 0.97);
+        assert!(callees[0]
+            .evidence
+            .explanation
+            .contains("explicit import scope"));
     }
 }
