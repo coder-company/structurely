@@ -94,17 +94,20 @@ fn collect_structural_references(
             if let (Some(file_symbol), Some(name)) =
                 (symbols.first(), node.child_by_field_name("name"))
             {
-                push_reference(
+                let target_name = node_text(name, source);
+                let binding_name = node
+                    .child_by_field_name("alias")
+                    .map(|alias| node_text(alias, source))
+                    .unwrap_or_else(|| target_name.clone());
+                let target_file_hint = import_source_hint(node, source);
+                push_import_reference(
                     output,
                     file_symbol,
-                    node_text(name, source),
-                    RelationshipKind::Imports,
-                    ReferenceEvidence {
-                        provenance: "tree-sitter/import",
-                        confidence: 0.9,
-                        file,
-                        line: node.start_position().row + 1,
-                    },
+                    target_name,
+                    binding_name,
+                    target_file_hint,
+                    file,
+                    node.start_position().row + 1,
                 );
             }
         }
@@ -267,13 +270,55 @@ fn push_reference(
     output.push(UnresolvedReference {
         source_id: source.id.clone(),
         explanation: format!("{kind} reference to {target_name}"),
+        binding_name: target_name.clone(),
         target_name,
+        target_file_hint: None,
         kind,
         provenance: evidence.provenance.to_owned(),
         confidence: evidence.confidence,
         file: evidence.file.to_owned(),
         line: evidence.line,
     });
+}
+
+fn push_import_reference(
+    output: &mut Vec<UnresolvedReference>,
+    source: &Symbol,
+    target_name: String,
+    binding_name: String,
+    target_file_hint: Option<String>,
+    file: &str,
+    line: usize,
+) {
+    if target_name.is_empty() {
+        return;
+    }
+    output.push(UnresolvedReference {
+        source_id: source.id.clone(),
+        explanation: format!("imports {target_name} as {binding_name}"),
+        target_name,
+        binding_name,
+        target_file_hint,
+        kind: RelationshipKind::Imports,
+        provenance: "tree-sitter/import".to_owned(),
+        confidence: 0.95,
+        file: file.to_owned(),
+        line,
+    });
+}
+
+fn import_source_hint(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut ancestor = node.parent();
+    while let Some(parent) = ancestor {
+        if parent.kind() == "import_statement" {
+            return parent
+                .child_by_field_name("source")
+                .map(|source_node| node_text(source_node, source))
+                .map(|value| value.trim_matches(['\'', '"']).replace('\\', "/"));
+        }
+        ancestor = parent.parent();
+    }
+    None
 }
 
 struct ReferenceEvidence<'a> {

@@ -134,6 +134,8 @@ impl Store {
                 file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
                 source_public_id TEXT NOT NULL,
                 target_name TEXT NOT NULL,
+                binding_name TEXT NOT NULL DEFAULT '',
+                target_file_hint TEXT,
                 kind TEXT NOT NULL,
                 provenance TEXT NOT NULL,
                 confidence REAL NOT NULL,
@@ -143,9 +145,30 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS unresolved_references_name_idx
                 ON unresolved_references(target_name,kind);
+            CREATE TABLE IF NOT EXISTS import_bindings (
+                file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                binding_name TEXT NOT NULL,
+                target_public_id TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                PRIMARY KEY(file_id,binding_name,target_public_id)
+            );
+            CREATE INDEX IF NOT EXISTS import_bindings_name_idx
+                ON import_bindings(file_id,binding_name);
             INSERT OR IGNORE INTO metadata(key, value) VALUES ('graph_epoch', '0');
             COMMIT;
             ",
+        )?;
+        Self::ensure_column(
+            &self.connection,
+            "unresolved_references",
+            "binding_name",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
+        Self::ensure_column(
+            &self.connection,
+            "unresolved_references",
+            "target_file_hint",
+            "TEXT",
         )?;
         self.connection.execute(
             "INSERT INTO metadata(key, value) VALUES ('schema_version', ?1)
@@ -156,6 +179,25 @@ impl Store {
             "INSERT OR IGNORE INTO metadata(key, value) VALUES ('graph_model_version', ?1)",
             [GRAPH_MODEL_VERSION.to_string()],
         )?;
+        Ok(())
+    }
+
+    fn ensure_column(
+        connection: &Connection,
+        table: &str,
+        column: &str,
+        declaration: &str,
+    ) -> Result<()> {
+        let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if !columns.iter().any(|existing| existing == column) {
+            connection.execute(
+                &format!("ALTER TABLE {table} ADD COLUMN {column} {declaration}"),
+                [],
+            )?;
+        }
         Ok(())
     }
 
@@ -385,13 +427,15 @@ impl Store {
         for reference in &file.unresolved_references {
             tx.execute(
                 "INSERT INTO unresolved_references(
-                    file_id,source_public_id,target_name,kind,provenance,confidence,
-                    explanation,evidence_file,evidence_line
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                    file_id,source_public_id,target_name,binding_name,target_file_hint,
+                    kind,provenance,confidence,explanation,evidence_file,evidence_line
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
                 params![
                     file_id,
                     reference.source_id,
                     reference.target_name,
+                    reference.binding_name,
+                    reference.target_file_hint,
                     reference.kind.to_string(),
                     reference.provenance,
                     reference.confidence,
@@ -437,17 +481,23 @@ impl Store {
                         CASE
                           WHEN s.file_id=?4 THEN 0
                           WHEN EXISTS (
-                            SELECT 1 FROM relationships r
-                            JOIN symbols owner ON owner.public_id=r.source_public_id
-                            WHERE r.target_public_id=s.public_id
-                              AND r.kind='imports'
-                              AND owner.file_id=?4
-                              AND owner.kind='file'
+                            SELECT 1 FROM import_bindings b
+                            WHERE b.target_public_id=s.public_id
+                              AND b.file_id=?4
+                              AND b.binding_name=?1
                           ) THEN 1
                           ELSE 2
                         END AS scope_rank
                  FROM symbols s
-                 WHERE name=?1 AND public_id<>?2 AND language=?3
+                 WHERE s.public_id<>?2 AND s.language=?3
+                   AND (
+                     s.name=?1 OR EXISTS (
+                       SELECT 1 FROM import_bindings imported
+                       WHERE imported.target_public_id=s.public_id
+                         AND imported.file_id=?4
+                         AND imported.binding_name=?1
+                     )
+                   )
                  ORDER BY scope_rank,qualified_name,public_id",
             )?;
             let mut targets = target_statement
@@ -509,9 +559,11 @@ impl Store {
              WHERE provenance IN ('tree-sitter/import','tree-sitter/heritage')",
             [],
         )?;
+        tx.execute("DELETE FROM import_bindings", [])?;
         let mut reference_statement = tx.prepare(
-            "SELECT u.source_public_id,u.target_name,u.kind,u.provenance,u.confidence,
-                    u.explanation,u.evidence_file,u.evidence_line,s.language
+            "SELECT u.source_public_id,u.target_name,u.binding_name,u.target_file_hint,
+                    u.kind,u.provenance,u.confidence,u.explanation,u.evidence_file,
+                    u.evidence_line,s.language,u.file_id
              FROM unresolved_references u
              JOIN symbols s ON s.public_id=u.source_public_id
              ORDER BY u.evidence_file,u.evidence_line,u.id",
@@ -522,12 +574,15 @@ impl Store {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, f64>(4)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, i64>(7)? as usize,
+                    row.get::<_, f64>(6)?,
+                    row.get::<_, String>(7)?,
                     row.get::<_, String>(8)?,
+                    row.get::<_, i64>(9)? as usize,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, i64>(11)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -537,6 +592,8 @@ impl Store {
         for (
             source_id,
             target_name,
+            binding_name,
+            target_file_hint,
             kind,
             provenance,
             base_confidence,
@@ -544,29 +601,45 @@ impl Store {
             file,
             line,
             language,
+            file_id,
         ) in references
         {
             let mut target_statement = tx.prepare(
-                "SELECT public_id,qualified_name FROM symbols
-                 WHERE name=?1 AND public_id<>?2 AND language=?3
-                 ORDER BY qualified_name,public_id",
+                "SELECT s.public_id,s.qualified_name,f.path
+                 FROM symbols s JOIN files f ON f.id=s.file_id
+                 WHERE s.name=?1 AND s.public_id<>?2 AND s.language=?3
+                 ORDER BY s.qualified_name,s.public_id",
             )?;
-            let targets = target_statement
+            let mut targets = target_statement
                 .query_map(params![target_name, source_id, language], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
+            if let Some(hint) = target_file_hint.as_deref() {
+                let hinted: Vec<_> = targets
+                    .iter()
+                    .filter(|target| module_hint_matches(hint, &target.2))
+                    .cloned()
+                    .collect();
+                if !hinted.is_empty() {
+                    targets = hinted;
+                }
+            }
             let confidence = if targets.len() == 1 {
                 base_confidence
             } else {
                 base_confidence.min(0.55)
             };
-            for (target_id, qualified_name) in targets {
+            for (target_id, qualified_name, _) in targets {
                 Self::insert_relationship(
                     tx,
                     &Relationship {
                         source_id: source_id.clone(),
-                        target_id,
+                        target_id: target_id.clone(),
                         kind: parse_relationship_kind(&kind),
                         evidence: Evidence::new(
                             &provenance,
@@ -583,6 +656,14 @@ impl Store {
                         ),
                     },
                 )?;
+                if kind == "imports" {
+                    tx.execute(
+                        "INSERT OR REPLACE INTO import_bindings(
+                            file_id,binding_name,target_public_id,confidence
+                         ) VALUES (?1,?2,?3,?4)",
+                        params![file_id, binding_name, target_id, confidence],
+                    )?;
+                }
                 resolved += 1;
             }
         }
@@ -794,5 +875,67 @@ fn parse_relationship_kind(value: &str) -> RelationshipKind {
         "extends" => RelationshipKind::Extends,
         "implements" => RelationshipKind::Implements,
         _ => RelationshipKind::Contains,
+    }
+}
+
+fn module_hint_matches(hint: &str, candidate: &str) -> bool {
+    let normalize = |value: &str| {
+        value
+            .trim_matches(['\'', '"'])
+            .trim_start_matches("./")
+            .replace('\\', "/")
+    };
+    let hint = normalize(hint);
+    let candidate = normalize(candidate);
+    let candidate_without_extension = candidate
+        .rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(&candidate);
+    candidate_without_extension == hint
+        || candidate_without_extension.ends_with(&format!("/{hint}"))
+        || candidate_without_extension.ends_with(&format!("/{hint}/index"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn additive_migration_upgrades_legacy_reference_table() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("legacy.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE unresolved_references (
+                    id INTEGER PRIMARY KEY,
+                    file_id INTEGER NOT NULL,
+                    source_public_id TEXT NOT NULL,
+                    target_name TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    provenance TEXT NOT NULL,
+                    confidence REAL NOT NULL,
+                    explanation TEXT NOT NULL,
+                    evidence_file TEXT NOT NULL,
+                    evidence_line INTEGER NOT NULL
+                );
+                ",
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = Store::open(&path).unwrap();
+        let mut statement = store
+            .connection
+            .prepare("PRAGMA table_info(unresolved_references)")
+            .unwrap();
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(columns.contains(&"binding_name".to_owned()));
+        assert!(columns.contains(&"target_file_hint".to_owned()));
     }
 }

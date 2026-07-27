@@ -825,4 +825,30 @@ mod tests {
             .explanation
             .contains("explicit import scope"));
     }
+
+    #[test]
+    fn module_hints_and_aliases_disambiguate_imported_calls() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("defs.ts"),
+            "export function helper() { return 'correct'; }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("other.ts"),
+            "export function helper() { return 'wrong'; }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("main.ts"),
+            "import { helper as chosen } from './defs';\nfunction caller() { chosen(); }\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let callees = engine.callees_named("caller", None, 10).unwrap();
+        assert_eq!(callees.len(), 1);
+        assert_eq!(callees[0].symbol.file, "defs.ts");
+        assert_eq!(callees[0].symbol.name, "helper");
+        assert_eq!(callees[0].evidence.confidence, 0.97);
+    }
 }
