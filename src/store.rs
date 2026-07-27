@@ -124,8 +124,7 @@ impl Store {
             [SCHEMA_VERSION.to_string()],
         )?;
         self.connection.execute(
-            "INSERT INTO metadata(key, value) VALUES ('graph_model_version', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            "INSERT OR IGNORE INTO metadata(key, value) VALUES ('graph_model_version', ?1)",
             [GRAPH_MODEL_VERSION.to_string()],
         )?;
         Ok(())
@@ -138,6 +137,18 @@ impl Store {
             |row| row.get(0),
         )?;
         Ok(value.parse()?)
+    }
+
+    pub fn is_current_graph_model(&self) -> Result<bool> {
+        let version: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'graph_model_version'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(version.as_deref().and_then(|value| value.parse().ok()) == Some(GRAPH_MODEL_VERSION))
     }
 
     pub fn content_hash(&self, path: &str) -> Result<Option<String>> {
@@ -208,6 +219,11 @@ impl Store {
         tx.execute(
             "UPDATE metadata SET value = ?1 WHERE key = 'graph_epoch'",
             [next_epoch.to_string()],
+        )?;
+        tx.execute(
+            "INSERT INTO metadata(key,value) VALUES ('graph_model_version',?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [GRAPH_MODEL_VERSION.to_string()],
         )?;
         tx.commit()?;
         self.connection
@@ -399,27 +415,58 @@ impl Store {
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        self.search_filtered(query, None, limit)
+    }
+
+    pub fn search_filtered(
+        &self,
+        query: &str,
+        kind: Option<SymbolKind>,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>> {
         let escaped = query
             .split_whitespace()
             .map(|part| format!("\"{}\"*", part.replace('"', "\"\"")))
             .collect::<Vec<_>>()
             .join(" ");
-        let mut statement = self.connection.prepare(
+        let sql = if kind.is_some() {
             "SELECT s.public_id,s.semantic_key,s.language,s.kind,s.name,s.qualified_name,
                     f.path,s.start_byte,s.end_byte,s.start_line,s.end_line,
                     bm25(symbol_search)
              FROM symbol_search
              JOIN symbols s ON s.public_id=symbol_search.public_id
              JOIN files f ON f.id=s.file_id
-             WHERE symbol_search MATCH ?1 ORDER BY bm25(symbol_search) LIMIT ?2",
-        )?;
-        let rows = statement.query_map(params![escaped, limit as i64], |row| {
+             WHERE symbol_search MATCH ?1 AND s.kind=?2
+             ORDER BY bm25(symbol_search) LIMIT ?3"
+        } else {
+            "SELECT s.public_id,s.semantic_key,s.language,s.kind,s.name,s.qualified_name,
+                    f.path,s.start_byte,s.end_byte,s.start_line,s.end_line,
+                    bm25(symbol_search)
+             FROM symbol_search
+             JOIN symbols s ON s.public_id=symbol_search.public_id
+             JOIN files f ON f.id=s.file_id
+             WHERE symbol_search MATCH ?1 ORDER BY bm25(symbol_search) LIMIT ?2"
+        };
+        let mut statement = self.connection.prepare(sql)?;
+        let mut map_row = |row: &rusqlite::Row<'_>| {
             Ok(SearchHit {
                 symbol: Self::symbol_from_row(row)?,
                 score: -row.get::<_, f64>(11)?,
             })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        };
+        let hits = if let Some(kind) = kind {
+            statement
+                .query_map(
+                    params![escaped, kind.to_string(), limit as i64],
+                    &mut map_row,
+                )?
+                .collect::<rusqlite::Result<_>>()?
+        } else {
+            statement
+                .query_map(params![escaped, limit as i64], &mut map_row)?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        Ok(hits)
     }
 
     pub fn related(

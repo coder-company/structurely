@@ -38,6 +38,33 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+    Callers {
+        symbol: String,
+        #[arg(long)]
+        file: Option<String>,
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    Callees {
+        symbol: String,
+        #[arg(long)]
+        file: Option<String>,
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    Impact {
+        symbol: String,
+        #[arg(long)]
+        file: Option<String>,
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value_t = 2)]
+        depth: usize,
+    },
     Serve {
         #[arg(long)]
         mcp: bool,
@@ -73,6 +100,54 @@ fn main() -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&engine.explore(&query, limit)?)?
+            );
+        }
+        Command::Callers {
+            symbol,
+            file,
+            path,
+            limit,
+        } => {
+            let engine = Engine::open(path)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&engine.callers_named(
+                    &symbol,
+                    file.as_deref(),
+                    limit
+                )?)?
+            );
+        }
+        Command::Callees {
+            symbol,
+            file,
+            path,
+            limit,
+        } => {
+            let engine = Engine::open(path)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&engine.callees_named(
+                    &symbol,
+                    file.as_deref(),
+                    limit
+                )?)?
+            );
+        }
+        Command::Impact {
+            symbol,
+            file,
+            path,
+            depth,
+        } => {
+            let engine = Engine::open(path)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&engine.impact_named(
+                    &symbol,
+                    file.as_deref(),
+                    depth
+                )?)?
             );
         }
         Command::Serve { mcp: true, path } => mcp::serve_stdio(&path)?,

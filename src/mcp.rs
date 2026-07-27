@@ -90,6 +90,21 @@ fn tool_definitions() -> Vec<Value> {
         relationship_tool("codegraph_callers", "List functions that call a symbol."),
         relationship_tool("codegraph_callees", "List functions that a symbol calls."),
         json!({
+            "name": "codegraph_impact",
+            "description": "List symbols affected by changing a symbol.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "symbol": { "type": "string" },
+                    "file": { "type": "string" },
+                    "depth": { "type": "number", "default": 2 },
+                    "projectPath": { "type": "string" }
+                },
+                "required": ["symbol"]
+            },
+            "annotations": read_only_annotations()
+        }),
+        json!({
             "name": "codegraph_status",
             "description": "Index health check.",
             "inputSchema": {
@@ -177,7 +192,11 @@ fn call_tool(engine: &Engine, params: &Value) -> Result<Value> {
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             let limit = number_argument(&arguments, "limit", 10);
-            serde_json::to_value(engine.search(query, limit)?)?
+            let kind = arguments
+                .get("kind")
+                .and_then(Value::as_str)
+                .and_then(parse_symbol_kind);
+            serde_json::to_value(engine.search_filtered(query, kind, limit)?)?
         }
         "codegraph_explore" => {
             let query = arguments
@@ -204,6 +223,15 @@ fn call_tool(engine: &Engine, params: &Value) -> Result<Value> {
             let file = arguments.get("file").and_then(Value::as_str);
             let limit = number_argument(&arguments, "limit", 20);
             serde_json::to_value(engine.callees_named(symbol, file, limit)?)?
+        }
+        "codegraph_impact" => {
+            let symbol = arguments
+                .get("symbol")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let file = arguments.get("file").and_then(Value::as_str);
+            let depth = number_argument(&arguments, "depth", 2);
+            serde_json::to_value(engine.impact_named(symbol, file, depth)?)?
         }
         "codegraph_status" => serde_json::to_value(engine.status()?)?,
         "codegraph_files" => {
@@ -274,6 +302,21 @@ fn number_argument(arguments: &Value, name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+fn parse_symbol_kind(value: &str) -> Option<crate::model::SymbolKind> {
+    use crate::model::SymbolKind;
+    match value {
+        "function" => Some(SymbolKind::Function),
+        "method" => Some(SymbolKind::Method),
+        "class" => Some(SymbolKind::Class),
+        "interface" => Some(SymbolKind::Interface),
+        "variable" => Some(SymbolKind::Variable),
+        "struct" => Some(SymbolKind::Struct),
+        "trait" => Some(SymbolKind::Trait),
+        "enum" => Some(SymbolKind::Enum),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +341,7 @@ mod tests {
             "codegraph_files",
             "codegraph_node",
             "codegraph_explore",
+            "codegraph_impact",
         ] {
             assert!(names.contains(&expected.to_owned()));
         }

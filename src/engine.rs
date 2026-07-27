@@ -49,6 +49,14 @@ pub struct RelatedHit {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ImpactHit {
+    pub depth: usize,
+    pub origin: crate::model::Symbol,
+    pub symbol: crate::model::Symbol,
+    pub evidence: Evidence,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ExploreHit {
     pub symbol: crate::model::Symbol,
     pub source: String,
@@ -99,6 +107,7 @@ impl Engine {
 
     pub fn sync(&mut self) -> Result<IndexReport> {
         let started = Instant::now();
+        let force_reindex = !self.store.is_current_graph_model()?;
         let mut seen = HashSet::new();
         let mut changed = Vec::<FileFacts>::new();
         let mut files_scanned = 0;
@@ -125,7 +134,9 @@ impl Engine {
             let source = fs::read_to_string(entry.path())
                 .with_context(|| format!("read source {}", entry.path().display()))?;
             let hash = blake3::hash(source.as_bytes()).to_hex().to_string();
-            if self.store.content_hash(&relative)?.as_deref() == Some(hash.as_str()) {
+            if !force_reindex
+                && self.store.content_hash(&relative)?.as_deref() == Some(hash.as_str())
+            {
                 continue;
             }
             changed.push(parse_file(&relative, &source)?);
@@ -192,6 +203,15 @@ impl Engine {
 
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
         self.store.search(query, limit)
+    }
+
+    pub fn search_filtered(
+        &self,
+        query: &str,
+        kind: Option<crate::model::SymbolKind>,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>> {
+        self.store.search_filtered(query, kind, limit)
     }
 
     pub fn files(&self) -> Result<Vec<FileSummary>> {
@@ -332,6 +352,55 @@ impl Engine {
         limit: usize,
     ) -> Result<Vec<RelatedHit>> {
         self.related_named(symbol, file, limit, false)
+    }
+
+    pub fn impact_named(
+        &self,
+        symbol: &str,
+        file: Option<&str>,
+        max_depth: usize,
+    ) -> Result<Vec<ImpactHit>> {
+        let roots: Vec<_> = self
+            .store
+            .find_symbols(symbol)?
+            .into_iter()
+            .filter(|origin| {
+                file.is_none_or(|suffix| {
+                    origin.file == suffix
+                        || origin.file.ends_with(suffix)
+                        || Path::new(&origin.file)
+                            .file_name()
+                            .is_some_and(|name| name == suffix)
+                })
+            })
+            .collect();
+        let mut queue = roots
+            .iter()
+            .cloned()
+            .map(|symbol| (symbol, 0usize))
+            .collect::<std::collections::VecDeque<_>>();
+        let mut visited: HashSet<String> = roots.iter().map(|symbol| symbol.id.clone()).collect();
+        let mut output = Vec::new();
+        while let Some((current, depth)) = queue.pop_front() {
+            if depth >= max_depth {
+                continue;
+            }
+            for (caller, evidence) in
+                self.store
+                    .related(&current.id, true, RelationshipKind::Calls)?
+            {
+                if visited.insert(caller.id.clone()) {
+                    output.push(ImpactHit {
+                        depth: depth + 1,
+                        origin: current.clone(),
+                        symbol: caller.clone(),
+                        evidence,
+                    });
+                    queue.push_back((caller, depth + 1));
+                }
+            }
+        }
+        Ok(output)
     }
 
     fn related_named(
@@ -518,5 +587,58 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("function main"));
+    }
+
+    #[test]
+    fn impact_is_transitive_and_search_filters_by_kind() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("flow.ts"),
+            "class Flow {}\nfunction leaf() {}\nfunction middle() { leaf(); }\nfunction root() { middle(); }\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+
+        let classes = engine
+            .search_filtered("Flow", Some(crate::model::SymbolKind::Class), 10)
+            .unwrap();
+        assert_eq!(classes.len(), 1);
+        assert_eq!(classes[0].symbol.kind, crate::model::SymbolKind::Class);
+        let functions = engine
+            .search_filtered("leaf", Some(crate::model::SymbolKind::Function), 10)
+            .unwrap();
+        assert_eq!(functions.len(), 1);
+        assert!(engine
+            .search_filtered("leaf", Some(crate::model::SymbolKind::Class), 10)
+            .unwrap()
+            .is_empty());
+
+        let impact = engine.impact_named("leaf", None, 2).unwrap();
+        assert_eq!(impact.len(), 2);
+        assert_eq!(impact[0].symbol.name, "middle");
+        assert_eq!(impact[0].depth, 1);
+        assert_eq!(impact[1].symbol.name, "root");
+        assert_eq!(impact[1].depth, 2);
+    }
+
+    #[test]
+    fn graph_model_upgrade_forces_semantic_reindex() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("main.rs"), "fn main() {}\n").unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        drop(engine);
+        let database = temp.path().join(PROJECT_DIR).join(DATABASE_FILE);
+        let connection = rusqlite::Connection::open(database).unwrap();
+        connection
+            .execute(
+                "UPDATE metadata SET value='1' WHERE key='graph_model_version'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let mut engine = Engine::open(temp.path()).unwrap();
+        let report = engine.sync().unwrap();
+        assert_eq!(report.files_changed, 1);
     }
 }
