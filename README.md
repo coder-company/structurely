@@ -5,10 +5,10 @@ agents. It indexes source into a transactional SQLite graph and exposes
 CodeGraph-compatible CLI and MCP tools with additional relationship confidence,
 provenance, and explanations.
 
-> Structurely is under active development. The current engine supports
-> TypeScript, TSX, JavaScript, JSX, Python, Rust, Go, Java, C#, C, C++, and
-> Ruby, PHP, Swift, Lua, Kotlin, Scala, and R. See
-> [production acceptance gates](docs/acceptance.md) for the remaining scope.
+Structurely 0.1 supports TypeScript, TSX, JavaScript, JSX, Python, Rust, Go,
+Java, C#, C, C++, Ruby, PHP, Swift, Lua, Kotlin, Scala, and R. Its production
+contract and reproducible evidence are listed in the
+[acceptance gates](docs/acceptance.md).
 
 ## Build
 
@@ -34,8 +34,8 @@ irm https://raw.githubusercontent.com/coder-company/structurely/main/install.ps1
 
 The installers use `cargo install --locked` from the public Structurely
 repository. Set `STRUCTURELY_VERSION` to a release tag to install a pinned
-version. Rust-free standalone release bundles are planned before the first
-stable release.
+version. Native standalone archives, SHA-256 checksums, and build attestations
+are attached to tagged GitHub Releases.
 
 ## Quick start
 
@@ -88,6 +88,7 @@ malformed or unexpectedly broad agent requests fail predictably.
 - [Production acceptance gates](docs/acceptance.md)
 - [Reproducible benchmark protocol](docs/benchmarks.md)
 - [Release and artifact verification](docs/releases.md)
+- [Changelog](CHANGELOG.md)
 - [Installation, privacy, and troubleshooting](docs/operations.md)
 - [Domain language](CONTEXT.md)
 - [Contributing](CONTRIBUTING.md)

@@ -12,6 +12,10 @@ The publication job generates `SHA256SUMS`, verifies it before upload, creates
 a GitHub artifact provenance attestation, and publishes all files in a GitHub
 Release.
 
+Standalone archives contain the `structurely` executable, README, and license;
+they do not require Rust at runtime. Extract an archive, move the executable to
+a directory on `PATH`, and run `structurely --version`.
+
 ## Verify a download
 
 Verify the checksum:
@@ -46,4 +50,3 @@ establishes the archive's build origin and workflow identity.
 6. Download one archive and verify both its checksum and attestation.
 
 Never reuse or move an existing release tag.
-
