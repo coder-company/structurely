@@ -181,11 +181,14 @@ impl Engine {
         let indexed: HashSet<_> = self.store.indexed_files()?.into_iter().collect();
         let deleted: Vec<_> = indexed.difference(&seen).cloned().collect();
         let files_changed = changed.len();
-        let parse_workers = thread::available_parallelism()
+        let available_workers = thread::available_parallelism()
             .map(|parallelism| parallelism.get())
-            .unwrap_or(1)
-            .min(8)
-            .min(files_changed.max(1));
+            .unwrap_or(1);
+        let parse_workers = parse_worker_count(
+            std::env::var("STRUCTURELY_PARSE_WORKERS").ok().as_deref(),
+            available_workers,
+            files_changed,
+        );
         let (epoch, relationships_resolved, symbols_changed, staging_ms, resolution_ms) =
             if changed.is_empty() && deleted.is_empty() {
                 (self.store.epoch()?, 0, 0, 0, 0)
@@ -697,9 +700,27 @@ fn percentile(sorted: &[u128], percentile: usize) -> u128 {
     sorted[index]
 }
 
+fn parse_worker_count(configured: Option<&str>, available: usize, files: usize) -> usize {
+    let requested = configured
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(available.min(8));
+    requested.min(16).min(files.max(1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_worker_configuration_is_bounded_and_never_zero() {
+        assert_eq!(parse_worker_count(None, 8, 100), 8);
+        assert_eq!(parse_worker_count(Some("4"), 8, 100), 4);
+        assert_eq!(parse_worker_count(Some("1000"), 8, 100), 16);
+        assert_eq!(parse_worker_count(Some("0"), 8, 100), 8);
+        assert_eq!(parse_worker_count(Some("invalid"), 8, 2), 2);
+        assert_eq!(parse_worker_count(Some("8"), 8, 0), 1);
+    }
 
     #[test]
     fn clean_and_incremental_index_converge() {

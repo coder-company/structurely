@@ -86,6 +86,12 @@ Disk usage keeps growing
   `.structurely/graph.db`. Do not edit the SQLite database manually. Report
   reproducible unbounded WAL growth as a bug.
 
+Indexing needs a different CPU/memory tradeoff
+: Structurely uses the host's available parallelism, capped at eight workers by
+  default. Set `STRUCTURELY_PARSE_WORKERS` to a positive integer to override
+  it; values are capped at 16 and at the number of changed files. Every index
+  report includes `parse_workers`, `staging_ms`, and `resolution_ms`.
+
 ## Backups and recovery
 
 The source tree is authoritative; the graph is reproducible derived data. Back
