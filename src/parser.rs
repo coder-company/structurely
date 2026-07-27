@@ -312,6 +312,9 @@ fn parse_tree(language: Language, source: &str) -> Result<Tree> {
         Language::Go => tree_sitter_go::LANGUAGE,
         Language::Java => tree_sitter_java::LANGUAGE,
         Language::CSharp => tree_sitter_c_sharp::LANGUAGE,
+        Language::C => tree_sitter_c::LANGUAGE,
+        Language::Cpp => tree_sitter_cpp::LANGUAGE,
+        Language::Ruby => tree_sitter_ruby::LANGUAGE,
     };
     parser
         .set_language(&grammar.into())
@@ -375,8 +378,14 @@ fn declaration_at<'a>(
         "function_declaration"
         | "function_signature"
         | "generator_function_declaration"
-        | "function_definition"
         | "function_item" => (SymbolKind::Function, node.child_by_field_name("name")?),
+        "function_definition" => (
+            SymbolKind::Function,
+            node.child_by_field_name("name").or_else(|| {
+                node.child_by_field_name("declarator")
+                    .and_then(declarator_name)
+            })?,
+        ),
         "method_definition" | "method_signature" => {
             (SymbolKind::Method, node.child_by_field_name("name")?)
         }
@@ -407,6 +416,19 @@ fn declaration_at<'a>(
             };
             (kind, node.child_by_field_name("name")?)
         }
+        "class_specifier" => (SymbolKind::Class, node.child_by_field_name("name")?),
+        "struct_specifier" => (SymbolKind::Struct, node.child_by_field_name("name")?),
+        "union_specifier" => (SymbolKind::Type, node.child_by_field_name("name")?),
+        "class" => (SymbolKind::Class, node.child_by_field_name("name")?),
+        "module" => (SymbolKind::Type, node.child_by_field_name("name")?),
+        "method" | "singleton_method" => (
+            if container.is_some() {
+                SymbolKind::Method
+            } else {
+                SymbolKind::Function
+            },
+            node.child_by_field_name("name")?,
+        ),
         _ => return None,
     };
     let name = node_text(name_node, source);
@@ -420,16 +442,40 @@ fn declaration_at<'a>(
     Some((qualified, kind, name_node, discriminator))
 }
 
+fn declarator_name(node: Node<'_>) -> Option<Node<'_>> {
+    if matches!(
+        node.kind(),
+        "identifier" | "field_identifier" | "operator_name" | "destructor_name"
+    ) {
+        return Some(node);
+    }
+    if let Some(declarator) = node.child_by_field_name("declarator") {
+        if let Some(name) = declarator_name(declarator) {
+            return Some(name);
+        }
+    }
+    let mut cursor = node.walk();
+    let name = node.named_children(&mut cursor).find_map(declarator_name);
+    name
+}
+
 fn callable_discriminator(node: Node<'_>, source: &[u8], kind: SymbolKind) -> String {
     if !matches!(kind, SymbolKind::Function | SymbolKind::Method) {
         return String::new();
     }
-    ["parameters", "return_type"]
+    let direct = ["parameters", "return_type"]
         .into_iter()
         .filter_map(|field| node.child_by_field_name(field))
         .map(|child| normalize_signature(&node_text(child, source)))
         .collect::<Vec<_>>()
-        .join("->")
+        .join("->");
+    if direct.is_empty() {
+        node.child_by_field_name("declarator")
+            .map(|child| normalize_signature(&node_text(child, source)))
+            .unwrap_or_default()
+    } else {
+        direct
+    }
 }
 
 fn normalize_signature(value: &str) -> String {
@@ -494,6 +540,9 @@ fn collect_calls(
 
 fn call_target_node(node: Node<'_>) -> Option<Node<'_>> {
     match node.kind() {
+        "call" => node
+            .child_by_field_name("method")
+            .or_else(|| node.child_by_field_name("function")),
         "method_invocation" => node.child_by_field_name("name"),
         "object_creation_expression" => node.child_by_field_name("type"),
         "invocation_expression" => node
@@ -524,6 +573,9 @@ fn call_name(node: Node<'_>, source: &[u8]) -> Option<String> {
         "scoped_identifier" | "scoped_type_identifier" => node
             .child_by_field_name("name")
             .map(|name| node_text(name, source)),
+        "qualified_identifier" => node
+            .child_by_field_name("name")
+            .and_then(|name| call_name(name, source)),
         "generic_function" => node
             .child_by_field_name("function")
             .and_then(|function| call_name(function, source)),
@@ -689,5 +741,59 @@ mod tests {
         assert!(names.contains(&"Greeter.Greet"));
         assert!(names.contains(&"Greeter.Helper"));
         assert_eq!(facts.unresolved_calls[0].callee_name, "Helper");
+    }
+
+    #[test]
+    fn extracts_c_functions_structs_and_calls() {
+        let facts = parse_file(
+            "src/main.c",
+            "struct State { int ready; };\nvoid helper(void) {}\nint run(void) { helper(); return 0; }\n",
+        )
+        .unwrap();
+        let symbols: Vec<_> = facts
+            .symbols
+            .iter()
+            .map(|symbol| (symbol.name.as_str(), symbol.kind))
+            .collect();
+        assert!(symbols.contains(&("State", SymbolKind::Struct)));
+        assert!(symbols.contains(&("helper", SymbolKind::Function)));
+        assert!(symbols.contains(&("run", SymbolKind::Function)));
+        assert_eq!(facts.unresolved_calls[0].callee_name, "helper");
+    }
+
+    #[test]
+    fn extracts_cpp_classes_methods_and_calls() {
+        let facts = parse_file(
+            "src/greeter.cpp",
+            "class Greeter { public: void greet() { helper(); } void helper() {} };\n",
+        )
+        .unwrap();
+        let names: Vec<_> = facts
+            .symbols
+            .iter()
+            .map(|symbol| symbol.qualified_name.as_str())
+            .collect();
+        assert!(names.contains(&"Greeter"));
+        assert!(names.contains(&"Greeter.greet"));
+        assert!(names.contains(&"Greeter.helper"));
+        assert_eq!(facts.unresolved_calls[0].callee_name, "helper");
+    }
+
+    #[test]
+    fn extracts_ruby_classes_methods_and_calls() {
+        let facts = parse_file(
+            "lib/greeter.rb",
+            "class Greeter\n  def greet\n    helper()\n  end\n  def helper\n  end\nend\n",
+        )
+        .unwrap();
+        let names: Vec<_> = facts
+            .symbols
+            .iter()
+            .map(|symbol| symbol.qualified_name.as_str())
+            .collect();
+        assert!(names.contains(&"Greeter"));
+        assert!(names.contains(&"Greeter.greet"));
+        assert!(names.contains(&"Greeter.helper"));
+        assert_eq!(facts.unresolved_calls[0].callee_name, "helper");
     }
 }

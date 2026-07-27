@@ -730,6 +730,9 @@ fn parse_language(value: &str) -> Language {
         "go" => Language::Go,
         "java" => Language::Java,
         "csharp" => Language::CSharp,
+        "c" => Language::C,
+        "cpp" => Language::Cpp,
+        "ruby" => Language::Ruby,
         _ => Language::TypeScript,
     }
 }

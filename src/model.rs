@@ -18,6 +18,9 @@ pub enum Language {
     Java,
     #[serde(rename = "csharp")]
     CSharp,
+    C,
+    Cpp,
+    Ruby,
 }
 
 impl Language {
@@ -32,6 +35,9 @@ impl Language {
             "go" => Some(Self::Go),
             "java" => Some(Self::Java),
             "cs" => Some(Self::CSharp),
+            "c" | "h" => Some(Self::C),
+            "cc" | "cpp" | "cxx" | "hh" | "hpp" | "hxx" => Some(Self::Cpp),
+            "rb" | "rake" => Some(Self::Ruby),
             _ => None,
         }
     }
@@ -49,6 +55,9 @@ impl fmt::Display for Language {
             Self::Go => "go",
             Self::Java => "java",
             Self::CSharp => "csharp",
+            Self::C => "c",
+            Self::Cpp => "cpp",
+            Self::Ruby => "ruby",
         })
     }
 }

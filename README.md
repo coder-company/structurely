@@ -6,7 +6,8 @@ CodeGraph-compatible CLI and MCP tools with additional relationship confidence,
 provenance, and explanations.
 
 > Structurely is under active development. The current engine supports
-> TypeScript, TSX, JavaScript, JSX, Python, Rust, Go, Java, and C#. See
+> TypeScript, TSX, JavaScript, JSX, Python, Rust, Go, Java, C#, C, C++, and
+> Ruby. See
 > [production acceptance gates](docs/acceptance.md) for the remaining scope.
 
 ## Build
