@@ -101,6 +101,7 @@ impl Store {
                 name,
                 qualified_name,
                 file,
+                segments,
                 tokenize = 'unicode61 remove_diacritics 2'
             );
             CREATE TABLE IF NOT EXISTS relationships (
@@ -164,6 +165,7 @@ impl Store {
             "binding_name",
             "TEXT NOT NULL DEFAULT ''",
         )?;
+        Self::ensure_search_schema(&self.connection)?;
         Self::ensure_column(
             &self.connection,
             "unresolved_references",
@@ -179,6 +181,29 @@ impl Store {
             "INSERT OR IGNORE INTO metadata(key, value) VALUES ('graph_model_version', ?1)",
             [GRAPH_MODEL_VERSION.to_string()],
         )?;
+        Ok(())
+    }
+
+    fn ensure_search_schema(connection: &Connection) -> Result<()> {
+        let mut statement = connection.prepare("PRAGMA table_info(symbol_search)")?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if !columns.iter().any(|column| column == "segments") {
+            connection.execute_batch(
+                "
+                DROP TABLE symbol_search;
+                CREATE VIRTUAL TABLE symbol_search USING fts5(
+                    public_id UNINDEXED,
+                    name,
+                    qualified_name,
+                    file,
+                    segments,
+                    tokenize = 'unicode61 remove_diacritics 2'
+                );
+                ",
+            )?;
+        }
         Ok(())
     }
 
@@ -402,9 +427,16 @@ impl Store {
                 ],
             )?;
             tx.execute(
-                "INSERT INTO symbol_search(public_id, name, qualified_name, file)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![symbol.id, symbol.name, symbol.qualified_name, symbol.file],
+                "INSERT INTO symbol_search(public_id, name, qualified_name, file, segments)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    symbol.id,
+                    symbol.name,
+                    symbol.qualified_name,
+                    symbol.file,
+                    identifier_segments(&format!("{} {}", symbol.name, symbol.qualified_name))
+                        .join(" ")
+                ],
             )?;
         }
         for relationship in &file.relationships {
@@ -725,11 +757,16 @@ impl Store {
         kind: Option<SymbolKind>,
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
-        let escaped = query
-            .split_whitespace()
+        let terms = search_terms(query);
+        if terms.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let escaped = terms
+            .iter()
             .map(|part| format!("\"{}\"*", part.replace('"', "\"\"")))
             .collect::<Vec<_>>()
-            .join(" ");
+            .join(" OR ");
+        let candidate_limit = limit.saturating_mul(4).max(limit);
         let sql = if kind.is_some() {
             "SELECT s.public_id,s.semantic_key,s.language,s.kind,s.name,s.qualified_name,
                     f.path,s.start_byte,s.end_byte,s.start_line,s.end_line,
@@ -750,23 +787,41 @@ impl Store {
         };
         let mut statement = self.connection.prepare(sql)?;
         let mut map_row = |row: &rusqlite::Row<'_>| {
-            Ok(SearchHit {
-                symbol: Self::symbol_from_row(row)?,
-                score: -row.get::<_, f64>(11)?,
-            })
+            let symbol = Self::symbol_from_row(row)?;
+            let mut score = -row.get::<_, f64>(11)?;
+            let normalized_query = query.trim().to_lowercase();
+            let name = symbol.name.to_lowercase();
+            let qualified_name = symbol.qualified_name.to_lowercase();
+            if name == normalized_query || qualified_name == normalized_query {
+                score += 10.0;
+            } else if terms.contains(&name) {
+                score += 6.0;
+            } else if terms.iter().any(|term| name.starts_with(term)) {
+                score += 3.0;
+            }
+            Ok(SearchHit { symbol, score })
         };
-        let hits = if let Some(kind) = kind {
+        let mut hits: Vec<SearchHit> = if let Some(kind) = kind {
             statement
                 .query_map(
-                    params![escaped, kind.to_string(), limit as i64],
+                    params![escaped, kind.to_string(), candidate_limit as i64],
                     &mut map_row,
                 )?
                 .collect::<rusqlite::Result<_>>()?
         } else {
             statement
-                .query_map(params![escaped, limit as i64], &mut map_row)?
+                .query_map(params![escaped, candidate_limit as i64], &mut map_row)?
                 .collect::<rusqlite::Result<_>>()?
         };
+        hits.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.symbol.qualified_name.cmp(&right.symbol.qualified_name))
+                .then_with(|| left.symbol.file.cmp(&right.symbol.file))
+                .then_with(|| left.symbol.id.cmp(&right.symbol.id))
+        });
+        hits.truncate(limit);
         Ok(hits)
     }
 
@@ -896,9 +951,97 @@ fn module_hint_matches(hint: &str, candidate: &str) -> bool {
         || candidate_without_extension.ends_with(&format!("/{hint}/index"))
 }
 
+fn identifier_segments(value: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    for token in value.split(|character: char| !character.is_alphanumeric()) {
+        if token.is_empty() {
+            continue;
+        }
+        let normalized = token.to_lowercase();
+        if !segments.contains(&normalized) {
+            segments.push(normalized);
+        }
+
+        let characters: Vec<char> = token.chars().collect();
+        let mut start = 0;
+        for index in 1..characters.len() {
+            let previous = characters[index - 1];
+            let current = characters[index];
+            let next = characters.get(index + 1).copied();
+            let boundary = (previous.is_lowercase() && current.is_uppercase())
+                || (previous.is_alphabetic() && current.is_numeric())
+                || (previous.is_numeric() && current.is_alphabetic())
+                || (previous.is_uppercase()
+                    && current.is_uppercase()
+                    && next.is_some_and(char::is_lowercase));
+            if boundary {
+                let segment = characters[start..index]
+                    .iter()
+                    .collect::<String>()
+                    .to_lowercase();
+                if !segments.contains(&segment) {
+                    segments.push(segment);
+                }
+                start = index;
+            }
+        }
+        let segment = characters[start..]
+            .iter()
+            .collect::<String>()
+            .to_lowercase();
+        if !segments.contains(&segment) {
+            segments.push(segment);
+        }
+    }
+    segments
+}
+
+fn search_terms(query: &str) -> Vec<String> {
+    const STOP_WORDS: &[&str] = &[
+        "a", "after", "an", "and", "are", "before", "does", "for", "from", "how", "in", "is", "of",
+        "on", "or", "the", "to", "what", "where", "why", "with", "work", "works",
+    ];
+    let all_terms = identifier_segments(query);
+    let meaningful = all_terms
+        .iter()
+        .filter(|term| !STOP_WORDS.contains(&term.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if meaningful.is_empty() {
+        all_terms
+    } else {
+        meaningful
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identifier_vocabulary_splits_common_naming_conventions() {
+        assert_eq!(
+            identifier_segments("HTTPAuthService login_user2"),
+            [
+                "httpauthservice",
+                "http",
+                "auth",
+                "service",
+                "login",
+                "user2",
+                "user",
+                "2"
+            ]
+        );
+    }
+
+    #[test]
+    fn natural_language_search_terms_drop_noise_and_keep_identifiers() {
+        assert_eq!(
+            search_terms("How does AuthService login_user work?"),
+            ["authservice", "auth", "service", "login", "user"]
+        );
+    }
 
     #[test]
     fn additive_migration_upgrades_legacy_reference_table() {

@@ -755,6 +755,38 @@ mod tests {
     }
 
     #[test]
+    fn natural_language_search_matches_identifier_segments() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("auth.ts"),
+            "class AuthService {\n  loginUser() {}\n}\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+
+        let hits = engine
+            .search("How does AuthService loginUser work?", 10)
+            .unwrap();
+        assert!(hits.iter().any(|hit| hit.symbol.name == "AuthService"));
+        assert!(hits.iter().any(|hit| hit.symbol.name == "loginUser"));
+    }
+
+    #[test]
+    fn exact_symbol_name_ranks_before_partial_matches() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("auth.ts"),
+            "class AuthServiceFactory {}\nclass AuthService {}\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+
+        let hits = engine.search("AuthService", 10).unwrap();
+        assert_eq!(hits[0].symbol.name, "AuthService");
+        assert!(hits[0].score > hits[1].score);
+    }
+
+    #[test]
     fn graph_model_upgrade_forces_semantic_reindex() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("main.rs"), "fn main() {}\n").unwrap();
