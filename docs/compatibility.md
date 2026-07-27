@@ -1,7 +1,8 @@
 # CodeGraph compatibility contract
 
 Structurely targets behavioral compatibility at the agent-facing seam, not
-database-file compatibility.
+database-file compatibility. The current contract is audited against CodeGraph
+1.5.0 source commit `572d22bfbe82602080e457bec655f72e3314f9ef`.
 
 Initial compatibility commands:
 
@@ -22,6 +23,11 @@ Initial MCP tools:
 - `codegraph_status`
 - `codegraph_files`
 - `codegraph_node`
+
+Like the pinned upstream version, `tools/list` advertises only
+`codegraph_explore` by default. Set `CODEGRAPH_MCP_TOOLS` to a comma-separated
+list such as `explore,node,search,callers` to advertise additional tools. All
+eight handlers remain callable and available through the CLI.
 
 Existing arguments and required response fields remain compatible. Structurely
 may add `confidence`, `provenance`, and `explanation`. Contract fixtures will

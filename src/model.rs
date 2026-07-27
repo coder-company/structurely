@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path};
 
-pub const GRAPH_MODEL_VERSION: u32 = 7;
+pub const GRAPH_MODEL_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -93,6 +93,8 @@ pub enum SymbolKind {
     Function,
     Method,
     Variable,
+    Route,
+    Component,
 }
 
 impl fmt::Display for SymbolKind {
@@ -108,6 +110,8 @@ impl fmt::Display for SymbolKind {
             Self::Function => "function",
             Self::Method => "method",
             Self::Variable => "variable",
+            Self::Route => "route",
+            Self::Component => "component",
         })
     }
 }

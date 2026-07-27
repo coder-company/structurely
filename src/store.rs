@@ -984,6 +984,8 @@ fn parse_symbol_kind(value: &str) -> SymbolKind {
         "type" => SymbolKind::Type,
         "method" => SymbolKind::Method,
         "variable" => SymbolKind::Variable,
+        "route" => SymbolKind::Route,
+        "component" => SymbolKind::Component,
         _ => SymbolKind::Function,
     }
 }

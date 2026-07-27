@@ -79,7 +79,9 @@ fn handle(engine: &mut Engine, request: Value) -> Result<Option<Value>> {
             "capabilities": { "tools": {} },
             "serverInfo": { "name": "structurely", "version": env!("CARGO_PKG_VERSION") }
         }),
-        "tools/list" => json!({ "tools": tool_definitions() }),
+        "tools/list" => json!({ "tools": enabled_tool_definitions(
+            std::env::var("CODEGRAPH_MCP_TOOLS").ok().as_deref()
+        ) }),
         "tools/call" => {
             let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
             if !params.is_object() {
@@ -119,7 +121,10 @@ fn tool_definitions() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string" },
-                    "kind": { "type": "string" },
+                    "kind": {
+                        "type": "string",
+                        "enum": ["function", "method", "class", "interface", "type", "variable", "route", "component"]
+                    },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 10 },
                     "projectPath": { "type": "string" }
                 },
@@ -202,6 +207,29 @@ fn tool_definitions() -> Vec<Value> {
             "annotations": read_only_annotations()
         }),
     ]
+}
+
+fn enabled_tool_definitions(configured: Option<&str>) -> Vec<Value> {
+    let configured = configured.unwrap_or("explore");
+    let enabled = configured
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| {
+            name.strip_prefix("codegraph_")
+                .unwrap_or(name)
+                .to_lowercase()
+        })
+        .collect::<std::collections::HashSet<_>>();
+    tool_definitions()
+        .into_iter()
+        .filter(|tool| {
+            tool["name"]
+                .as_str()
+                .and_then(|name| name.strip_prefix("codegraph_"))
+                .is_some_and(|name| enabled.contains(name))
+        })
+        .collect()
 }
 
 fn relationship_tool(name: &str, description: &str) -> Value {
@@ -386,6 +414,8 @@ fn parse_symbol_kind(value: &str) -> Option<crate::model::SymbolKind> {
         "trait" => Some(SymbolKind::Trait),
         "enum" => Some(SymbolKind::Enum),
         "type" => Some(SymbolKind::Type),
+        "route" => Some(SymbolKind::Route),
+        "component" => Some(SymbolKind::Component),
         _ => None,
     }
 }
@@ -560,6 +590,62 @@ mod tests {
         assert_eq!(
             schema["inputSchema"]["properties"]["limit"]["type"],
             "integer"
+        );
+    }
+
+    #[test]
+    fn upstream_compatible_tool_listing_defaults_to_explore_only() {
+        let defaults = enabled_tool_definitions(None);
+        assert_eq!(defaults.len(), 1);
+        assert_eq!(defaults[0]["name"], "codegraph_explore");
+
+        let selected = enabled_tool_definitions(Some("explore,node,codegraph_search"));
+        let names = selected
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            ["codegraph_search", "codegraph_explore", "codegraph_node"]
+        );
+    }
+
+    #[test]
+    fn pinned_upstream_contract_fields_remain_supported() {
+        let contract: Value = serde_json::from_str(include_str!(
+            "../fixtures/codegraph-1.5.0-mcp-contract.json"
+        ))
+        .unwrap();
+        let definitions = tool_definitions();
+        for (name, expected) in contract["tools"].as_object().unwrap() {
+            let definition = definitions
+                .iter()
+                .find(|tool| tool["name"] == *name)
+                .unwrap_or_else(|| panic!("missing upstream tool {name}"));
+            let properties = definition["inputSchema"]["properties"].as_object().unwrap();
+            for property in expected["properties"].as_array().unwrap() {
+                assert!(
+                    properties.contains_key(property.as_str().unwrap()),
+                    "{name} is missing upstream property {property}"
+                );
+            }
+            let required = definition["inputSchema"]["required"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            assert_eq!(
+                required,
+                *expected["required"].as_array().unwrap(),
+                "{name}"
+            );
+        }
+        let defaults = enabled_tool_definitions(None);
+        assert_eq!(
+            defaults
+                .iter()
+                .map(|tool| tool["name"].clone())
+                .collect::<Vec<_>>(),
+            *contract["defaultTools"].as_array().unwrap()
         );
     }
 }

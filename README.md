@@ -62,7 +62,7 @@ Configure an MCP client to execute:
 structurely serve --mcp --path /path/to/project
 ```
 
-The current compatibility surface exposes:
+The current compatibility surface implements:
 
 - `codegraph_search`
 - `codegraph_explore`
@@ -72,6 +72,10 @@ The current compatibility surface exposes:
 - `codegraph_status`
 - `codegraph_files`
 - `codegraph_node`
+
+Only `codegraph_explore` is advertised to MCP clients by default, matching
+CodeGraph 1.5.0. Set `CODEGRAPH_MCP_TOOLS=explore,node,search,callers` (or
+another comma-separated selection) to advertise narrower tools.
 
 Every relationship result includes its confidence, provenance, source location,
 and explanation. Tool inputs are validated and collection sizes are bounded so

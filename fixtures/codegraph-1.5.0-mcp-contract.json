@@ -1,0 +1,39 @@
+{
+  "version": "1.5.0",
+  "commit": "572d22bfbe82602080e457bec655f72e3314f9ef",
+  "defaultTools": ["codegraph_explore"],
+  "tools": {
+    "codegraph_search": {
+      "required": ["query"],
+      "properties": ["query", "kind", "limit", "projectPath"]
+    },
+    "codegraph_callers": {
+      "required": ["symbol"],
+      "properties": ["symbol", "file", "limit", "projectPath"]
+    },
+    "codegraph_callees": {
+      "required": ["symbol"],
+      "properties": ["symbol", "file", "limit", "projectPath"]
+    },
+    "codegraph_impact": {
+      "required": ["symbol"],
+      "properties": ["symbol", "file", "depth", "projectPath"]
+    },
+    "codegraph_node": {
+      "required": [],
+      "properties": ["symbol", "includeCode", "file", "offset", "limit", "symbolsOnly", "line", "projectPath"]
+    },
+    "codegraph_explore": {
+      "required": ["query"],
+      "properties": ["query", "maxFiles", "projectPath"]
+    },
+    "codegraph_status": {
+      "required": [],
+      "properties": ["projectPath"]
+    },
+    "codegraph_files": {
+      "required": [],
+      "properties": ["path", "pattern", "format", "includeMetadata", "projectPath"]
+    }
+  }
+}
