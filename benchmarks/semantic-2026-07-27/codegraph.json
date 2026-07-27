@@ -1,0 +1,9 @@
+{
+  "version": "1.5.0",
+  "commit": "572d22bfbe82602080e457bec655f72e3314f9ef",
+  "fresh_index_ms": 357,
+  "query_p50_us": 209776,
+  "query_p95_us": 222714,
+  "database_bytes": 159973,
+  "max_rss_kb": 287428
+}

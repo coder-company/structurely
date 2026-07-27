@@ -48,6 +48,12 @@ The comparator reports speedup ratios and preserves the raw normalized values.
 Semantic precision and recall must be reported separately; faster incorrect
 edges do not satisfy Structurely's acceptance gates.
 
+Checked-in raw comparisons live under `benchmarks/`. The
+[`semantic-2026-07-27`](../benchmarks/semantic-2026-07-27/README.md) run compares
+Structurely with pinned CodeGraph 1.5.0 on the four-file semantic fixture. It is
+explicitly a startup smoke test; large-repository claims require a separate
+pinned run.
+
 ## Semantic quality
 
 Quality manifests list expected caller/callee edges by language. Evaluate a

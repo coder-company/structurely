@@ -126,10 +126,8 @@ fn main() -> Result<()> {
         }
         Command::Explore { query, path, limit } => {
             let engine = Engine::open(path)?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&engine.explore(&query, limit)?)?
-            );
+            let hits = engine.explore(&query, limit)?;
+            print!("{}", mcp::format_explore_text(&engine, &query, &hits)?);
         }
         Command::Callers {
             symbol,

@@ -276,6 +276,7 @@ fn call_tool(engine: &mut Engine, params: &Value) -> Result<Value> {
 }
 
 fn dispatch_tool(engine: &Engine, name: &str, arguments: &Value) -> Result<Value> {
+    let mut text_override = None;
     let payload = match name {
         "codegraph_search" => {
             let query = required_string(arguments, "query")?;
@@ -296,7 +297,9 @@ fn dispatch_tool(engine: &Engine, name: &str, arguments: &Value) -> Result<Value
         "codegraph_explore" => {
             let query = required_string(arguments, "query")?;
             let max_files = number_argument(arguments, "maxFiles", 12, 100)?;
-            serde_json::to_value(engine.explore(query, max_files)?)?
+            let hits = engine.explore(query, max_files)?;
+            text_override = Some(format_explore_text(engine, query, &hits)?);
+            serde_json::to_value(hits)?
         }
         "codegraph_callers" => {
             let symbol = required_string(arguments, "symbol")?;
@@ -372,11 +375,71 @@ fn dispatch_tool(engine: &Engine, name: &str, arguments: &Value) -> Result<Value
             )
         }
     };
+    let text = match text_override {
+        Some(text) => text,
+        None => serde_json::to_string_pretty(&payload)?,
+    };
     Ok(json!({
-        "content": [{ "type": "text", "text": serde_json::to_string_pretty(&payload)? }],
+        "content": [{ "type": "text", "text": text }],
         "structuredContent": payload,
         "isError": false
     }))
+}
+
+pub fn format_explore_text(
+    engine: &Engine,
+    query: &str,
+    hits: &[crate::engine::ExploreHit],
+) -> Result<String> {
+    use std::collections::BTreeMap;
+    use std::fmt::Write as _;
+
+    let mut files = BTreeMap::<&str, Vec<&crate::engine::ExploreHit>>::new();
+    for hit in hits {
+        files.entry(&hit.symbol.file).or_default().push(hit);
+    }
+    let mut output = format!(
+        "**Exploration: {query}**\n\nFound {} symbols across {} files.\n",
+        hits.len(),
+        files.len()
+    );
+    if !hits.is_empty() {
+        output.push_str("\n**Blast radius — what depends on these**\n\n");
+        for hit in hits.iter().filter(|hit| !hit.callers.is_empty()) {
+            writeln!(
+                output,
+                "- `{}` ({}:{}) — {} caller{}",
+                hit.symbol.qualified_name,
+                hit.symbol.file,
+                hit.symbol.start_line,
+                hit.callers.len(),
+                if hit.callers.len() == 1 { "" } else { "s" }
+            )?;
+        }
+    }
+    output.push_str(
+        "\n**Source Code**\n\n\
+         > Verbatim, current on-disk source, line-numbered for direct use.\n",
+    );
+    for (file, file_hits) in files {
+        let node = engine.node(None, Some(file), true, None, None, false)?;
+        let source = node
+            .files
+            .first()
+            .and_then(|entry| entry.source.as_deref())
+            .unwrap_or_default();
+        let symbols = file_hits
+            .iter()
+            .map(|hit| format!("{}({})", hit.symbol.name, hit.symbol.kind))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let language = file_hits[0].symbol.language.to_string();
+        write!(
+            output,
+            "\n**`{file}`** — {symbols}\n\n```{language}\n{source}\n```\n"
+        )?;
+    }
+    Ok(output)
 }
 
 fn required_string<'a>(arguments: &'a Value, name: &str) -> Result<&'a str> {
@@ -465,6 +528,10 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("function callee"));
+        let text = explored["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("**Exploration: callee**"));
+        assert!(text.contains("**Source Code**"));
+        assert!(text.contains("1\tfunction caller()"));
     }
 
     #[test]
