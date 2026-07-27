@@ -1,6 +1,6 @@
 use crate::model::{
     Evidence, FileFacts, Language, Relationship, RelationshipKind, SourceSpan, Symbol, SymbolKind,
-    UnresolvedCall,
+    UnresolvedCall, UnresolvedReference,
 };
 use anyhow::{anyhow, Context, Result};
 use std::path::Path;
@@ -62,6 +62,14 @@ pub(crate) fn parse_file(relative_path: &str, source: &str) -> Result<FileFacts>
         &symbols,
         &mut unresolved_calls,
     );
+    let mut unresolved_references = Vec::new();
+    collect_structural_references(
+        tree.root_node(),
+        source_bytes,
+        relative_path,
+        &symbols,
+        &mut unresolved_references,
+    );
 
     Ok(FileFacts {
         path: relative_path.to_owned(),
@@ -70,7 +78,227 @@ pub(crate) fn parse_file(relative_path: &str, source: &str) -> Result<FileFacts>
         symbols,
         relationships,
         unresolved_calls,
+        unresolved_references,
     })
+}
+
+fn collect_structural_references(
+    node: Node<'_>,
+    source: &[u8],
+    file: &str,
+    symbols: &[Symbol],
+    output: &mut Vec<UnresolvedReference>,
+) {
+    match node.kind() {
+        "import_specifier" => {
+            if let (Some(file_symbol), Some(name)) =
+                (symbols.first(), node.child_by_field_name("name"))
+            {
+                push_reference(
+                    output,
+                    file_symbol,
+                    node_text(name, source),
+                    RelationshipKind::Imports,
+                    ReferenceEvidence {
+                        provenance: "tree-sitter/import",
+                        confidence: 0.9,
+                        file,
+                        line: node.start_position().row + 1,
+                    },
+                );
+            }
+        }
+        "import_from_statement" => {
+            if let Some(file_symbol) = symbols.first() {
+                let module = node.child_by_field_name("module_name");
+                let mut names = Vec::new();
+                collect_identifier_nodes(node, source, &mut names);
+                names.retain(|(candidate, start, end)| {
+                    module.is_none_or(|module| {
+                        *start < module.start_byte() || *end > module.end_byte()
+                    }) && candidate != "as"
+                });
+                names.sort();
+                names.dedup();
+                for (name, _, _) in names {
+                    push_reference(
+                        output,
+                        file_symbol,
+                        name,
+                        RelationshipKind::Imports,
+                        ReferenceEvidence {
+                            provenance: "tree-sitter/import",
+                            confidence: 0.9,
+                            file,
+                            line: node.start_position().row + 1,
+                        },
+                    );
+                }
+            }
+        }
+        "use_declaration" => {
+            if let Some(file_symbol) = symbols.first() {
+                let mut names = Vec::new();
+                collect_identifier_nodes(node, source, &mut names);
+                if let Some((name, _, _)) = names.last() {
+                    push_reference(
+                        output,
+                        file_symbol,
+                        name.clone(),
+                        RelationshipKind::Imports,
+                        ReferenceEvidence {
+                            provenance: "tree-sitter/import",
+                            confidence: 0.85,
+                            file,
+                            line: node.start_position().row + 1,
+                        },
+                    );
+                }
+            }
+        }
+        "class_declaration" | "interface_declaration" | "class_definition" => {
+            if let Some(source_symbol) = symbols
+                .iter()
+                .find(|symbol| symbol.start_byte == node.start_byte())
+            {
+                collect_heritage(node, source, file, source_symbol, output);
+            }
+        }
+        _ => {}
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_structural_references(child, source, file, symbols, output);
+    }
+}
+
+fn collect_heritage(
+    declaration: Node<'_>,
+    source: &[u8],
+    file: &str,
+    source_symbol: &Symbol,
+    output: &mut Vec<UnresolvedReference>,
+) {
+    let mut cursor = declaration.walk();
+    for child in declaration.named_children(&mut cursor) {
+        let kind = match child.kind() {
+            "class_heritage" => None,
+            "superclasses" => Some(RelationshipKind::Extends),
+            _ => continue,
+        };
+        if child.kind() == "class_heritage" {
+            let mut heritage_cursor = child.walk();
+            for clause in child.named_children(&mut heritage_cursor) {
+                let relationship_kind = match clause.kind() {
+                    "extends_clause" | "extends_type_clause" => RelationshipKind::Extends,
+                    "implements_clause" => RelationshipKind::Implements,
+                    _ => continue,
+                };
+                push_heritage_names(
+                    clause,
+                    source,
+                    file,
+                    source_symbol,
+                    relationship_kind,
+                    output,
+                );
+            }
+        } else if let Some(relationship_kind) = kind {
+            push_heritage_names(
+                child,
+                source,
+                file,
+                source_symbol,
+                relationship_kind,
+                output,
+            );
+        }
+    }
+    if let Some(superclasses) = declaration.child_by_field_name("superclasses") {
+        push_heritage_names(
+            superclasses,
+            source,
+            file,
+            source_symbol,
+            RelationshipKind::Extends,
+            output,
+        );
+    }
+}
+
+fn push_heritage_names(
+    node: Node<'_>,
+    source: &[u8],
+    file: &str,
+    source_symbol: &Symbol,
+    kind: RelationshipKind,
+    output: &mut Vec<UnresolvedReference>,
+) {
+    let mut names = Vec::new();
+    collect_identifier_nodes(node, source, &mut names);
+    names.sort();
+    names.dedup();
+    for (name, _, _) in names {
+        push_reference(
+            output,
+            source_symbol,
+            name,
+            kind,
+            ReferenceEvidence {
+                provenance: "tree-sitter/heritage",
+                confidence: 0.95,
+                file,
+                line: node.start_position().row + 1,
+            },
+        );
+    }
+}
+
+fn push_reference(
+    output: &mut Vec<UnresolvedReference>,
+    source: &Symbol,
+    target_name: String,
+    kind: RelationshipKind,
+    evidence: ReferenceEvidence<'_>,
+) {
+    if target_name.is_empty() || target_name == source.name {
+        return;
+    }
+    output.push(UnresolvedReference {
+        source_id: source.id.clone(),
+        explanation: format!("{kind} reference to {target_name}"),
+        target_name,
+        kind,
+        provenance: evidence.provenance.to_owned(),
+        confidence: evidence.confidence,
+        file: evidence.file.to_owned(),
+        line: evidence.line,
+    });
+}
+
+struct ReferenceEvidence<'a> {
+    provenance: &'a str,
+    confidence: f64,
+    file: &'a str,
+    line: usize,
+}
+
+fn collect_identifier_nodes(
+    node: Node<'_>,
+    source: &[u8],
+    output: &mut Vec<(String, usize, usize)>,
+) {
+    if matches!(
+        node.kind(),
+        "identifier" | "type_identifier" | "property_identifier"
+    ) {
+        output.push((node_text(node, source), node.start_byte(), node.end_byte()));
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_identifier_nodes(child, source, output);
+    }
 }
 
 fn parse_tree(language: Language, source: &str) -> Result<Tree> {
@@ -101,19 +329,20 @@ fn collect_symbols(
     let declaration = declaration_at(node, source, container);
     let declaration_container = declaration
         .as_ref()
-        .map(|(qualified, _, _)| qualified.clone())
+        .map(|(qualified, _, _, _)| qualified.clone())
         .or_else(|| container.map(str::to_owned));
     let next_container = rust_impl_container(node, source, container).or(declaration_container);
 
-    if let Some((qualified_name, kind, name_node)) = declaration {
+    if let Some((qualified_name, kind, name_node, discriminator)) = declaration {
         let name = node_text(name_node, source);
-        output.push(Symbol::new(
+        output.push(Symbol::new_disambiguated(
             language,
             kind,
             name,
             qualified_name,
             file,
             span(node),
+            &discriminator,
         ));
     }
 
@@ -134,13 +363,14 @@ fn declaration_at<'a>(
     node: Node<'a>,
     source: &[u8],
     container: Option<&str>,
-) -> Option<(String, SymbolKind, Node<'a>)> {
+) -> Option<(String, SymbolKind, Node<'a>, String)> {
     let (kind, name_node) = match node.kind() {
         "class_declaration" | "class_definition" => {
             (SymbolKind::Class, node.child_by_field_name("name")?)
         }
         "interface_declaration" => (SymbolKind::Interface, node.child_by_field_name("name")?),
         "function_declaration"
+        | "function_signature"
         | "generator_function_declaration"
         | "function_definition"
         | "function_item" => (SymbolKind::Function, node.child_by_field_name("name")?),
@@ -166,7 +396,24 @@ fn declaration_at<'a>(
     let qualified = container
         .map(|parent| format!("{parent}.{name}"))
         .unwrap_or_else(|| name.clone());
-    Some((qualified, kind, name_node))
+    let discriminator = callable_discriminator(node, source, kind);
+    Some((qualified, kind, name_node, discriminator))
+}
+
+fn callable_discriminator(node: Node<'_>, source: &[u8], kind: SymbolKind) -> String {
+    if !matches!(kind, SymbolKind::Function | SymbolKind::Method) {
+        return String::new();
+    }
+    ["parameters", "return_type"]
+        .into_iter()
+        .filter_map(|field| node.child_by_field_name(field))
+        .map(|child| normalize_signature(&node_text(child, source)))
+        .collect::<Vec<_>>()
+        .join("->")
+}
+
+fn normalize_signature(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn rust_impl_container(node: Node<'_>, source: &[u8], parent: Option<&str>) -> Option<String> {
@@ -318,5 +565,33 @@ mod tests {
         assert!(names.contains(&"Greeter.greet"));
         assert!(names.contains(&"helper"));
         assert_eq!(facts.unresolved_calls[0].callee_name, "helper");
+    }
+
+    #[test]
+    fn overload_ids_use_signatures_not_source_positions() {
+        let before = parse_file(
+            "overloads.ts",
+            "function parse(value: string): string;\nfunction parse(value: number): string;\n",
+        )
+        .unwrap();
+        let after = parse_file(
+            "overloads.ts",
+            "// moved\nfunction parse(value: string): string;\n\nfunction parse(value: number): string;\n",
+        )
+        .unwrap();
+        let before_ids: Vec<_> = before
+            .symbols
+            .iter()
+            .skip(1)
+            .map(|symbol| &symbol.id)
+            .collect();
+        let after_ids: Vec<_> = after
+            .symbols
+            .iter()
+            .skip(1)
+            .map(|symbol| &symbol.id)
+            .collect();
+        assert_eq!(before_ids, after_ids);
+        assert_ne!(before_ids[0], before_ids[1]);
     }
 }

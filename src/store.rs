@@ -129,6 +129,20 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS unresolved_calls_name_idx
                 ON unresolved_calls(callee_name);
+            CREATE TABLE IF NOT EXISTS unresolved_references (
+                id INTEGER PRIMARY KEY,
+                file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                source_public_id TEXT NOT NULL,
+                target_name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                provenance TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                explanation TEXT NOT NULL,
+                evidence_file TEXT NOT NULL,
+                evidence_line INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS unresolved_references_name_idx
+                ON unresolved_references(target_name,kind);
             INSERT OR IGNORE INTO metadata(key, value) VALUES ('graph_epoch', '0');
             COMMIT;
             ",
@@ -368,6 +382,25 @@ impl Store {
                 ],
             )?;
         }
+        for reference in &file.unresolved_references {
+            tx.execute(
+                "INSERT INTO unresolved_references(
+                    file_id,source_public_id,target_name,kind,provenance,confidence,
+                    explanation,evidence_file,evidence_line
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![
+                    file_id,
+                    reference.source_id,
+                    reference.target_name,
+                    reference.kind.to_string(),
+                    reference.provenance,
+                    reference.confidence,
+                    reference.explanation,
+                    reference.file,
+                    reference.line as i64
+                ],
+            )?;
+        }
         Ok(())
     }
 
@@ -427,6 +460,93 @@ impl Store {
                             } else {
                                 format!(
                                     "call name has multiple candidates; {qualified_name} is a possible target"
+                                )
+                            },
+                            &file,
+                            line,
+                        ),
+                    },
+                )?;
+                resolved += 1;
+            }
+        }
+        resolved += Self::resolve_structural_references(tx)?;
+        Ok(resolved)
+    }
+
+    fn resolve_structural_references(tx: &Transaction<'_>) -> Result<usize> {
+        tx.execute(
+            "DELETE FROM relationships
+             WHERE provenance IN ('tree-sitter/import','tree-sitter/heritage')",
+            [],
+        )?;
+        let mut reference_statement = tx.prepare(
+            "SELECT u.source_public_id,u.target_name,u.kind,u.provenance,u.confidence,
+                    u.explanation,u.evidence_file,u.evidence_line,s.language
+             FROM unresolved_references u
+             JOIN symbols s ON s.public_id=u.source_public_id
+             ORDER BY u.evidence_file,u.evidence_line,u.id",
+        )?;
+        let references = reference_statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, f64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)? as usize,
+                    row.get::<_, String>(8)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(reference_statement);
+
+        let mut resolved = 0;
+        for (
+            source_id,
+            target_name,
+            kind,
+            provenance,
+            base_confidence,
+            explanation,
+            file,
+            line,
+            language,
+        ) in references
+        {
+            let mut target_statement = tx.prepare(
+                "SELECT public_id,qualified_name FROM symbols
+                 WHERE name=?1 AND public_id<>?2 AND language=?3
+                 ORDER BY qualified_name,public_id",
+            )?;
+            let targets = target_statement
+                .query_map(params![target_name, source_id, language], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let confidence = if targets.len() == 1 {
+                base_confidence
+            } else {
+                base_confidence.min(0.55)
+            };
+            for (target_id, qualified_name) in targets {
+                Self::insert_relationship(
+                    tx,
+                    &Relationship {
+                        source_id: source_id.clone(),
+                        target_id,
+                        kind: parse_relationship_kind(&kind),
+                        evidence: Evidence::new(
+                            &provenance,
+                            confidence,
+                            if confidence == base_confidence {
+                                explanation.clone()
+                            } else {
+                                format!(
+                                    "{explanation}; {qualified_name} is one of multiple candidates"
                                 )
                             },
                             &file,

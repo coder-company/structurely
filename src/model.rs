@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path};
 
-pub const GRAPH_MODEL_VERSION: u32 = 2;
+pub const GRAPH_MODEL_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -97,10 +97,30 @@ impl Symbol {
         file: impl Into<String>,
         span: SourceSpan,
     ) -> Self {
+        Self::new_disambiguated(language, kind, name, qualified_name, file, span, "")
+    }
+
+    pub fn new_disambiguated(
+        language: Language,
+        kind: SymbolKind,
+        name: impl Into<String>,
+        qualified_name: impl Into<String>,
+        file: impl Into<String>,
+        span: SourceSpan,
+        discriminator: &str,
+    ) -> Self {
         let name = name.into();
         let qualified_name = qualified_name.into();
         let file = file.into();
-        let semantic_key = format!("{language}|{kind}|{file}|{qualified_name}");
+        let semantic_key = if discriminator.is_empty() {
+            format!("{language}|{kind}|{file}|{qualified_name}")
+        } else {
+            let signature = blake3::hash(discriminator.as_bytes()).to_hex();
+            format!(
+                "{language}|{kind}|{file}|{qualified_name}|signature:{}",
+                &signature[..16]
+            )
+        };
         let digest = blake3::hash(semantic_key.as_bytes()).to_hex();
         Self {
             id: format!("sym_{}", &digest[..24]),
@@ -192,6 +212,18 @@ pub(crate) struct UnresolvedCall {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct UnresolvedReference {
+    pub source_id: String,
+    pub target_name: String,
+    pub kind: RelationshipKind,
+    pub provenance: String,
+    pub confidence: f64,
+    pub explanation: String,
+    pub file: String,
+    pub line: usize,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct FileFacts {
     pub path: String,
     pub content_hash: String,
@@ -199,6 +231,7 @@ pub(crate) struct FileFacts {
     pub symbols: Vec<Symbol>,
     pub relationships: Vec<Relationship>,
     pub unresolved_calls: Vec<UnresolvedCall>,
+    pub unresolved_references: Vec<UnresolvedReference>,
 }
 
 #[cfg(test)]

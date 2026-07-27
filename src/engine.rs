@@ -739,4 +739,46 @@ mod tests {
         assert!(report.symbols >= 2);
         assert!(report.database_bytes > 0);
     }
+
+    #[test]
+    fn resolves_import_extends_and_implements_with_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("base.ts"),
+            "export class Base {}\nexport interface Contract {}\nexport function helper() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("child.ts"),
+            "import { helper } from './base';\nclass Child extends Base implements Contract {}\nfunction run() { helper(); }\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let snapshot = engine.snapshot().unwrap();
+        let id = |name: &str| {
+            snapshot
+                .symbols
+                .iter()
+                .find(|symbol| symbol.name == name)
+                .unwrap()
+                .id
+                .clone()
+        };
+        let expected = [
+            (id("child.ts"), id("helper"), RelationshipKind::Imports),
+            (id("Child"), id("Base"), RelationshipKind::Extends),
+            (id("Child"), id("Contract"), RelationshipKind::Implements),
+        ];
+        for (source, target, kind) in expected {
+            let relationship = snapshot
+                .relationships
+                .iter()
+                .find(|edge| {
+                    edge.source_id == source && edge.target_id == target && edge.kind == kind
+                })
+                .unwrap_or_else(|| panic!("missing {kind} relationship"));
+            assert!(relationship.evidence.provenance.starts_with("tree-sitter/"));
+            assert!(relationship.evidence.confidence >= 0.9);
+        }
+    }
 }
