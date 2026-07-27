@@ -1,0 +1,5 @@
+/target/
+/.structurely/
+*.db-wal
+*.db-shm
+
