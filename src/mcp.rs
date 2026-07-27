@@ -360,6 +360,7 @@ fn parse_symbol_kind(value: &str) -> Option<crate::model::SymbolKind> {
         "struct" => Some(SymbolKind::Struct),
         "trait" => Some(SymbolKind::Trait),
         "enum" => Some(SymbolKind::Enum),
+        "type" => Some(SymbolKind::Type),
         _ => None,
     }
 }

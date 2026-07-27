@@ -309,6 +309,9 @@ fn parse_tree(language: Language, source: &str) -> Result<Tree> {
         Language::JavaScript | Language::Jsx => tree_sitter_javascript::LANGUAGE,
         Language::Python => tree_sitter_python::LANGUAGE,
         Language::Rust => tree_sitter_rust::LANGUAGE,
+        Language::Go => tree_sitter_go::LANGUAGE,
+        Language::Java => tree_sitter_java::LANGUAGE,
+        Language::CSharp => tree_sitter_c_sharp::LANGUAGE,
     };
     parser
         .set_language(&grammar.into())
@@ -377,6 +380,10 @@ fn declaration_at<'a>(
         "method_definition" | "method_signature" => {
             (SymbolKind::Method, node.child_by_field_name("name")?)
         }
+        "method_declaration" | "constructor_declaration" => {
+            (SymbolKind::Method, node.child_by_field_name("name")?)
+        }
+        "local_function_statement" => (SymbolKind::Function, node.child_by_field_name("name")?),
         "variable_declarator" => {
             let value = node.child_by_field_name("value")?;
             if !matches!(value.kind(), "arrow_function" | "function_expression") {
@@ -387,6 +394,19 @@ fn declaration_at<'a>(
         "struct_item" => (SymbolKind::Struct, node.child_by_field_name("name")?),
         "trait_item" => (SymbolKind::Trait, node.child_by_field_name("name")?),
         "enum_item" => (SymbolKind::Enum, node.child_by_field_name("name")?),
+        "struct_declaration" | "record_declaration" => {
+            (SymbolKind::Struct, node.child_by_field_name("name")?)
+        }
+        "enum_declaration" => (SymbolKind::Enum, node.child_by_field_name("name")?),
+        "type_spec" => {
+            let value = node.child_by_field_name("type")?;
+            let kind = match value.kind() {
+                "struct_type" => SymbolKind::Struct,
+                "interface_type" => SymbolKind::Interface,
+                _ => SymbolKind::Type,
+            };
+            (kind, node.child_by_field_name("name")?)
+        }
         _ => return None,
     };
     let name = node_text(name_node, source);
@@ -436,8 +456,15 @@ fn collect_calls(
     symbols: &[Symbol],
     output: &mut Vec<UnresolvedCall>,
 ) {
-    if matches!(node.kind(), "call_expression" | "call") {
-        if let Some(function) = node.child_by_field_name("function") {
+    if matches!(
+        node.kind(),
+        "call_expression"
+            | "call"
+            | "method_invocation"
+            | "invocation_expression"
+            | "object_creation_expression"
+    ) {
+        if let Some(function) = call_target_node(node) {
             if let Some(name) = call_name(function, source) {
                 let caller = symbols
                     .iter()
@@ -465,6 +492,17 @@ fn collect_calls(
     }
 }
 
+fn call_target_node(node: Node<'_>) -> Option<Node<'_>> {
+    match node.kind() {
+        "method_invocation" => node.child_by_field_name("name"),
+        "object_creation_expression" => node.child_by_field_name("type"),
+        "invocation_expression" => node
+            .child_by_field_name("function")
+            .or_else(|| node.named_child(0)),
+        _ => node.child_by_field_name("function"),
+    }
+}
+
 fn call_name(node: Node<'_>, source: &[u8]) -> Option<String> {
     match node.kind() {
         "identifier" | "property_identifier" | "field_identifier" | "type_identifier" => {
@@ -478,6 +516,10 @@ fn call_name(node: Node<'_>, source: &[u8]) -> Option<String> {
             .map(|attribute| node_text(attribute, source)),
         "field_expression" => node
             .child_by_field_name("field")
+            .map(|field| node_text(field, source)),
+        "field_access" | "member_access_expression" => node
+            .child_by_field_name("name")
+            .or_else(|| node.child_by_field_name("field"))
             .map(|field| node_text(field, source)),
         "scoped_identifier" | "scoped_type_identifier" => node
             .child_by_field_name("name")
@@ -593,5 +635,59 @@ mod tests {
             .collect();
         assert_eq!(before_ids, after_ids);
         assert_ne!(before_ids[0], before_ids[1]);
+    }
+
+    #[test]
+    fn extracts_go_declarations_methods_and_calls() {
+        let facts = parse_file(
+            "server/server.go",
+            "package server\n\ntype Server struct{}\nfunc (s *Server) Run() { helper() }\nfunc helper() {}\n",
+        )
+        .unwrap();
+        let symbols: Vec<_> = facts
+            .symbols
+            .iter()
+            .map(|symbol| (symbol.name.as_str(), symbol.kind))
+            .collect();
+        assert!(symbols.contains(&("Server", SymbolKind::Struct)));
+        assert!(symbols.contains(&("Run", SymbolKind::Method)));
+        assert!(symbols.contains(&("helper", SymbolKind::Function)));
+        assert_eq!(facts.unresolved_calls[0].callee_name, "helper");
+    }
+
+    #[test]
+    fn extracts_java_declarations_methods_and_calls() {
+        let facts = parse_file(
+            "src/Greeter.java",
+            "class Greeter { void greet() { helper(); } void helper() {} }\n",
+        )
+        .unwrap();
+        let names: Vec<_> = facts
+            .symbols
+            .iter()
+            .map(|symbol| symbol.qualified_name.as_str())
+            .collect();
+        assert!(names.contains(&"Greeter"));
+        assert!(names.contains(&"Greeter.greet"));
+        assert!(names.contains(&"Greeter.helper"));
+        assert_eq!(facts.unresolved_calls[0].callee_name, "helper");
+    }
+
+    #[test]
+    fn extracts_csharp_declarations_methods_and_calls() {
+        let facts = parse_file(
+            "src/Greeter.cs",
+            "class Greeter { void Greet() { Helper(); } void Helper() {} }\n",
+        )
+        .unwrap();
+        let names: Vec<_> = facts
+            .symbols
+            .iter()
+            .map(|symbol| symbol.qualified_name.as_str())
+            .collect();
+        assert!(names.contains(&"Greeter"));
+        assert!(names.contains(&"Greeter.Greet"));
+        assert!(names.contains(&"Greeter.Helper"));
+        assert_eq!(facts.unresolved_calls[0].callee_name, "Helper");
     }
 }

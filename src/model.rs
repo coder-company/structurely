@@ -14,6 +14,10 @@ pub enum Language {
     Jsx,
     Python,
     Rust,
+    Go,
+    Java,
+    #[serde(rename = "csharp")]
+    CSharp,
 }
 
 impl Language {
@@ -25,6 +29,9 @@ impl Language {
             "jsx" => Some(Self::Jsx),
             "py" | "pyi" => Some(Self::Python),
             "rs" => Some(Self::Rust),
+            "go" => Some(Self::Go),
+            "java" => Some(Self::Java),
+            "cs" => Some(Self::CSharp),
             _ => None,
         }
     }
@@ -39,6 +46,9 @@ impl fmt::Display for Language {
             Self::Jsx => "jsx",
             Self::Python => "python",
             Self::Rust => "rust",
+            Self::Go => "go",
+            Self::Java => "java",
+            Self::CSharp => "csharp",
         })
     }
 }
@@ -52,6 +62,7 @@ pub enum SymbolKind {
     Struct,
     Trait,
     Enum,
+    Type,
     Function,
     Method,
     Variable,
@@ -66,6 +77,7 @@ impl fmt::Display for SymbolKind {
             Self::Struct => "struct",
             Self::Trait => "trait",
             Self::Enum => "enum",
+            Self::Type => "type",
             Self::Function => "function",
             Self::Method => "method",
             Self::Variable => "variable",

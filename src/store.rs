@@ -727,6 +727,9 @@ fn parse_language(value: &str) -> Language {
         "jsx" => Language::Jsx,
         "python" => Language::Python,
         "rust" => Language::Rust,
+        "go" => Language::Go,
+        "java" => Language::Java,
+        "csharp" => Language::CSharp,
         _ => Language::TypeScript,
     }
 }
@@ -739,6 +742,7 @@ fn parse_symbol_kind(value: &str) -> SymbolKind {
         "struct" => SymbolKind::Struct,
         "trait" => SymbolKind::Trait,
         "enum" => SymbolKind::Enum,
+        "type" => SymbolKind::Type,
         "method" => SymbolKind::Method,
         "variable" => SymbolKind::Variable,
         _ => SymbolKind::Function,
