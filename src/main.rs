@@ -65,6 +65,18 @@ enum Command {
         #[arg(long, default_value_t = 2)]
         depth: usize,
     },
+    Snapshot {
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+    },
+    Benchmark {
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value = "main")]
+        query: String,
+        #[arg(long, default_value_t = 20)]
+        iterations: usize,
+    },
     Serve {
         #[arg(long)]
         mcp: bool,
@@ -148,6 +160,27 @@ fn main() -> Result<()> {
                     file.as_deref(),
                     depth
                 )?)?
+            );
+        }
+        Command::Snapshot { path } => {
+            let engine = Engine::open(path)?;
+            println!("{}", serde_json::to_string_pretty(&engine.snapshot()?)?);
+        }
+        Command::Benchmark {
+            path,
+            query,
+            iterations,
+        } => {
+            let (mut engine, initial) = if path.join(structurely::engine::PROJECT_DIR).exists() {
+                let mut engine = Engine::open(&path)?;
+                let initial = engine.sync()?;
+                (engine, initial)
+            } else {
+                Engine::init(&path)?
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&engine.benchmark(&query, iterations, initial)?)?
             );
         }
         Command::Serve { mcp: true, path } => mcp::serve_stdio(&path)?,

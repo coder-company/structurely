@@ -71,6 +71,7 @@ and explanation.
 - [Architecture and invariants](docs/architecture.md)
 - [CodeGraph compatibility contract](docs/compatibility.md)
 - [Production acceptance gates](docs/acceptance.md)
+- [Reproducible benchmark protocol](docs/benchmarks.md)
 - [Domain language](CONTEXT.md)
 
 ## Development

@@ -27,6 +27,21 @@ pub struct FileSummary {
     pub symbols: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SnapshotFile {
+    pub path: String,
+    pub content_hash: String,
+    pub language: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphSnapshot {
+    pub graph_model_version: u32,
+    pub files: Vec<SnapshotFile>,
+    pub symbols: Vec<Symbol>,
+    pub relationships: Vec<Relationship>,
+}
+
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -188,6 +203,62 @@ impl Store {
             })?
             .collect::<rusqlite::Result<_>>()?;
         Ok(summaries)
+    }
+
+    pub fn snapshot(&self) -> Result<GraphSnapshot> {
+        let mut file_statement = self
+            .connection
+            .prepare("SELECT path,content_hash,language FROM files ORDER BY path")?;
+        let files = file_statement
+            .query_map([], |row| {
+                Ok(SnapshotFile {
+                    path: row.get(0)?,
+                    content_hash: row.get(1)?,
+                    language: row.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(file_statement);
+
+        let mut symbol_statement = self.connection.prepare(
+            "SELECT s.public_id,s.semantic_key,s.language,s.kind,s.name,s.qualified_name,
+                    f.path,s.start_byte,s.end_byte,s.start_line,s.end_line
+             FROM symbols s JOIN files f ON f.id=s.file_id
+             ORDER BY s.public_id",
+        )?;
+        let symbols = symbol_statement
+            .query_map([], Self::symbol_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(symbol_statement);
+
+        let mut relationship_statement = self.connection.prepare(
+            "SELECT source_public_id,target_public_id,kind,provenance,confidence,
+                    explanation,evidence_file,evidence_line
+             FROM relationships
+             ORDER BY source_public_id,target_public_id,kind,provenance,evidence_file,evidence_line",
+        )?;
+        let relationships = relationship_statement
+            .query_map([], |row| {
+                Ok(Relationship {
+                    source_id: row.get(0)?,
+                    target_id: row.get(1)?,
+                    kind: parse_relationship_kind(&row.get::<_, String>(2)?),
+                    evidence: Evidence {
+                        provenance: row.get(3)?,
+                        confidence: row.get(4)?,
+                        explanation: row.get(5)?,
+                        file: row.get(6)?,
+                        line: row.get::<_, i64>(7)? as usize,
+                    },
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(GraphSnapshot {
+            graph_model_version: GRAPH_MODEL_VERSION,
+            files,
+            symbols,
+            relationships,
+        })
     }
 
     pub fn symbols_in_file(&self, file: &str) -> Result<Vec<Symbol>> {
@@ -551,5 +622,15 @@ fn parse_symbol_kind(value: &str) -> SymbolKind {
         "method" => SymbolKind::Method,
         "variable" => SymbolKind::Variable,
         _ => SymbolKind::Function,
+    }
+}
+
+fn parse_relationship_kind(value: &str) -> RelationshipKind {
+    match value {
+        "calls" => RelationshipKind::Calls,
+        "imports" => RelationshipKind::Imports,
+        "extends" => RelationshipKind::Extends,
+        "implements" => RelationshipKind::Implements,
+        _ => RelationshipKind::Contains,
     }
 }

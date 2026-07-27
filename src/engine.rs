@@ -76,6 +76,23 @@ pub struct NodeResult {
     pub files: Vec<NodeFile>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct BenchmarkReport {
+    pub project: String,
+    pub graph_model_version: u32,
+    pub initial_sync: IndexReport,
+    pub iterations: usize,
+    pub no_change_sync_p50_us: u128,
+    pub no_change_sync_p95_us: u128,
+    pub query: String,
+    pub query_p50_us: u128,
+    pub query_p95_us: u128,
+    pub database_bytes: u64,
+    pub indexed_files: usize,
+    pub symbols: usize,
+    pub relationships: usize,
+}
+
 impl Engine {
     pub fn init(root: impl AsRef<Path>) -> Result<(Self, IndexReport)> {
         let root = absolute(root.as_ref())?;
@@ -216,6 +233,51 @@ impl Engine {
 
     pub fn files(&self) -> Result<Vec<FileSummary>> {
         self.store.file_summaries()
+    }
+
+    pub fn snapshot(&self) -> Result<crate::store::GraphSnapshot> {
+        self.store.snapshot()
+    }
+
+    pub fn benchmark(
+        &mut self,
+        query: &str,
+        iterations: usize,
+        initial_sync: IndexReport,
+    ) -> Result<BenchmarkReport> {
+        let iterations = iterations.clamp(1, 1_000);
+        let mut sync_times = Vec::with_capacity(iterations);
+        let mut query_times = Vec::with_capacity(iterations);
+        for _ in 0..iterations {
+            let started = Instant::now();
+            let report = self.sync()?;
+            if report.files_changed != 0 || report.files_deleted != 0 {
+                bail!("benchmark source changed during measurement");
+            }
+            sync_times.push(started.elapsed().as_micros());
+
+            let started = Instant::now();
+            let _ = self.search(query, 20)?;
+            query_times.push(started.elapsed().as_micros());
+        }
+        sync_times.sort_unstable();
+        query_times.sort_unstable();
+        let snapshot = self.snapshot()?;
+        Ok(BenchmarkReport {
+            project: self.root.display().to_string(),
+            graph_model_version: crate::model::GRAPH_MODEL_VERSION,
+            initial_sync,
+            iterations,
+            no_change_sync_p50_us: percentile(&sync_times, 50),
+            no_change_sync_p95_us: percentile(&sync_times, 95),
+            query: query.to_owned(),
+            query_p50_us: percentile(&query_times, 50),
+            query_p95_us: percentile(&query_times, 95),
+            database_bytes: fs::metadata(self.store.path())?.len(),
+            indexed_files: snapshot.files.len(),
+            symbols: snapshot.symbols.len(),
+            relationships: snapshot.relationships.len(),
+        })
     }
 
     pub fn node(
@@ -459,6 +521,11 @@ fn normalize_path(path: &Path) -> String {
         .join("/")
 }
 
+fn percentile(sorted: &[u128], percentile: usize) -> u128 {
+    let index = ((sorted.len() - 1) * percentile).div_ceil(100);
+    sorted[index]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -640,5 +707,36 @@ mod tests {
         let mut engine = Engine::open(temp.path()).unwrap();
         let report = engine.sync().unwrap();
         assert_eq!(report.files_changed, 1);
+    }
+
+    #[test]
+    fn incremental_and_clean_snapshots_are_identical() {
+        let incremental_dir = tempfile::tempdir().unwrap();
+        let clean_dir = tempfile::tempdir().unwrap();
+        let initial = "function caller() { oldName(); }\nfunction oldName() {}\n";
+        let final_source = "function caller() { newName(); }\nfunction newName() {}\n";
+        fs::write(incremental_dir.path().join("main.ts"), initial).unwrap();
+        let (mut incremental, _) = Engine::init(incremental_dir.path()).unwrap();
+        fs::write(incremental_dir.path().join("main.ts"), final_source).unwrap();
+        incremental.sync().unwrap();
+
+        fs::write(clean_dir.path().join("main.ts"), final_source).unwrap();
+        let (clean, _) = Engine::init(clean_dir.path()).unwrap();
+
+        let incremental_json = serde_json::to_string(&incremental.snapshot().unwrap()).unwrap();
+        let clean_json = serde_json::to_string(&clean.snapshot().unwrap()).unwrap();
+        assert_eq!(incremental_json, clean_json);
+    }
+
+    #[test]
+    fn benchmark_reports_measured_graph_cardinality() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("main.py"), "def main():\n    return 1\n").unwrap();
+        let (mut engine, initial) = Engine::init(temp.path()).unwrap();
+        let report = engine.benchmark("main", 3, initial).unwrap();
+        assert_eq!(report.iterations, 3);
+        assert_eq!(report.indexed_files, 1);
+        assert!(report.symbols >= 2);
+        assert!(report.database_bytes > 0);
     }
 }
