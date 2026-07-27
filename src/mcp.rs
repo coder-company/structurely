@@ -1,5 +1,5 @@
 use crate::Engine;
-use anyhow::Result;
+use anyhow::{bail, ensure, Result};
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::path::Path;
@@ -56,6 +56,16 @@ fn json_rpc_error(id: Value, code: i64, message: &str) -> Value {
 
 fn handle(engine: &mut Engine, request: Value) -> Result<Option<Value>> {
     let id = request.get("id").cloned();
+    if !request.is_object()
+        || request.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+        || request.get("method").and_then(Value::as_str).is_none()
+    {
+        return Ok(Some(json_rpc_error(
+            id.unwrap_or(Value::Null),
+            -32600,
+            "Invalid Request",
+        )));
+    }
     let method = request
         .get("method")
         .and_then(Value::as_str)
@@ -71,7 +81,14 @@ fn handle(engine: &mut Engine, request: Value) -> Result<Option<Value>> {
         }),
         "tools/list" => json!({ "tools": tool_definitions() }),
         "tools/call" => {
-            let params = request.get("params").cloned().unwrap_or(Value::Null);
+            let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
+            if !params.is_object() {
+                return Ok(Some(json_rpc_error(
+                    id.unwrap_or(Value::Null),
+                    -32602,
+                    "Invalid params: expected an object",
+                )));
+            }
             match call_tool(engine, &params) {
                 Ok(response) => response,
                 Err(error) => json!({
@@ -103,7 +120,7 @@ fn tool_definitions() -> Vec<Value> {
                 "properties": {
                     "query": { "type": "string" },
                     "kind": { "type": "string" },
-                    "limit": { "type": "number", "default": 10 },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 10 },
                     "projectPath": { "type": "string" }
                 },
                 "required": ["query"]
@@ -117,7 +134,7 @@ fn tool_definitions() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string" },
-                    "maxFiles": { "type": "number", "default": 12 },
+                    "maxFiles": { "type": "integer", "minimum": 1, "maximum": 100, "default": 12 },
                     "projectPath": { "type": "string" }
                 },
                 "required": ["query"]
@@ -134,7 +151,7 @@ fn tool_definitions() -> Vec<Value> {
                 "properties": {
                     "symbol": { "type": "string" },
                     "file": { "type": "string" },
-                    "depth": { "type": "number", "default": 2 },
+                    "depth": { "type": "integer", "minimum": 1, "maximum": 20, "default": 2 },
                     "projectPath": { "type": "string" }
                 },
                 "required": ["symbol"]
@@ -158,6 +175,7 @@ fn tool_definitions() -> Vec<Value> {
                 "properties": {
                     "path": { "type": "string" },
                     "pattern": { "type": "string" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 1000 },
                     "format": { "type": "string", "enum": ["tree", "flat", "grouped"] },
                     "includeMetadata": { "type": "boolean", "default": true },
                     "projectPath": { "type": "string" }
@@ -174,8 +192,8 @@ fn tool_definitions() -> Vec<Value> {
                     "symbol": { "type": "string" },
                     "includeCode": { "type": "boolean", "default": false },
                     "file": { "type": "string" },
-                    "offset": { "type": "number" },
-                    "limit": { "type": "number" },
+                    "offset": { "type": "integer", "minimum": 0, "maximum": 2000 },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 2000 },
                     "symbolsOnly": { "type": "boolean", "default": false },
                     "line": { "type": "number" },
                     "projectPath": { "type": "string" }
@@ -195,7 +213,7 @@ fn relationship_tool(name: &str, description: &str) -> Value {
             "properties": {
                 "symbol": { "type": "string" },
                 "file": { "type": "string" },
-                "limit": { "type": "number", "default": 20 },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
                 "projectPath": { "type": "string" }
             },
             "required": ["symbol"]
@@ -214,14 +232,12 @@ fn read_only_annotations() -> Value {
 }
 
 fn call_tool(engine: &mut Engine, params: &Value) -> Result<Value> {
-    let name = params
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
+    let name = required_string(params, "name")?;
     let arguments = params
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
+    ensure!(arguments.is_object(), "`arguments` must be an object");
     if let Some(project_path) = arguments.get("projectPath").and_then(Value::as_str) {
         let mut project_engine = Engine::open(project_path)?;
         project_engine.sync()?;
@@ -234,56 +250,49 @@ fn call_tool(engine: &mut Engine, params: &Value) -> Result<Value> {
 fn dispatch_tool(engine: &Engine, name: &str, arguments: &Value) -> Result<Value> {
     let payload = match name {
         "codegraph_search" => {
-            let query = arguments
-                .get("query")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let limit = number_argument(arguments, "limit", 10);
-            let kind = arguments
-                .get("kind")
-                .and_then(Value::as_str)
-                .and_then(parse_symbol_kind);
+            let query = required_string(arguments, "query")?;
+            let limit = number_argument(arguments, "limit", 10, 100)?;
+            let kind = match arguments.get("kind") {
+                Some(value) => Some(
+                    parse_symbol_kind(
+                        value
+                            .as_str()
+                            .ok_or_else(|| anyhow::anyhow!("`kind` must be a string"))?,
+                    )
+                    .ok_or_else(|| anyhow::anyhow!("unsupported symbol kind"))?,
+                ),
+                None => None,
+            };
             serde_json::to_value(engine.search_filtered(query, kind, limit)?)?
         }
         "codegraph_explore" => {
-            let query = arguments
-                .get("query")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let max_files = number_argument(arguments, "maxFiles", 12);
+            let query = required_string(arguments, "query")?;
+            let max_files = number_argument(arguments, "maxFiles", 12, 100)?;
             serde_json::to_value(engine.explore(query, max_files)?)?
         }
         "codegraph_callers" => {
-            let symbol = arguments
-                .get("symbol")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
+            let symbol = required_string(arguments, "symbol")?;
             let file = arguments.get("file").and_then(Value::as_str);
-            let limit = number_argument(arguments, "limit", 20);
+            let limit = number_argument(arguments, "limit", 20, 100)?;
             serde_json::to_value(engine.callers_named(symbol, file, limit)?)?
         }
         "codegraph_callees" => {
-            let symbol = arguments
-                .get("symbol")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
+            let symbol = required_string(arguments, "symbol")?;
             let file = arguments.get("file").and_then(Value::as_str);
-            let limit = number_argument(arguments, "limit", 20);
+            let limit = number_argument(arguments, "limit", 20, 100)?;
             serde_json::to_value(engine.callees_named(symbol, file, limit)?)?
         }
         "codegraph_impact" => {
-            let symbol = arguments
-                .get("symbol")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
+            let symbol = required_string(arguments, "symbol")?;
             let file = arguments.get("file").and_then(Value::as_str);
-            let depth = number_argument(arguments, "depth", 2);
+            let depth = number_argument(arguments, "depth", 2, 20)?;
             serde_json::to_value(engine.impact_named(symbol, file, depth)?)?
         }
         "codegraph_status" => serde_json::to_value(engine.status()?)?,
         "codegraph_files" => {
             let path = arguments.get("path").and_then(Value::as_str);
             let pattern = arguments.get("pattern").and_then(Value::as_str);
+            let limit = number_argument(arguments, "limit", 1_000, 1_000)?;
             let matcher = pattern
                 .map(globset::Glob::new)
                 .transpose()?
@@ -297,6 +306,7 @@ fn dispatch_tool(engine: &Engine, name: &str, arguments: &Value) -> Result<Value
                         .as_ref()
                         .is_none_or(|glob| glob.is_match(&file.path))
                 })
+                .take(limit)
                 .collect::<Vec<_>>();
             serde_json::to_value(files)?
         }
@@ -341,12 +351,27 @@ fn dispatch_tool(engine: &Engine, name: &str, arguments: &Value) -> Result<Value
     }))
 }
 
-fn number_argument(arguments: &Value, name: &str, default: usize) -> usize {
-    arguments
+fn required_string<'a>(arguments: &'a Value, name: &str) -> Result<&'a str> {
+    let value = arguments
         .get(name)
-        .and_then(Value::as_u64)
-        .map(|value| value.clamp(1, 100) as usize)
-        .unwrap_or(default)
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("`{name}` must be a string"))?;
+    ensure!(!value.trim().is_empty(), "`{name}` must not be empty");
+    Ok(value)
+}
+
+fn number_argument(arguments: &Value, name: &str, default: usize, maximum: usize) -> Result<usize> {
+    let Some(value) = arguments.get(name) else {
+        return Ok(default);
+    };
+    let Some(value) = value.as_u64() else {
+        bail!("`{name}` must be a positive integer");
+    };
+    ensure!(
+        (1..=maximum as u64).contains(&value),
+        "`{name}` must be between 1 and {maximum}"
+    );
+    Ok(value as usize)
 }
 
 fn parse_symbol_kind(value: &str) -> Option<crate::model::SymbolKind> {
@@ -475,6 +500,66 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("bad")
+        );
+    }
+
+    #[test]
+    fn malformed_json_rpc_requests_get_standard_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("main.ts"), "function main() {}\n").unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+
+        let invalid_request = handle(
+            &mut engine,
+            json!({ "jsonrpc": "1.0", "id": 8, "method": "ping" }),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(invalid_request["error"]["code"], -32600);
+        assert_eq!(invalid_request["id"], 8);
+
+        let invalid_params = handle(
+            &mut engine,
+            json!({ "jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": [] }),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(invalid_params["error"]["code"], -32602);
+        assert_eq!(invalid_params["id"], 9);
+    }
+
+    #[test]
+    fn tool_contract_rejects_missing_arguments_and_unbounded_limits() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("main.ts"), "function main() {}\n").unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+
+        for arguments in [json!({}), json!({ "query": "main", "limit": 101 })] {
+            let response = handle(
+                &mut engine,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 10,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "codegraph_search",
+                        "arguments": arguments
+                    }
+                }),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(response["result"]["isError"], true);
+        }
+
+        let schema = tool_definitions()
+            .into_iter()
+            .find(|tool| tool["name"] == "codegraph_search")
+            .unwrap();
+        assert_eq!(schema["inputSchema"]["properties"]["limit"]["maximum"], 100);
+        assert_eq!(
+            schema["inputSchema"]["properties"]["limit"]["type"],
+            "integer"
         );
     }
 }

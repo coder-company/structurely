@@ -68,9 +68,14 @@ The current compatibility surface exposes:
 - `codegraph_explore`
 - `codegraph_callers`
 - `codegraph_callees`
+- `codegraph_impact`
+- `codegraph_status`
+- `codegraph_files`
+- `codegraph_node`
 
 Every relationship result includes its confidence, provenance, source location,
-and explanation.
+and explanation. Tool inputs are validated and collection sizes are bounded so
+malformed or unexpectedly broad agent requests fail predictably.
 
 ## Design
 
