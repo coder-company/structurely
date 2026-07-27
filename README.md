@@ -84,7 +84,10 @@ malformed or unexpectedly broad agent requests fail predictably.
 - [Production acceptance gates](docs/acceptance.md)
 - [Reproducible benchmark protocol](docs/benchmarks.md)
 - [Release and artifact verification](docs/releases.md)
+- [Installation, privacy, and troubleshooting](docs/operations.md)
 - [Domain language](CONTEXT.md)
+- [Contributing](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
 
 ## Development
 
