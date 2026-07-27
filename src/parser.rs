@@ -318,6 +318,9 @@ fn parse_tree(language: Language, source: &str) -> Result<Tree> {
         Language::Php => tree_sitter_php::LANGUAGE_PHP,
         Language::Swift => tree_sitter_swift::LANGUAGE,
         Language::Lua => tree_sitter_lua::LANGUAGE,
+        Language::Kotlin => tree_sitter_kotlin_ng::LANGUAGE,
+        Language::Scala => tree_sitter_scala::LANGUAGE,
+        Language::R => tree_sitter_r::LANGUAGE,
     };
     parser
         .set_language(&grammar.into())
@@ -335,7 +338,7 @@ fn collect_symbols(
     container: Option<&str>,
     output: &mut Vec<Symbol>,
 ) {
-    let declaration = declaration_at(node, source, container);
+    let declaration = declaration_at(node, source, container, language);
     let declaration_container = declaration
         .as_ref()
         .map(|(qualified, _, _, _)| qualified.clone())
@@ -372,6 +375,7 @@ fn declaration_at<'a>(
     node: Node<'a>,
     source: &[u8],
     container: Option<&str>,
+    _language: Language,
 ) -> Option<(String, SymbolKind, Node<'a>, String)> {
     let (kind, name_node) = match node.kind() {
         "class_declaration" | "class_definition" => {
@@ -393,10 +397,12 @@ fn declaration_at<'a>(
         | "function_item" => (SymbolKind::Function, node.child_by_field_name("name")?),
         "function_definition" => (
             SymbolKind::Function,
-            node.child_by_field_name("name").or_else(|| {
-                node.child_by_field_name("declarator")
-                    .and_then(declarator_name)
-            })?,
+            node.child_by_field_name("name")
+                .filter(Node::is_named)
+                .or_else(|| {
+                    node.child_by_field_name("declarator")
+                        .and_then(declarator_name)
+                })?,
         ),
         "method_definition" | "method_signature" => {
             (SymbolKind::Method, node.child_by_field_name("name")?)
@@ -434,6 +440,21 @@ fn declaration_at<'a>(
         "class" => (SymbolKind::Class, node.child_by_field_name("name")?),
         "module" => (SymbolKind::Type, node.child_by_field_name("name")?),
         "protocol_declaration" => (SymbolKind::Interface, node.child_by_field_name("name")?),
+        "trait_definition" => (SymbolKind::Trait, node.child_by_field_name("name")?),
+        "object_declaration" | "object_definition" => {
+            (SymbolKind::Type, node.child_by_field_name("name")?)
+        }
+        "binary_operator" => {
+            let rhs = node.child_by_field_name("rhs")?;
+            if rhs.kind() != "function_definition" {
+                return None;
+            }
+            let lhs = node.child_by_field_name("lhs")?;
+            if lhs.kind() != "identifier" {
+                return None;
+            }
+            (SymbolKind::Function, lhs)
+        }
         "method" | "singleton_method" => (
             if container.is_some() {
                 SymbolKind::Method
@@ -476,14 +497,20 @@ fn callable_discriminator(node: Node<'_>, source: &[u8], kind: SymbolKind) -> St
     if !matches!(kind, SymbolKind::Function | SymbolKind::Method) {
         return String::new();
     }
+    let callable = if node.kind() == "binary_operator" {
+        node.child_by_field_name("rhs").unwrap_or(node)
+    } else {
+        node
+    };
     let direct = ["parameters", "return_type"]
         .into_iter()
-        .filter_map(|field| node.child_by_field_name(field))
+        .filter_map(|field| callable.child_by_field_name(field))
         .map(|child| normalize_signature(&node_text(child, source)))
         .collect::<Vec<_>>()
         .join("->");
     if direct.is_empty() {
-        node.child_by_field_name("declarator")
+        callable
+            .child_by_field_name("declarator")
             .map(|child| normalize_signature(&node_text(child, source)))
             .unwrap_or_default()
     } else {
@@ -870,6 +897,60 @@ mod tests {
         let facts = parse_file(
             "src/runner.lua",
             "local function helper() end\nlocal function run() helper() end\n",
+        )
+        .unwrap();
+        let names: Vec<_> = facts
+            .symbols
+            .iter()
+            .map(|symbol| symbol.name.as_str())
+            .collect();
+        assert!(names.contains(&"helper"));
+        assert!(names.contains(&"run"));
+        assert!(!names.contains(&"function"));
+        assert_eq!(facts.unresolved_calls[0].callee_name, "helper");
+    }
+
+    #[test]
+    fn extracts_kotlin_classes_functions_and_calls() {
+        let facts = parse_file(
+            "src/Greeter.kt",
+            "class Greeter {\n  fun greet() {\n    helper()\n  }\n\n  fun helper() {}\n}\n",
+        )
+        .unwrap();
+        let names: Vec<_> = facts
+            .symbols
+            .iter()
+            .map(|symbol| symbol.qualified_name.as_str())
+            .collect();
+        assert!(names.contains(&"Greeter"));
+        assert!(names.contains(&"Greeter.greet"));
+        assert!(names.contains(&"Greeter.helper"));
+        assert_eq!(facts.unresolved_calls[0].callee_name, "helper");
+    }
+
+    #[test]
+    fn extracts_scala_classes_functions_and_calls() {
+        let facts = parse_file(
+            "src/Greeter.scala",
+            "class Greeter { def greet(): Unit = helper(); def helper(): Unit = () }\n",
+        )
+        .unwrap();
+        let names: Vec<_> = facts
+            .symbols
+            .iter()
+            .map(|symbol| symbol.qualified_name.as_str())
+            .collect();
+        assert!(names.contains(&"Greeter"));
+        assert!(names.contains(&"Greeter.greet"));
+        assert!(names.contains(&"Greeter.helper"));
+        assert_eq!(facts.unresolved_calls[0].callee_name, "helper");
+    }
+
+    #[test]
+    fn extracts_r_assigned_functions_and_calls() {
+        let facts = parse_file(
+            "src/runner.R",
+            "helper <- function() 1\nrun <- function() helper()\n",
         )
         .unwrap();
         let names: Vec<_> = facts

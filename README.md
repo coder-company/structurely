@@ -7,7 +7,7 @@ provenance, and explanations.
 
 > Structurely is under active development. The current engine supports
 > TypeScript, TSX, JavaScript, JSX, Python, Rust, Go, Java, C#, C, C++, and
-> Ruby, PHP, Swift, and Lua. See
+> Ruby, PHP, Swift, Lua, Kotlin, Scala, and R. See
 > [production acceptance gates](docs/acceptance.md) for the remaining scope.
 
 ## Build

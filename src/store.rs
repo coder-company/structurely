@@ -736,6 +736,9 @@ fn parse_language(value: &str) -> Language {
         "php" => Language::Php,
         "swift" => Language::Swift,
         "lua" => Language::Lua,
+        "kotlin" => Language::Kotlin,
+        "scala" => Language::Scala,
+        "r" => Language::R,
         _ => Language::TypeScript,
     }
 }

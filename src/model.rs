@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path};
 
-pub const GRAPH_MODEL_VERSION: u32 = 3;
+pub const GRAPH_MODEL_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -24,6 +24,9 @@ pub enum Language {
     Php,
     Swift,
     Lua,
+    Kotlin,
+    Scala,
+    R,
 }
 
 impl Language {
@@ -44,6 +47,9 @@ impl Language {
             "php" | "phtml" => Some(Self::Php),
             "swift" => Some(Self::Swift),
             "lua" => Some(Self::Lua),
+            "kt" | "kts" => Some(Self::Kotlin),
+            "scala" | "sc" => Some(Self::Scala),
+            "r" => Some(Self::R),
             _ => None,
         }
     }
@@ -67,6 +73,9 @@ impl fmt::Display for Language {
             Self::Php => "php",
             Self::Swift => "swift",
             Self::Lua => "lua",
+            Self::Kotlin => "kotlin",
+            Self::Scala => "scala",
+            Self::R => "r",
         })
     }
 }
