@@ -17,6 +17,25 @@ cargo build --release
 
 The repository pins its Rust toolchain through `rust-toolchain.toml`.
 
+## Install
+
+macOS and Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/coder-company/structurely/main/scripts/install.sh | sh
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/coder-company/structurely/main/install.ps1 | iex
+```
+
+The installers use `cargo install --locked` from the public Structurely
+repository. Set `STRUCTURELY_VERSION` to a release tag to install a pinned
+version. Rust-free standalone release bundles are planned before the first
+stable release.
+
 ## Quick start
 
 ```bash

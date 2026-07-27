@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "Local-first semantic code intelligence for coding agents"
-repository = "https://github.com/structurely/structurely"
+repository = "https://github.com/coder-company/structurely"
 rust-version = "1.88"
 
 [dependencies]
