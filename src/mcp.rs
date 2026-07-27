@@ -1,29 +1,60 @@
 use crate::Engine;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::path::Path;
 
 pub fn serve_stdio(root: &Path) -> Result<()> {
-    let engine = Engine::open(root)?;
+    let mut engine = Engine::open(root)?;
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
     for line in stdin.lock().lines() {
         let line = line?;
         if line.len() > 4 * 1024 * 1024 {
+            write_response(
+                &mut stdout,
+                &json_rpc_error(Value::Null, -32600, "Request exceeds the 4 MiB limit"),
+            )?;
             continue;
         }
-        let request: Value = serde_json::from_str(&line).context("parse MCP JSON-RPC request")?;
-        if let Some(response) = handle(&engine, request)? {
-            serde_json::to_writer(&mut stdout, &response)?;
-            stdout.write_all(b"\n")?;
-            stdout.flush()?;
+        let request: Value = match serde_json::from_str(&line) {
+            Ok(request) => request,
+            Err(error) => {
+                write_response(
+                    &mut stdout,
+                    &json_rpc_error(Value::Null, -32700, &format!("Parse error: {error}")),
+                )?;
+                continue;
+            }
+        };
+        match handle(&mut engine, request) {
+            Ok(Some(response)) => write_response(&mut stdout, &response)?,
+            Ok(None) => {}
+            Err(error) => write_response(
+                &mut stdout,
+                &json_rpc_error(Value::Null, -32603, &format!("Internal error: {error}")),
+            )?,
         }
     }
     Ok(())
 }
 
-fn handle(engine: &Engine, request: Value) -> Result<Option<Value>> {
+fn write_response(writer: &mut impl Write, response: &Value) -> Result<()> {
+    serde_json::to_writer(&mut *writer, response)?;
+    writer.write_all(b"\n")?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn json_rpc_error(id: Value, code: i64, message: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": { "code": code, "message": message }
+    })
+}
+
+fn handle(engine: &mut Engine, request: Value) -> Result<Option<Value>> {
     let id = request.get("id").cloned();
     let method = request
         .get("method")
@@ -41,7 +72,13 @@ fn handle(engine: &Engine, request: Value) -> Result<Option<Value>> {
         "tools/list" => json!({ "tools": tool_definitions() }),
         "tools/call" => {
             let params = request.get("params").cloned().unwrap_or(Value::Null);
-            call_tool(engine, &params)?
+            match call_tool(engine, &params) {
+                Ok(response) => response,
+                Err(error) => json!({
+                    "content": [{ "type": "text", "text": error.to_string() }],
+                    "isError": true
+                }),
+            }
         }
         "ping" => json!({}),
         _ => {
@@ -176,7 +213,7 @@ fn read_only_annotations() -> Value {
     })
 }
 
-fn call_tool(engine: &Engine, params: &Value) -> Result<Value> {
+fn call_tool(engine: &mut Engine, params: &Value) -> Result<Value> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
@@ -185,13 +222,23 @@ fn call_tool(engine: &Engine, params: &Value) -> Result<Value> {
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
+    if let Some(project_path) = arguments.get("projectPath").and_then(Value::as_str) {
+        let mut project_engine = Engine::open(project_path)?;
+        project_engine.sync()?;
+        return dispatch_tool(&project_engine, name, &arguments);
+    }
+    engine.sync()?;
+    dispatch_tool(engine, name, &arguments)
+}
+
+fn dispatch_tool(engine: &Engine, name: &str, arguments: &Value) -> Result<Value> {
     let payload = match name {
         "codegraph_search" => {
             let query = arguments
                 .get("query")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            let limit = number_argument(&arguments, "limit", 10);
+            let limit = number_argument(arguments, "limit", 10);
             let kind = arguments
                 .get("kind")
                 .and_then(Value::as_str)
@@ -203,7 +250,7 @@ fn call_tool(engine: &Engine, params: &Value) -> Result<Value> {
                 .get("query")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            let max_files = number_argument(&arguments, "maxFiles", 12);
+            let max_files = number_argument(arguments, "maxFiles", 12);
             serde_json::to_value(engine.explore(query, max_files)?)?
         }
         "codegraph_callers" => {
@@ -212,7 +259,7 @@ fn call_tool(engine: &Engine, params: &Value) -> Result<Value> {
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             let file = arguments.get("file").and_then(Value::as_str);
-            let limit = number_argument(&arguments, "limit", 20);
+            let limit = number_argument(arguments, "limit", 20);
             serde_json::to_value(engine.callers_named(symbol, file, limit)?)?
         }
         "codegraph_callees" => {
@@ -221,7 +268,7 @@ fn call_tool(engine: &Engine, params: &Value) -> Result<Value> {
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             let file = arguments.get("file").and_then(Value::as_str);
-            let limit = number_argument(&arguments, "limit", 20);
+            let limit = number_argument(arguments, "limit", 20);
             serde_json::to_value(engine.callees_named(symbol, file, limit)?)?
         }
         "codegraph_impact" => {
@@ -230,7 +277,7 @@ fn call_tool(engine: &Engine, params: &Value) -> Result<Value> {
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             let file = arguments.get("file").and_then(Value::as_str);
-            let depth = number_argument(&arguments, "depth", 2);
+            let depth = number_argument(arguments, "depth", 2);
             serde_json::to_value(engine.impact_named(symbol, file, depth)?)?
         }
         "codegraph_status" => serde_json::to_value(engine.status()?)?,
@@ -330,7 +377,7 @@ mod tests {
             "function caller() { callee(); }\nfunction callee() { return 1; }\n",
         )
         .unwrap();
-        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
 
         let names: Vec<_> = tool_definitions()
             .into_iter()
@@ -347,14 +394,14 @@ mod tests {
         }
 
         let callees = call_tool(
-            &engine,
+            &mut engine,
             &json!({ "name": "codegraph_callees", "arguments": { "symbol": "caller" } }),
         )
         .unwrap();
         assert_eq!(callees["structuredContent"][0]["symbol"]["name"], "callee");
 
         let explored = call_tool(
-            &engine,
+            &mut engine,
             &json!({ "name": "codegraph_explore", "arguments": { "query": "callee" } }),
         )
         .unwrap();
@@ -362,5 +409,71 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("function callee"));
+    }
+
+    #[test]
+    fn tool_calls_sync_changes_and_honor_project_path() {
+        let default = tempfile::tempdir().unwrap();
+        fs::write(default.path().join("default.ts"), "function before() {}\n").unwrap();
+        let (mut engine, _) = Engine::init(default.path()).unwrap();
+        fs::write(default.path().join("default.ts"), "function after() {}\n").unwrap();
+
+        let updated = call_tool(
+            &mut engine,
+            &json!({ "name": "codegraph_search", "arguments": { "query": "after" } }),
+        )
+        .unwrap();
+        assert_eq!(updated["structuredContent"][0]["symbol"]["name"], "after");
+
+        let other = tempfile::tempdir().unwrap();
+        fs::write(
+            other.path().join("other.py"),
+            "def elsewhere():\n    pass\n",
+        )
+        .unwrap();
+        Engine::init(other.path()).unwrap();
+        let cross_project = call_tool(
+            &mut engine,
+            &json!({
+                "name": "codegraph_search",
+                "arguments": {
+                    "query": "elsewhere",
+                    "projectPath": other.path()
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            cross_project["structuredContent"][0]["symbol"]["name"],
+            "elsewhere"
+        );
+    }
+
+    #[test]
+    fn failed_tool_call_returns_mcp_error_content_without_protocol_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("main.ts"), "function main() {}\n").unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "codegraph_search",
+                "arguments": {
+                    "query": "main",
+                    "projectPath": temp.path().join("missing")
+                }
+            }
+        });
+        let response = handle(&mut engine, request).unwrap().unwrap();
+        assert_eq!(response["id"], 7);
+        assert_eq!(response["result"]["isError"], true);
+        assert!(
+            json_rpc_error(Value::Null, -32700, "bad")["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("bad")
+        );
     }
 }
