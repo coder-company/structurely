@@ -392,35 +392,32 @@ impl Store {
         Ok(symbols)
     }
 
-    pub(crate) fn publish(
-        &mut self,
-        facts: &[FileFacts],
-        deleted: &[String],
-    ) -> Result<(u64, usize)> {
+    pub(crate) fn publish<I>(&mut self, facts: I, deleted: &[String]) -> Result<(u64, usize, usize)>
+    where
+        I: IntoIterator<Item = Result<FileFacts>>,
+    {
         let next_epoch = self.epoch()? + 1;
         let tx = self.connection.transaction()?;
-        let relationships_resolved = Self::apply_epoch(&tx, facts, deleted, next_epoch)?;
+        for path in deleted {
+            Self::delete_file(&tx, path)?;
+        }
+        let mut symbols_changed = 0;
+        for file in facts {
+            let file = file?;
+            symbols_changed += file.symbols.len();
+            Self::replace_file(&tx, &file, next_epoch)?;
+        }
+        let relationships_resolved = Self::finish_epoch(&tx, next_epoch)?;
         tx.commit()?;
         let _: (u32, u32, u32) =
             self.connection
                 .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
                     Ok((row.get(0)?, row.get(1)?, row.get(2)?))
                 })?;
-        Ok((next_epoch, relationships_resolved))
+        Ok((next_epoch, relationships_resolved, symbols_changed))
     }
 
-    fn apply_epoch(
-        tx: &Transaction<'_>,
-        facts: &[FileFacts],
-        deleted: &[String],
-        next_epoch: u64,
-    ) -> Result<usize> {
-        for path in deleted {
-            Self::delete_file(tx, path)?;
-        }
-        for file in facts {
-            Self::replace_file(tx, file, next_epoch)?;
-        }
+    fn finish_epoch(tx: &Transaction<'_>, next_epoch: u64) -> Result<usize> {
         let relationships_resolved = Self::resolve_calls(tx)?;
         tx.execute(
             "UPDATE metadata SET value = ?1 WHERE key = 'graph_epoch'",
@@ -442,7 +439,13 @@ impl Store {
     ) -> Result<()> {
         let next_epoch = self.epoch()? + 1;
         let tx = self.connection.transaction()?;
-        Self::apply_epoch(&tx, facts, deleted, next_epoch)?;
+        for path in deleted {
+            Self::delete_file(&tx, path)?;
+        }
+        for file in facts {
+            Self::replace_file(&tx, file, next_epoch)?;
+        }
+        Self::finish_epoch(&tx, next_epoch)?;
         tx.rollback()?;
         Ok(())
     }

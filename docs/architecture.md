@@ -22,6 +22,12 @@ The connection checkpoints after every published epoch, auto-checkpoints after
 for a busy writer. `structurely status` reports database and WAL bytes plus the
 configured checkpoint limits so growth is observable without opening SQLite.
 
+Individual source files larger than 1 MiB are excluded before reading or
+parsing, matching the pinned CodeGraph safety limit for vendored/generated
+artifacts. Sync and status reports expose the skipped-file count. If a
+previously indexed file grows beyond the limit, the next atomic epoch removes
+its stale graph facts.
+
 ## Invariants
 
 1. A reader observes exactly one committed graph epoch.

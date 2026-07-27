@@ -3,7 +3,7 @@ use crate::model::{
     UnresolvedCall, UnresolvedReference,
 };
 use anyhow::{anyhow, Context, Result};
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 use tree_sitter::{Node, Parser, Tree};
 
 pub(crate) fn parse_file(relative_path: &str, source: &str) -> Result<FileFacts> {
@@ -37,6 +37,7 @@ pub(crate) fn parse_file(relative_path: &str, source: &str) -> Result<FileFacts>
         None,
         &mut symbols,
     );
+    disambiguate_duplicate_symbols(&mut symbols);
 
     let mut relationships = Vec::new();
     for symbol in symbols.iter().skip(1) {
@@ -80,6 +81,27 @@ pub(crate) fn parse_file(relative_path: &str, source: &str) -> Result<FileFacts>
         unresolved_calls,
         unresolved_references,
     })
+}
+
+fn disambiguate_duplicate_symbols(symbols: &mut [Symbol]) {
+    let mut groups = HashMap::<String, Vec<usize>>::new();
+    for (index, symbol) in symbols.iter().enumerate() {
+        groups
+            .entry(symbol.semantic_key.clone())
+            .or_default()
+            .push(index);
+    }
+    for (semantic_key, indices) in groups {
+        if indices.len() < 2 {
+            continue;
+        }
+        for (ordinal, index) in indices.into_iter().enumerate() {
+            let disambiguated = format!("{semantic_key}|duplicate:{}", ordinal + 1);
+            let digest = blake3::hash(disambiguated.as_bytes()).to_hex();
+            symbols[index].semantic_key = disambiguated;
+            symbols[index].id = format!("sym_{}", &digest[..24]);
+        }
+    }
 }
 
 fn collect_structural_references(
@@ -971,6 +993,32 @@ mod tests {
             .collect();
         assert_eq!(before_ids, after_ids);
         assert_ne!(before_ids[0], before_ids[1]);
+    }
+
+    #[test]
+    fn duplicate_declarations_get_deterministic_unique_identities() {
+        let source = "static int helper(void) { return 1; }\n\
+                      static int helper(void) { return 2; }\n";
+        let moved = format!("// generated alternatives\n{source}");
+        let before = parse_file("generated.c", source).unwrap();
+        let after = parse_file("generated.c", &moved).unwrap();
+        let before_helpers = before
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.name == "helper")
+            .map(|symbol| (&symbol.id, &symbol.semantic_key))
+            .collect::<Vec<_>>();
+        let after_helpers = after
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.name == "helper")
+            .map(|symbol| (&symbol.id, &symbol.semantic_key))
+            .collect::<Vec<_>>();
+
+        assert_eq!(before_helpers.len(), 2);
+        assert_ne!(before_helpers[0].0, before_helpers[1].0);
+        assert_ne!(before_helpers[0].1, before_helpers[1].1);
+        assert_eq!(before_helpers, after_helpers);
     }
 
     #[test]

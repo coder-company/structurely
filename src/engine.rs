@@ -1,5 +1,5 @@
 use crate::{
-    model::{Evidence, FileFacts, RelationshipKind},
+    model::{Evidence, RelationshipKind},
     parser::parse_file,
     store::{FileSummary, SearchHit, StorageMetrics, Store},
 };
@@ -21,6 +21,7 @@ use std::{
 
 pub const PROJECT_DIR: &str = ".structurely";
 pub const DATABASE_FILE: &str = "graph.db";
+pub const MAX_SOURCE_BYTES: u64 = 1024 * 1024;
 
 pub struct Engine {
     root: PathBuf,
@@ -31,6 +32,7 @@ pub struct Engine {
 pub struct IndexReport {
     pub epoch: u64,
     pub files_scanned: usize,
+    pub files_skipped: usize,
     pub files_changed: usize,
     pub files_deleted: usize,
     pub symbols_changed: usize,
@@ -45,6 +47,7 @@ pub struct ProjectStatus {
     pub epoch: u64,
     pub indexed_files: usize,
     pub pending_files: usize,
+    pub skipped_files: usize,
     pub storage: StorageMetrics,
 }
 
@@ -133,8 +136,9 @@ impl Engine {
         let started = Instant::now();
         let force_reindex = !self.store.is_current_graph_model()?;
         let mut seen = HashSet::new();
-        let mut changed = Vec::<FileFacts>::new();
+        let mut changed = Vec::<(String, PathBuf)>::new();
         let mut files_scanned = 0;
+        let mut files_skipped = 0;
 
         for entry in WalkBuilder::new(&self.root)
             .hidden(false)
@@ -152,6 +156,10 @@ impl Engine {
             if crate::model::Language::from_path(relative).is_none() {
                 continue;
             }
+            if entry.metadata()?.len() > MAX_SOURCE_BYTES {
+                files_skipped += 1;
+                continue;
+            }
             let relative = normalize_path(relative);
             seen.insert(relative.clone());
             files_scanned += 1;
@@ -163,22 +171,29 @@ impl Engine {
             {
                 continue;
             }
-            changed.push(parse_file(&relative, &source)?);
+            changed.push((relative, entry.path().to_owned()));
         }
 
         let indexed: HashSet<_> = self.store.indexed_files()?.into_iter().collect();
         let deleted: Vec<_> = indexed.difference(&seen).cloned().collect();
-        let symbols_changed = changed.iter().map(|facts| facts.symbols.len()).sum();
-        let (epoch, relationships_resolved) = if changed.is_empty() && deleted.is_empty() {
-            (self.store.epoch()?, 0)
-        } else {
-            self.store.publish(&changed, &deleted)?
-        };
+        let files_changed = changed.len();
+        let (epoch, relationships_resolved, symbols_changed) =
+            if changed.is_empty() && deleted.is_empty() {
+                (self.store.epoch()?, 0, 0)
+            } else {
+                let facts = changed.iter().map(|(relative, path)| {
+                    let source = fs::read_to_string(path)
+                        .with_context(|| format!("read source {}", path.display()))?;
+                    parse_file(relative, &source)
+                });
+                self.store.publish(facts, &deleted)?
+            };
 
         Ok(IndexReport {
             epoch,
             files_scanned,
-            files_changed: changed.len(),
+            files_skipped,
+            files_changed,
             files_deleted: deleted.len(),
             symbols_changed,
             relationships_resolved,
@@ -191,6 +206,7 @@ impl Engine {
         let indexed_set: HashSet<_> = indexed.iter().cloned().collect();
         let mut current = HashSet::new();
         let mut changed_or_added = 0;
+        let mut skipped_files = 0;
         for entry in WalkBuilder::new(&self.root)
             .filter_entry(|entry| entry.file_name() != PROJECT_DIR)
             .build()
@@ -199,6 +215,13 @@ impl Engine {
             if entry.file_type().is_some_and(|kind| kind.is_file()) {
                 if let Ok(relative) = entry.path().strip_prefix(&self.root) {
                     if crate::model::Language::from_path(relative).is_some() {
+                        if entry
+                            .metadata()
+                            .is_ok_and(|metadata| metadata.len() > MAX_SOURCE_BYTES)
+                        {
+                            skipped_files += 1;
+                            continue;
+                        }
                         let relative = normalize_path(relative);
                         current.insert(relative.clone());
                         let changed = fs::read(entry.path())
@@ -222,6 +245,7 @@ impl Engine {
             epoch: self.store.epoch()?,
             indexed_files: indexed.len(),
             pending_files: pending,
+            skipped_files,
             storage: self.store.storage_metrics()?,
         })
     }
@@ -662,6 +686,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(engine.status().unwrap().pending_files, 1);
+    }
+
+    #[test]
+    fn oversized_generated_sources_are_skipped_and_reported() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("generated.c"),
+            vec![b' '; MAX_SOURCE_BYTES as usize + 1],
+        )
+        .unwrap();
+        let (engine, report) = Engine::init(temp.path()).unwrap();
+
+        assert_eq!(report.files_scanned, 0);
+        assert_eq!(report.files_skipped, 1);
+        let status = engine.status().unwrap();
+        assert_eq!(status.indexed_files, 0);
+        assert_eq!(status.pending_files, 0);
+        assert_eq!(status.skipped_files, 1);
     }
 
     #[test]
