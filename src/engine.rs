@@ -957,6 +957,34 @@ mod tests {
     }
 
     #[test]
+    fn receiver_type_disambiguates_same_named_methods_in_one_file() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("services.ts"),
+            "class UserService { save() {} }\n\
+             class AuditService { save() {} }\n\
+             function persist() {\n\
+               const service = new UserService();\n\
+               service.save();\n\
+             }\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let persist = engine
+            .search("persist", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.name == "persist")
+            .unwrap();
+        let callees = engine.callees(&persist.symbol.id).unwrap();
+
+        assert_eq!(callees.len(), 1);
+        assert_eq!(callees[0].0.qualified_name, "UserService.save");
+        assert_eq!(callees[0].1.confidence, 0.995);
+        assert!(callees[0].1.explanation.contains("receiver type"));
+    }
+
+    #[test]
     fn explicit_import_scope_beats_global_fallback() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("defs.ts"), "export function helper() {}\n").unwrap();

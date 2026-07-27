@@ -33,6 +33,11 @@ configured checkpoint limits so growth is observable without opening SQLite.
 6. Storage row IDs are never public symbol identities.
 7. Parser failure for one file cannot corrupt the previous committed graph.
 
+Call resolution ranks receiver-type evidence ahead of same-file, explicit
+import, and language-wide candidates. A locally constructed TypeScript receiver
+therefore selects its class method even when another class in the same file has
+the same method name; the emitted edge records the winning scope and confidence.
+
 ## Modules
 
 - `model` owns the versioned graph vocabulary and stable identity algorithm.

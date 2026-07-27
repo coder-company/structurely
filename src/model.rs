@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path};
 
-pub const GRAPH_MODEL_VERSION: u32 = 8;
+pub const GRAPH_MODEL_VERSION: u32 = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -250,6 +250,7 @@ pub struct Relationship {
 pub(crate) struct UnresolvedCall {
     pub caller_id: String,
     pub callee_name: String,
+    pub receiver_type: Option<String>,
     pub file: String,
     pub line: usize,
 }

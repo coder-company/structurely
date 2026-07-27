@@ -615,6 +615,7 @@ fn collect_calls(
                     output.push(UnresolvedCall {
                         caller_id: caller.id.clone(),
                         callee_name: name,
+                        receiver_type: receiver_type_hint(function, node, source),
                         file: file.to_owned(),
                         line: node.start_position().row + 1,
                     });
@@ -626,6 +627,68 @@ fn collect_calls(
     for child in node.named_children(&mut cursor) {
         collect_calls(child, source, file, symbols, output);
     }
+}
+
+fn receiver_type_hint(function: Node<'_>, call: Node<'_>, source: &[u8]) -> Option<String> {
+    let receiver = function
+        .child_by_field_name("object")
+        .or_else(|| function.child_by_field_name("receiver"))?;
+    if matches!(
+        receiver.kind(),
+        "new_expression" | "object_creation_expression"
+    ) {
+        return constructor_type(receiver, source);
+    }
+    if receiver.kind() != "identifier" {
+        return None;
+    }
+    let variable = node_text(receiver, source);
+    let mut root = call;
+    while let Some(parent) = root.parent() {
+        root = parent;
+    }
+    find_variable_constructor(root, &variable, call.start_byte(), source)
+}
+
+fn find_variable_constructor(
+    node: Node<'_>,
+    variable: &str,
+    before_byte: usize,
+    source: &[u8],
+) -> Option<String> {
+    if node.start_byte() >= before_byte {
+        return None;
+    }
+    if matches!(node.kind(), "variable_declarator" | "lexical_declaration") {
+        let name = node.child_by_field_name("name");
+        let value = node.child_by_field_name("value");
+        if name.is_some_and(|name| node_text(name, source) == variable) {
+            if let Some(value) = value {
+                if let Some(inferred) = constructor_type(value, source) {
+                    return Some(inferred);
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    let mut inferred = None;
+    for child in node.named_children(&mut cursor) {
+        if let Some(found) = find_variable_constructor(child, variable, before_byte, source) {
+            inferred = Some(found);
+        }
+    }
+    inferred
+}
+
+fn constructor_type(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let constructor = if matches!(node.kind(), "new_expression" | "object_creation_expression") {
+        node.child_by_field_name("constructor")
+            .or_else(|| node.child_by_field_name("type"))
+            .or_else(|| node.named_child(0))
+    } else {
+        None
+    }?;
+    call_name(constructor, source)
 }
 
 fn call_target_node(node: Node<'_>) -> Option<Node<'_>> {
@@ -720,6 +783,22 @@ mod tests {
         assert!(names.contains(&"Greeter.greet"));
         assert!(names.contains(&"helper"));
         assert_eq!(facts.unresolved_calls[0].callee_name, "helper");
+    }
+
+    #[test]
+    fn infers_typescript_receiver_type_from_local_constructor() {
+        let facts = parse_file(
+            "src/demo.ts",
+            "class UserService { save() {} }\n\
+             function run() { const service = new UserService(); service.save(); }\n",
+        )
+        .unwrap();
+        let call = facts
+            .unresolved_calls
+            .iter()
+            .find(|call| call.callee_name == "save")
+            .unwrap();
+        assert_eq!(call.receiver_type.as_deref(), Some("UserService"));
     }
 
     #[test]

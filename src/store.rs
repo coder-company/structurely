@@ -156,6 +156,7 @@ impl Store {
                 file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
                 caller_public_id TEXT NOT NULL,
                 callee_name TEXT NOT NULL,
+                receiver_type TEXT,
                 evidence_file TEXT NOT NULL,
                 evidence_line INTEGER NOT NULL
             );
@@ -189,6 +190,12 @@ impl Store {
             INSERT OR IGNORE INTO metadata(key, value) VALUES ('graph_epoch', '0');
             COMMIT;
             ",
+        )?;
+        Self::ensure_column(
+            &self.connection,
+            "unresolved_calls",
+            "receiver_type",
+            "TEXT",
         )?;
         Self::ensure_column(
             &self.connection,
@@ -502,12 +509,14 @@ impl Store {
         for call in &file.unresolved_calls {
             tx.execute(
                 "INSERT INTO unresolved_calls(
-                    file_id, caller_public_id, callee_name, evidence_file, evidence_line
-                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    file_id, caller_public_id, callee_name, receiver_type,
+                    evidence_file, evidence_line
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     file_id,
                     call.caller_id,
                     call.callee_name,
+                    call.receiver_type,
                     call.file,
                     call.line as i64
                 ],
@@ -544,8 +553,8 @@ impl Store {
             [],
         )?;
         let mut calls_statement = tx.prepare(
-            "SELECT u.caller_public_id,u.callee_name,u.evidence_file,u.evidence_line,
-                    s.language,u.file_id
+            "SELECT u.caller_public_id,u.callee_name,u.receiver_type,
+                    u.evidence_file,u.evidence_line,s.language,u.file_id
              FROM unresolved_calls u
              JOIN symbols s ON s.public_id=u.caller_public_id
              ORDER BY u.evidence_file,u.evidence_line,u.id",
@@ -555,27 +564,32 @@ impl Store {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)? as usize,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, i64>(5)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)? as usize,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(calls_statement);
 
-        for (caller_id, callee_name, file, line, language, file_id) in calls {
+        for (caller_id, callee_name, receiver_type, file, line, language, file_id) in calls {
             let mut target_statement = tx.prepare(
                 "SELECT s.public_id,s.qualified_name,
                         CASE
-                          WHEN s.file_id=?4 THEN 0
+                          WHEN ?5 <> '' AND (
+                            s.qualified_name=?5 || '.' || ?1 OR
+                            s.qualified_name LIKE '%.' || ?5 || '.' || ?1
+                          ) THEN 0
+                          WHEN s.file_id=?4 THEN 1
                           WHEN EXISTS (
                             SELECT 1 FROM import_bindings b
                             WHERE b.target_public_id=s.public_id
                               AND b.file_id=?4
                               AND b.binding_name=?1
-                          ) THEN 1
-                          ELSE 2
+                          ) THEN 2
+                          ELSE 3
                         END AS scope_rank
                  FROM symbols s
                  WHERE s.public_id<>?2 AND s.language=?3
@@ -590,28 +604,39 @@ impl Store {
                  ORDER BY scope_rank,qualified_name,public_id",
             )?;
             let mut targets = target_statement
-                .query_map(params![callee_name, caller_id, language, file_id], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                })?
+                .query_map(
+                    params![
+                        callee_name,
+                        caller_id,
+                        language,
+                        file_id,
+                        receiver_type.as_deref().unwrap_or("")
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    },
+                )?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             let Some(best_rank) = targets.first().map(|target| target.2) else {
                 continue;
             };
             targets.retain(|target| target.2 == best_rank);
             let confidence = match (best_rank, targets.len()) {
-                (0, 1) => 0.99,
-                (1, 1) => 0.97,
-                (0 | 1, _) => 0.65,
-                (2, 1) => 0.75,
+                (0, 1) => 0.995,
+                (1, 1) => 0.99,
+                (2, 1) => 0.97,
+                (0..=2, _) => 0.65,
+                (3, 1) => 0.75,
                 _ => 0.35,
             };
             let scope = match best_rank {
-                0 => "same-file lexical scope",
-                1 => "explicit import scope",
+                0 => "receiver type",
+                1 => "same-file lexical scope",
+                2 => "explicit import scope",
                 _ => "language-wide fallback",
             };
             for (target_id, qualified_name, _) in targets {
@@ -1130,6 +1155,14 @@ mod tests {
                     evidence_file TEXT NOT NULL,
                     evidence_line INTEGER NOT NULL
                 );
+                CREATE TABLE unresolved_calls (
+                    id INTEGER PRIMARY KEY,
+                    file_id INTEGER NOT NULL,
+                    caller_public_id TEXT NOT NULL,
+                    callee_name TEXT NOT NULL,
+                    evidence_file TEXT NOT NULL,
+                    evidence_line INTEGER NOT NULL
+                );
                 ",
             )
             .unwrap();
@@ -1147,5 +1180,16 @@ mod tests {
             .unwrap();
         assert!(columns.contains(&"binding_name".to_owned()));
         assert!(columns.contains(&"target_file_hint".to_owned()));
+
+        let mut statement = store
+            .connection
+            .prepare("PRAGMA table_info(unresolved_calls)")
+            .unwrap();
+        let call_columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(call_columns.contains(&"receiver_type".to_owned()));
     }
 }
