@@ -48,3 +48,18 @@ The comparator reports speedup ratios and preserves the raw normalized values.
 Semantic precision and recall must be reported separately; faster incorrect
 edges do not satisfy Structurely's acceptance gates.
 
+## Semantic quality
+
+Quality manifests list expected caller/callee edges by language. Evaluate a
+fixture from its indexed graph:
+
+```bash
+structurely init fixtures/semantic
+structurely quality \
+  --path fixtures/semantic \
+  --manifest fixtures/semantic/quality.json
+```
+
+The command emits aggregate and per-language precision/recall and exits
+non-zero for any false positive or false negative. CI runs the checked-in
+TypeScript, JavaScript, Python, and Rust fixture on every change.

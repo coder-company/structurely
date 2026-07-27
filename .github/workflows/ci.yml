@@ -38,6 +38,14 @@ jobs:
       - name: Run tests
         run: cargo test --all-targets --locked
 
+      - name: Verify semantic quality fixture
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cargo run --locked -- init fixtures/semantic
+          cargo run --locked -- quality \
+            --path fixtures/semantic \
+            --manifest fixtures/semantic/quality.json
+
       - name: Build release binary
         run: cargo build --release --locked
-

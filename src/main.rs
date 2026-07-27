@@ -82,6 +82,12 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         iterations: usize,
     },
+    Quality {
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value = "quality.json")]
+        manifest: PathBuf,
+    },
     Watch {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -193,6 +199,14 @@ fn main() -> Result<()> {
                 "{}",
                 serde_json::to_string_pretty(&engine.benchmark(&query, iterations, initial)?)?
             );
+        }
+        Command::Quality { path, manifest } => {
+            let engine = Engine::open(path)?;
+            let report = engine.evaluate_quality(manifest)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if !report.passed {
+                anyhow::bail!("semantic quality manifest did not match the indexed graph");
+            }
         }
         Command::Watch { path, debounce_ms } => {
             let mut engine = Engine::open(path)?;

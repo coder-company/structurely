@@ -12,8 +12,8 @@ Structurely is complete only when all gates are evidenced on pinned fixtures.
 
 ## Quality
 
-- TypeScript, JavaScript, Python, and Rust have held-out semantic fixtures.
-- Ambiguous relationship precision and recall are reported per language.
+- TypeScript, JavaScript, Python, and Rust have executable semantic fixtures.
+- Relationship precision and recall are reported in aggregate and per language.
 - Framework resolver adapters require adversarial fixtures and two real repos.
 
 ## Performance

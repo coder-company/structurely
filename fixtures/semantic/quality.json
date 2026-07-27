@@ -1,0 +1,8 @@
+{
+  "edges": [
+    { "language": "typescript", "caller": "tsCaller", "callee": "tsTarget" },
+    { "language": "javascript", "caller": "jsCaller", "callee": "jsTarget" },
+    { "language": "python", "caller": "py_caller", "callee": "py_target" },
+    { "language": "rust", "caller": "rust_caller", "callee": "rust_target" }
+  ]
+}
