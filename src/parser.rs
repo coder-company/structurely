@@ -315,6 +315,9 @@ fn parse_tree(language: Language, source: &str) -> Result<Tree> {
         Language::C => tree_sitter_c::LANGUAGE,
         Language::Cpp => tree_sitter_cpp::LANGUAGE,
         Language::Ruby => tree_sitter_ruby::LANGUAGE,
+        Language::Php => tree_sitter_php::LANGUAGE_PHP,
+        Language::Swift => tree_sitter_swift::LANGUAGE,
+        Language::Lua => tree_sitter_lua::LANGUAGE,
     };
     parser
         .set_language(&grammar.into())
@@ -372,7 +375,16 @@ fn declaration_at<'a>(
 ) -> Option<(String, SymbolKind, Node<'a>, String)> {
     let (kind, name_node) = match node.kind() {
         "class_declaration" | "class_definition" => {
-            (SymbolKind::Class, node.child_by_field_name("name")?)
+            let kind = node
+                .child_by_field_name("declaration_kind")
+                .map(|declaration| node_text(declaration, source))
+                .map(|declaration| match declaration.as_str() {
+                    "struct" => SymbolKind::Struct,
+                    "enum" => SymbolKind::Enum,
+                    _ => SymbolKind::Class,
+                })
+                .unwrap_or(SymbolKind::Class);
+            (kind, node.child_by_field_name("name")?)
         }
         "interface_declaration" => (SymbolKind::Interface, node.child_by_field_name("name")?),
         "function_declaration"
@@ -389,7 +401,7 @@ fn declaration_at<'a>(
         "method_definition" | "method_signature" => {
             (SymbolKind::Method, node.child_by_field_name("name")?)
         }
-        "method_declaration" | "constructor_declaration" => {
+        "method_declaration" | "constructor_declaration" | "protocol_function_declaration" => {
             (SymbolKind::Method, node.child_by_field_name("name")?)
         }
         "local_function_statement" => (SymbolKind::Function, node.child_by_field_name("name")?),
@@ -421,6 +433,7 @@ fn declaration_at<'a>(
         "union_specifier" => (SymbolKind::Type, node.child_by_field_name("name")?),
         "class" => (SymbolKind::Class, node.child_by_field_name("name")?),
         "module" => (SymbolKind::Type, node.child_by_field_name("name")?),
+        "protocol_declaration" => (SymbolKind::Interface, node.child_by_field_name("name")?),
         "method" | "singleton_method" => (
             if container.is_some() {
                 SymbolKind::Method
@@ -509,6 +522,11 @@ fn collect_calls(
             | "method_invocation"
             | "invocation_expression"
             | "object_creation_expression"
+            | "function_call_expression"
+            | "member_call_expression"
+            | "nullsafe_member_call_expression"
+            | "scoped_call_expression"
+            | "function_call"
     ) {
         if let Some(function) = call_target_node(node) {
             if let Some(name) = call_name(function, source) {
@@ -543,6 +561,11 @@ fn call_target_node(node: Node<'_>) -> Option<Node<'_>> {
         "call" => node
             .child_by_field_name("method")
             .or_else(|| node.child_by_field_name("function")),
+        "member_call_expression" | "nullsafe_member_call_expression" | "scoped_call_expression" => {
+            node.child_by_field_name("name")
+        }
+        "function_call" => node.child_by_field_name("name"),
+        "call_expression" if node.child_by_field_name("function").is_none() => node.named_child(0),
         "method_invocation" => node.child_by_field_name("name"),
         "object_creation_expression" => node.child_by_field_name("type"),
         "invocation_expression" => node
@@ -554,9 +577,13 @@ fn call_target_node(node: Node<'_>) -> Option<Node<'_>> {
 
 fn call_name(node: Node<'_>, source: &[u8]) -> Option<String> {
     match node.kind() {
-        "identifier" | "property_identifier" | "field_identifier" | "type_identifier" => {
-            Some(node_text(node, source))
-        }
+        "identifier"
+        | "property_identifier"
+        | "field_identifier"
+        | "type_identifier"
+        | "simple_identifier"
+        | "name"
+        | "variable" => Some(node_text(node, source)),
         "member_expression" => node
             .child_by_field_name("property")
             .map(|property| node_text(property, source)),
@@ -575,6 +602,11 @@ fn call_name(node: Node<'_>, source: &[u8]) -> Option<String> {
             .map(|name| node_text(name, source)),
         "qualified_identifier" => node
             .child_by_field_name("name")
+            .and_then(|name| call_name(name, source)),
+        "method_index_expression" | "dot_index_expression" => node
+            .child_by_field_name("method")
+            .or_else(|| node.child_by_field_name("field"))
+            .or_else(|| node.named_child(node.named_child_count().saturating_sub(1)))
             .and_then(|name| call_name(name, source)),
         "generic_function" => node
             .child_by_field_name("function")
@@ -794,6 +826,59 @@ mod tests {
         assert!(names.contains(&"Greeter"));
         assert!(names.contains(&"Greeter.greet"));
         assert!(names.contains(&"Greeter.helper"));
+        assert_eq!(facts.unresolved_calls[0].callee_name, "helper");
+    }
+
+    #[test]
+    fn extracts_php_classes_methods_and_calls() {
+        let facts = parse_file(
+            "src/Greeter.php",
+            "<?php\nclass Greeter { function greet() { $this->helper(); } function helper() {} }\n",
+        )
+        .unwrap();
+        let names: Vec<_> = facts
+            .symbols
+            .iter()
+            .map(|symbol| symbol.qualified_name.as_str())
+            .collect();
+        assert!(names.contains(&"Greeter"));
+        assert!(names.contains(&"Greeter.greet"));
+        assert!(names.contains(&"Greeter.helper"));
+        assert_eq!(facts.unresolved_calls[0].callee_name, "helper");
+    }
+
+    #[test]
+    fn extracts_swift_types_functions_and_calls() {
+        let facts = parse_file(
+            "Sources/Greeter.swift",
+            "struct Greeter { func greet() { helper() } func helper() {} }\n",
+        )
+        .unwrap();
+        let names: Vec<_> = facts
+            .symbols
+            .iter()
+            .map(|symbol| symbol.qualified_name.as_str())
+            .collect();
+        assert!(names.contains(&"Greeter"));
+        assert!(names.contains(&"Greeter.greet"));
+        assert!(names.contains(&"Greeter.helper"));
+        assert_eq!(facts.unresolved_calls[0].callee_name, "helper");
+    }
+
+    #[test]
+    fn extracts_lua_functions_and_calls() {
+        let facts = parse_file(
+            "src/runner.lua",
+            "local function helper() end\nlocal function run() helper() end\n",
+        )
+        .unwrap();
+        let names: Vec<_> = facts
+            .symbols
+            .iter()
+            .map(|symbol| symbol.name.as_str())
+            .collect();
+        assert!(names.contains(&"helper"));
+        assert!(names.contains(&"run"));
         assert_eq!(facts.unresolved_calls[0].callee_name, "helper");
     }
 }

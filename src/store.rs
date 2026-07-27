@@ -733,6 +733,9 @@ fn parse_language(value: &str) -> Language {
         "c" => Language::C,
         "cpp" => Language::Cpp,
         "ruby" => Language::Ruby,
+        "php" => Language::Php,
+        "swift" => Language::Swift,
+        "lua" => Language::Lua,
         _ => Language::TypeScript,
     }
 }

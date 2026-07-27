@@ -21,6 +21,9 @@ pub enum Language {
     C,
     Cpp,
     Ruby,
+    Php,
+    Swift,
+    Lua,
 }
 
 impl Language {
@@ -38,6 +41,9 @@ impl Language {
             "c" | "h" => Some(Self::C),
             "cc" | "cpp" | "cxx" | "hh" | "hpp" | "hxx" => Some(Self::Cpp),
             "rb" | "rake" => Some(Self::Ruby),
+            "php" | "phtml" => Some(Self::Php),
+            "swift" => Some(Self::Swift),
+            "lua" => Some(Self::Lua),
             _ => None,
         }
     }
@@ -58,6 +64,9 @@ impl fmt::Display for Language {
             Self::C => "c",
             Self::Cpp => "cpp",
             Self::Ruby => "ruby",
+            Self::Php => "php",
+            Self::Swift => "swift",
+            Self::Lua => "lua",
         })
     }
 }
