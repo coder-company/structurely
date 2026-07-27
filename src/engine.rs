@@ -376,6 +376,16 @@ impl Engine {
         &mut self,
         stop: Arc<AtomicBool>,
         debounce: Duration,
+        on_sync: impl FnMut(&IndexReport),
+    ) -> Result<()> {
+        self.watch_ready(stop, debounce, || {}, on_sync)
+    }
+
+    pub fn watch_ready(
+        &mut self,
+        stop: Arc<AtomicBool>,
+        debounce: Duration,
+        on_ready: impl FnOnce(),
         mut on_sync: impl FnMut(&IndexReport),
     ) -> Result<()> {
         let (sender, receiver) = mpsc::channel::<notify::Result<Event>>();
@@ -383,8 +393,10 @@ impl Engine {
             let _ = sender.send(event);
         })?;
         watcher.watch(&self.root, RecursiveMode::Recursive)?;
+        on_ready();
         let poll = Duration::from_millis(50);
         let mut last_relevant_event: Option<Instant> = None;
+        let mut last_reconcile = Instant::now();
 
         while !stop.load(Ordering::Relaxed) {
             match receiver.recv_timeout(poll) {
@@ -404,6 +416,13 @@ impl Engine {
                     on_sync(&report);
                 }
                 last_relevant_event = None;
+                last_reconcile = Instant::now();
+            } else if last_reconcile.elapsed() >= Duration::from_secs(1) {
+                let report = self.sync()?;
+                if report.files_changed > 0 || report.files_deleted > 0 {
+                    on_sync(&report);
+                }
+                last_reconcile = Instant::now();
             }
         }
         if last_relevant_event.is_some() {
@@ -1194,20 +1213,28 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let watcher_stop = Arc::clone(&stop);
         let (report_sender, report_receiver) = mpsc::channel();
+        let (ready_sender, ready_receiver) = mpsc::channel();
         let handle = std::thread::spawn(move || {
             let mut engine = engine;
             engine
-                .watch(watcher_stop, Duration::from_millis(50), |report| {
-                    let _ = report_sender.send(report.clone());
-                })
+                .watch_ready(
+                    watcher_stop,
+                    Duration::from_millis(50),
+                    || {
+                        let _ = ready_sender.send(());
+                    },
+                    |report| {
+                        let _ = report_sender.send(report.clone());
+                    },
+                )
                 .unwrap();
             engine
         });
 
-        std::thread::sleep(Duration::from_millis(250));
+        ready_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
         fs::write(temp.path().join("main.ts"), "function afterSave() {}\n").unwrap();
         let report = report_receiver
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(Duration::from_secs(10))
             .unwrap();
         assert_eq!(report.files_changed, 1);
         stop.store(true, Ordering::Relaxed);
