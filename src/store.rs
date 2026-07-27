@@ -20,6 +20,13 @@ pub struct SearchHit {
     pub score: f64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct FileSummary {
+    pub path: String,
+    pub language: String,
+    pub symbols: usize,
+}
+
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -152,6 +159,36 @@ impl Store {
             .query_map([], |row| row.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         Ok(paths)
+    }
+
+    pub fn file_summaries(&self) -> Result<Vec<FileSummary>> {
+        let mut statement = self.connection.prepare(
+            "SELECT f.path,f.language,COUNT(s.row_id)
+             FROM files f LEFT JOIN symbols s ON s.file_id=f.id
+             GROUP BY f.id,f.path,f.language ORDER BY f.path",
+        )?;
+        let summaries = statement
+            .query_map([], |row| {
+                Ok(FileSummary {
+                    path: row.get(0)?,
+                    language: row.get(1)?,
+                    symbols: row.get::<_, i64>(2)? as usize,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(summaries)
+    }
+
+    pub fn symbols_in_file(&self, file: &str) -> Result<Vec<Symbol>> {
+        let mut statement = self.connection.prepare(
+            "SELECT s.public_id,s.semantic_key,s.language,s.kind,s.name,s.qualified_name,
+                    f.path,s.start_byte,s.end_byte,s.start_line,s.end_line
+             FROM symbols s JOIN files f ON f.id=s.file_id
+             WHERE f.path=?1 ORDER BY s.start_byte,s.end_byte",
+        )?;
+        let rows = statement.query_map([file], Self::symbol_from_row)?;
+        let symbols = Self::collect_symbols(rows)?;
+        Ok(symbols)
     }
 
     pub(crate) fn publish(

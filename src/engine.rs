@@ -1,7 +1,7 @@
 use crate::{
     model::{Evidence, FileFacts, RelationshipKind},
     parser::parse_file,
-    store::{SearchHit, Store},
+    store::{FileSummary, SearchHit, Store},
 };
 use anyhow::{bail, Context, Result};
 use ignore::WalkBuilder;
@@ -54,6 +54,18 @@ pub struct ExploreHit {
     pub source: String,
     pub callers: Vec<(crate::model::Symbol, Evidence)>,
     pub callees: Vec<(crate::model::Symbol, Evidence)>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NodeFile {
+    pub file: String,
+    pub source: Option<String>,
+    pub symbols: Vec<crate::model::Symbol>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NodeResult {
+    pub files: Vec<NodeFile>,
 }
 
 impl Engine {
@@ -180,6 +192,91 @@ impl Engine {
 
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
         self.store.search(query, limit)
+    }
+
+    pub fn files(&self) -> Result<Vec<FileSummary>> {
+        self.store.file_summaries()
+    }
+
+    pub fn node(
+        &self,
+        symbol: Option<&str>,
+        file: Option<&str>,
+        include_code: bool,
+        offset: Option<usize>,
+        limit: Option<usize>,
+        symbols_only: bool,
+    ) -> Result<NodeResult> {
+        let all_files = self.store.file_summaries()?;
+        let matched_files: Vec<_> = if let Some(file) = file {
+            all_files
+                .into_iter()
+                .filter(|candidate| {
+                    candidate.path == file
+                        || candidate.path.ends_with(file)
+                        || Path::new(&candidate.path)
+                            .file_name()
+                            .is_some_and(|name| name == file)
+                })
+                .map(|summary| summary.path)
+                .collect()
+        } else if let Some(symbol) = symbol {
+            self.store
+                .find_symbols(symbol)?
+                .into_iter()
+                .map(|symbol| symbol.file)
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let mut files = Vec::new();
+        for path in matched_files {
+            let mut symbols = self.store.symbols_in_file(&path)?;
+            if let Some(identifier) = symbol {
+                symbols.retain(|candidate| {
+                    candidate.id == identifier
+                        || candidate.name == identifier
+                        || candidate.qualified_name == identifier
+                });
+            }
+            let wants_source = !symbols_only && (symbol.is_none() || include_code);
+            let source = if wants_source {
+                let raw = fs::read_to_string(self.root.join(&path))
+                    .with_context(|| format!("read source {}", path))?;
+                if symbol.is_some() {
+                    let snippets = symbols
+                        .iter()
+                        .filter_map(|symbol| raw.get(symbol.start_byte..symbol.end_byte))
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    Some(snippets)
+                } else {
+                    let start = offset.unwrap_or(1).saturating_sub(1);
+                    let maximum = limit.unwrap_or(2_000).min(2_000);
+                    Some(
+                        raw.lines()
+                            .enumerate()
+                            .skip(start)
+                            .take(maximum)
+                            .map(|(index, line)| format!("{}\t{}", index + 1, line))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    )
+                }
+            } else {
+                None
+            };
+            files.push(NodeFile {
+                file: path,
+                source,
+                symbols,
+            });
+        }
+        files.sort_by(|left, right| left.file.cmp(&right.file));
+        Ok(NodeResult { files })
     }
 
     pub fn explore(&self, query: &str, max_files: usize) -> Result<Vec<ExploreHit>> {
@@ -391,5 +488,35 @@ mod tests {
             assert_eq!(callees[0].0.language, caller.symbol.language);
             assert_eq!(callees[0].1.confidence, 0.95);
         }
+    }
+
+    #[test]
+    fn files_and_node_expose_indexed_source_safely() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join("src")).unwrap();
+        fs::write(
+            temp.path().join("src/main.ts"),
+            "export function main() {\n  return 42;\n}\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+
+        let files = engine.files().unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "src/main.ts");
+
+        let file = engine
+            .node(None, Some("main.ts"), false, Some(2), Some(1), false)
+            .unwrap();
+        assert_eq!(file.files[0].source.as_deref(), Some("2\t  return 42;"));
+
+        let symbol = engine
+            .node(Some("main"), None, true, None, None, false)
+            .unwrap();
+        assert!(symbol.files[0]
+            .source
+            .as_deref()
+            .unwrap()
+            .contains("function main"));
     }
 }
