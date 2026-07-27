@@ -32,3 +32,19 @@ precision and recall are measured against expected edges.
 The CodeGraph CLI reports engine duration rounded to 0.1 seconds; wall medians
 come from `time.perf_counter_ns()` around each complete successful process.
 Raw samples and pinned revisions are preserved in the adjacent JSON files.
+
+## Worker scaling
+
+Commit `82ab5a7aba9697952df3ef091dbb7df42f0f29b8` was also measured with
+`STRUCTURELY_PARSE_WORKERS=1,2,4,8` on the same corpus:
+
+| Workers | Wall time | Max RSS | Staging |
+|---:|---:|---:|---:|
+| 1 | 3.41 s | 59,108 KiB | 2,630 ms |
+| 2 | 1.94 s | 78,280 KiB | 1,149 ms |
+| 4 | 1.66 s | 78,700 KiB | 834 ms |
+| 8 | 1.61 s | 88,808 KiB | 808 ms |
+
+From one to eight workers, wall time improves 2.12× while peak RSS grows only
+1.50×. Memory growth is therefore sublinear in worker count on the pinned
+large-repository fixture. The raw report is in `worker-scaling.json`.

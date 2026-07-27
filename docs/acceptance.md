@@ -22,7 +22,8 @@ Structurely is complete only when all gates are evidenced on pinned fixtures.
   semantic fixture in Linux CI.
 - Large-repository end-to-end indexing is at least 2x the pinned CodeGraph
   baseline on an identical file intersection.
-- Peak memory is sublinear in worker count.
+- Peak memory is sublinear in worker count on the pinned large-repository
+  fixture.
 - WAL growth is bounded and checkpointed.
 
 ## Product
