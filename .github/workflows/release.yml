@@ -41,10 +41,9 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          mkdir dist package
-          cp "${{ matrix.binary }}" package/structurely
-          cp README.md LICENSE package/
-          tar -C package -czf "../dist/structurely-${{ matrix.name }}.tar.gz" .
+          sh scripts/package-unix.sh \
+            "${{ matrix.binary }}" \
+            "${{ matrix.name }}"
 
       - name: Package Windows archive
         if: runner.os == 'Windows'

@@ -22,11 +22,11 @@ command upgrades or repairs an installation. Pin a release instead of following
 `main`:
 
 ```bash
-STRUCTURELY_VERSION=v0.1.0 sh scripts/install.sh
+STRUCTURELY_VERSION=v0.1.1 sh scripts/install.sh
 ```
 
 ```powershell
-$env:STRUCTURELY_VERSION = "v0.1.0"
+$env:STRUCTURELY_VERSION = "v0.1.1"
 ./install.ps1
 ```
 

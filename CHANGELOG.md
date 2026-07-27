@@ -3,6 +3,13 @@
 All notable changes are documented here. Structurely follows semantic
 versioning after the initial `0.1.0` release.
 
+## 0.1.1 — 2026-07-27
+
+- Correct the Unix release archive path and package through a locally testable,
+  shared script.
+- Preserve the successfully tested `v0.1.0` tag while shipping the corrected
+  release pipeline as a patch release.
+
 ## 0.1.0 — 2026-07-27
 
 - Rust-first incremental indexing with atomic SQLite WAL graph epochs.
