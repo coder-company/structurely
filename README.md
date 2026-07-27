@@ -72,6 +72,7 @@ and explanation.
 - [CodeGraph compatibility contract](docs/compatibility.md)
 - [Production acceptance gates](docs/acceptance.md)
 - [Reproducible benchmark protocol](docs/benchmarks.md)
+- [Release and artifact verification](docs/releases.md)
 - [Domain language](CONTEXT.md)
 
 ## Development
@@ -84,3 +85,7 @@ cargo clippy --all-targets -- -D warnings
 
 Structurely is not affiliated with CodeGraph. CodeGraph compatibility describes
 the agent-facing protocol supported by Structurely.
+
+## License
+
+Structurely is available under the [MIT License](LICENSE).

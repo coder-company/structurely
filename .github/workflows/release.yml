@@ -1,0 +1,104 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            binary: target/release/structurely
+          - name: macos-aarch64
+            os: macos-latest
+            binary: target/release/structurely
+          - name: macos-x86_64
+            os: macos-15-intel
+            binary: target/release/structurely
+          - name: windows-x86_64
+            os: windows-latest
+            binary: target/release/structurely.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Test locked source
+        run: cargo test --all-targets --locked
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package Unix archive
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir dist package
+          cp "${{ matrix.binary }}" package/structurely
+          cp README.md LICENSE package/
+          tar -C package -czf "../dist/structurely-${{ matrix.name }}.tar.gz" .
+
+      - name: Package Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist, package
+          Copy-Item "${{ matrix.binary }}" package/structurely.exe
+          Copy-Item README.md, LICENSE package/
+          Compress-Archive `
+            -Path package/* `
+            -DestinationPath "dist/structurely-${{ matrix.name }}.zip"
+
+      - name: Upload release archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: structurely-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish verified release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download release archives
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: structurely-*
+          merge-multiple: true
+          path: release
+
+      - name: Generate SHA-256 checksums
+        shell: bash
+        run: |
+          cd release
+          sha256sum structurely-* > SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: release/*
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --generate-notes \
+            --title "Structurely $GITHUB_REF_NAME"
