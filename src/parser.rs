@@ -56,11 +56,20 @@ pub(crate) fn parse_file(relative_path: &str, source: &str) -> Result<FileFacts>
     }
 
     let mut unresolved_calls = Vec::new();
+    let symbol_owners = symbols
+        .iter()
+        .skip(1)
+        .map(|symbol| ((symbol.start_byte, symbol.end_byte), symbol.id.clone()))
+        .collect::<HashMap<_, _>>();
+    let mut receiver_bindings = HashMap::<String, Vec<(usize, String)>>::new();
+    collect_receiver_bindings(tree.root_node(), source_bytes, &mut receiver_bindings);
     collect_calls(
         tree.root_node(),
         source_bytes,
         relative_path,
-        &symbols,
+        &symbol_owners,
+        &receiver_bindings,
+        &file_symbol.id,
         &mut unresolved_calls,
     );
     let mut unresolved_references = Vec::new();
@@ -606,7 +615,9 @@ fn collect_calls(
     node: Node<'_>,
     source: &[u8],
     file: &str,
-    symbols: &[Symbol],
+    symbol_owners: &HashMap<(usize, usize), String>,
+    receiver_bindings: &HashMap<String, Vec<(usize, String)>>,
+    file_symbol_id: &str,
     output: &mut Vec<UnresolvedCall>,
 ) {
     if matches!(
@@ -624,34 +635,47 @@ fn collect_calls(
     ) {
         if let Some(function) = call_target_node(node) {
             if let Some(name) = call_name(function, source) {
-                let caller = symbols
-                    .iter()
-                    .filter(|symbol| {
-                        symbol.kind != SymbolKind::File
-                            && symbol.start_byte <= node.start_byte()
-                            && symbol.end_byte >= node.end_byte()
-                    })
-                    .min_by_key(|symbol| symbol.end_byte - symbol.start_byte)
-                    .or_else(|| symbols.first());
-                if let Some(caller) = caller {
-                    output.push(UnresolvedCall {
-                        caller_id: caller.id.clone(),
-                        callee_name: name,
-                        receiver_type: receiver_type_hint(function, node, source),
-                        file: file.to_owned(),
-                        line: node.start_position().row + 1,
-                    });
+                let mut owner = node.parent();
+                let mut caller_id = None;
+                while let Some(ancestor) = owner {
+                    if let Some(symbol_id) =
+                        symbol_owners.get(&(ancestor.start_byte(), ancestor.end_byte()))
+                    {
+                        caller_id = Some(symbol_id.as_str());
+                        break;
+                    }
+                    owner = ancestor.parent();
                 }
+                output.push(UnresolvedCall {
+                    caller_id: caller_id.unwrap_or(file_symbol_id).to_owned(),
+                    callee_name: name,
+                    receiver_type: receiver_type_hint(function, node, source, receiver_bindings),
+                    file: file.to_owned(),
+                    line: node.start_position().row + 1,
+                });
             }
         }
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        collect_calls(child, source, file, symbols, output);
+        collect_calls(
+            child,
+            source,
+            file,
+            symbol_owners,
+            receiver_bindings,
+            file_symbol_id,
+            output,
+        );
     }
 }
 
-fn receiver_type_hint(function: Node<'_>, call: Node<'_>, source: &[u8]) -> Option<String> {
+fn receiver_type_hint(
+    function: Node<'_>,
+    call: Node<'_>,
+    source: &[u8],
+    receiver_bindings: &HashMap<String, Vec<(usize, String)>>,
+) -> Option<String> {
     let receiver = function
         .child_by_field_name("object")
         .or_else(|| function.child_by_field_name("receiver"))
@@ -669,22 +693,20 @@ fn receiver_type_hint(function: Node<'_>, call: Node<'_>, source: &[u8]) -> Opti
         return None;
     }
     let variable = node_text(receiver, source);
-    let mut root = call;
-    while let Some(parent) = root.parent() {
-        root = parent;
-    }
-    find_variable_constructor(root, &variable, call.start_byte(), source)
+    receiver_bindings.get(&variable).and_then(|bindings| {
+        bindings
+            .iter()
+            .rev()
+            .find(|(position, _)| *position < call.start_byte())
+            .map(|(_, receiver_type)| receiver_type.clone())
+    })
 }
 
-fn find_variable_constructor(
+fn collect_receiver_bindings(
     node: Node<'_>,
-    variable: &str,
-    before_byte: usize,
     source: &[u8],
-) -> Option<String> {
-    if node.start_byte() >= before_byte {
-        return None;
-    }
+    output: &mut HashMap<String, Vec<(usize, String)>>,
+) {
     if matches!(
         node.kind(),
         "variable_declarator"
@@ -700,25 +722,23 @@ fn find_variable_constructor(
         let value = node
             .child_by_field_name("value")
             .or_else(|| node.child_by_field_name("right"));
-        if name.is_some_and(|name| node_text(name, source) == variable) {
-            if let Some(value) = value {
-                if let Some(inferred) = constructor_type(value, source) {
-                    return Some(inferred);
-                }
-            }
-            if let Some(declared) = declared_variable_type(node, source) {
-                return Some(declared);
+        if let Some(name) = name {
+            let variable = node_text(name, source);
+            let receiver_type = value
+                .and_then(|value| constructor_type(value, source))
+                .or_else(|| declared_variable_type(node, source));
+            if let Some(receiver_type) = receiver_type {
+                output
+                    .entry(variable)
+                    .or_default()
+                    .push((node.start_byte(), receiver_type));
             }
         }
     }
     let mut cursor = node.walk();
-    let mut inferred = None;
     for child in node.named_children(&mut cursor) {
-        if let Some(found) = find_variable_constructor(child, variable, before_byte, source) {
-            inferred = Some(found);
-        }
+        collect_receiver_bindings(child, source, output);
     }
-    inferred
 }
 
 fn constructor_type(node: Node<'_>, source: &[u8]) -> Option<String> {

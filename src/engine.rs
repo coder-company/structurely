@@ -3,7 +3,7 @@ use crate::{
     parser::parse_file,
     store::{FileSummary, SearchHit, StorageMetrics, Store},
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use ignore::WalkBuilder;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use serde::Serialize;
@@ -13,8 +13,9 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc,
+        mpsc, Arc, Mutex,
     },
+    thread,
     time::Duration,
     time::Instant,
 };
@@ -37,6 +38,9 @@ pub struct IndexReport {
     pub files_deleted: usize,
     pub symbols_changed: usize,
     pub relationships_resolved: usize,
+    pub parse_workers: usize,
+    pub staging_ms: u128,
+    pub resolution_ms: u128,
     pub duration_ms: u128,
 }
 
@@ -177,16 +181,69 @@ impl Engine {
         let indexed: HashSet<_> = self.store.indexed_files()?.into_iter().collect();
         let deleted: Vec<_> = indexed.difference(&seen).cloned().collect();
         let files_changed = changed.len();
-        let (epoch, relationships_resolved, symbols_changed) =
+        let parse_workers = thread::available_parallelism()
+            .map(|parallelism| parallelism.get())
+            .unwrap_or(1)
+            .min(8)
+            .min(files_changed.max(1));
+        let (epoch, relationships_resolved, symbols_changed, staging_ms, resolution_ms) =
             if changed.is_empty() && deleted.is_empty() {
-                (self.store.epoch()?, 0, 0)
-            } else {
+                (self.store.epoch()?, 0, 0, 0, 0)
+            } else if parse_workers == 1 {
                 let facts = changed.iter().map(|(relative, path)| {
                     let source = fs::read_to_string(path)
                         .with_context(|| format!("read source {}", path.display()))?;
                     parse_file(relative, &source)
                 });
                 self.store.publish(facts, &deleted)?
+            } else {
+                thread::scope(|scope| {
+                    let (work_sender, work_receiver) = mpsc::channel::<(String, PathBuf)>();
+                    let work_receiver = Arc::new(Mutex::new(work_receiver));
+                    let (result_sender, result_receiver) =
+                        mpsc::sync_channel::<Result<crate::model::FileFacts>>(
+                            parse_workers.saturating_mul(2),
+                        );
+                    for _ in 0..parse_workers {
+                        let work_receiver = Arc::clone(&work_receiver);
+                        let result_sender = result_sender.clone();
+                        scope.spawn(move || loop {
+                            let work = match work_receiver.lock() {
+                                Ok(receiver) => receiver.recv(),
+                                Err(_) => return,
+                            };
+                            let Ok((relative, path)) = work else {
+                                return;
+                            };
+                            let facts = fs::read_to_string(&path)
+                                .with_context(|| format!("read source {}", path.display()))
+                                .and_then(|source| parse_file(&relative, &source));
+                            if result_sender.send(facts).is_err() {
+                                return;
+                            }
+                        });
+                    }
+                    drop(result_sender);
+                    for work in changed.iter().cloned() {
+                        work_sender
+                            .send(work)
+                            .map_err(|_| anyhow!("parser worker queue closed"))?;
+                    }
+                    drop(work_sender);
+                    let mut received = 0;
+                    let facts = std::iter::from_fn(|| {
+                        if received >= files_changed {
+                            return None;
+                        }
+                        received += 1;
+                        Some(
+                            result_receiver
+                                .recv()
+                                .unwrap_or_else(|_| Err(anyhow!("parser worker stopped"))),
+                        )
+                    });
+                    self.store.publish(facts, &deleted)
+                })?
             };
 
         Ok(IndexReport {
@@ -197,6 +254,9 @@ impl Engine {
             files_deleted: deleted.len(),
             symbols_changed,
             relationships_resolved,
+            parse_workers,
+            staging_ms,
+            resolution_ms,
             duration_ms: started.elapsed().as_millis(),
         })
     }

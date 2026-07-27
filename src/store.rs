@@ -5,7 +5,11 @@ use crate::model::{
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::Serialize;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 const SCHEMA_VERSION: u32 = 1;
 const WAL_AUTOCHECKPOINT_PAGES: u32 = 256;
@@ -392,12 +396,17 @@ impl Store {
         Ok(symbols)
     }
 
-    pub(crate) fn publish<I>(&mut self, facts: I, deleted: &[String]) -> Result<(u64, usize, usize)>
+    pub(crate) fn publish<I>(
+        &mut self,
+        facts: I,
+        deleted: &[String],
+    ) -> Result<(u64, usize, usize, u128, u128)>
     where
         I: IntoIterator<Item = Result<FileFacts>>,
     {
         let next_epoch = self.epoch()? + 1;
         let tx = self.connection.transaction()?;
+        let staging_started = Instant::now();
         for path in deleted {
             Self::delete_file(&tx, path)?;
         }
@@ -407,14 +416,23 @@ impl Store {
             symbols_changed += file.symbols.len();
             Self::replace_file(&tx, &file, next_epoch)?;
         }
+        let staging_ms = staging_started.elapsed().as_millis();
+        let resolution_started = Instant::now();
         let relationships_resolved = Self::finish_epoch(&tx, next_epoch)?;
+        let resolution_ms = resolution_started.elapsed().as_millis();
         tx.commit()?;
         let _: (u32, u32, u32) =
             self.connection
                 .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
                     Ok((row.get(0)?, row.get(1)?, row.get(2)?))
                 })?;
-        Ok((next_epoch, relationships_resolved, symbols_changed))
+        Ok((
+            next_epoch,
+            relationships_resolved,
+            symbols_changed,
+            staging_ms,
+            resolution_ms,
+        ))
     }
 
     fn finish_epoch(tx: &Transaction<'_>, next_epoch: u64) -> Result<usize> {
@@ -468,83 +486,88 @@ impl Store {
 
     fn replace_file(tx: &Transaction<'_>, file: &FileFacts, epoch: u64) -> Result<()> {
         Self::delete_file(tx, &file.path)?;
-        tx.execute(
+        tx.prepare_cached(
             "INSERT INTO files(path, content_hash, language, indexed_epoch) VALUES (?1, ?2, ?3, ?4)",
-            params![file.path, file.content_hash, file.language.to_string(), epoch],
-        )?;
+        )?
+        .execute(params![
+            file.path,
+            file.content_hash,
+            file.language.to_string(),
+            epoch
+        ])?;
         let file_id = tx.last_insert_rowid();
         for symbol in &file.symbols {
-            tx.execute(
+            tx.prepare_cached(
                 "INSERT INTO symbols(
                     public_id, semantic_key, file_id, language, kind, name, qualified_name,
                     start_byte, end_byte, start_line, end_line
                  ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
-                params![
-                    symbol.id,
-                    symbol.semantic_key,
-                    file_id,
-                    symbol.language.to_string(),
-                    symbol.kind.to_string(),
-                    symbol.name,
-                    symbol.qualified_name,
-                    symbol.start_byte as i64,
-                    symbol.end_byte as i64,
-                    symbol.start_line as i64,
-                    symbol.end_line as i64
-                ],
-            )?;
-            tx.execute(
+            )?
+            .execute(params![
+                symbol.id,
+                symbol.semantic_key,
+                file_id,
+                symbol.language.to_string(),
+                symbol.kind.to_string(),
+                symbol.name,
+                symbol.qualified_name,
+                symbol.start_byte as i64,
+                symbol.end_byte as i64,
+                symbol.start_line as i64,
+                symbol.end_line as i64
+            ])?;
+            tx.prepare_cached(
                 "INSERT INTO symbol_search(public_id, name, qualified_name, file, segments)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    symbol.id,
-                    symbol.name,
-                    symbol.qualified_name,
-                    symbol.file,
-                    identifier_segments(&format!("{} {}", symbol.name, symbol.qualified_name))
-                        .join(" ")
-                ],
-            )?;
+            )?
+            .execute(params![
+                symbol.id,
+                symbol.name,
+                symbol.qualified_name,
+                symbol.file,
+                identifier_segments(&format!("{} {}", symbol.name, symbol.qualified_name))
+                    .join(" ")
+            ])?;
         }
         for relationship in &file.relationships {
             Self::insert_relationship(tx, relationship)?;
         }
         for call in &file.unresolved_calls {
-            tx.execute(
+            tx.prepare_cached(
                 "INSERT INTO unresolved_calls(
                     file_id, caller_public_id, callee_name, receiver_type,
                     evidence_file, evidence_line
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    file_id,
-                    call.caller_id,
-                    call.callee_name,
-                    call.receiver_type,
-                    call.file,
-                    call.line as i64
-                ],
-            )?;
+            )?
+            .execute(params![
+                file_id,
+                call.caller_id,
+                call.callee_name,
+                call.receiver_type,
+                call.file,
+                call.line as i64
+            ])?;
         }
         for reference in &file.unresolved_references {
-            tx.execute(
+            tx.prepare_cached(
                 "INSERT INTO unresolved_references(
                     file_id,source_public_id,target_name,binding_name,target_file_hint,
                     kind,provenance,confidence,explanation,evidence_file,evidence_line
                  ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
-                params![
-                    file_id,
-                    reference.source_id,
-                    reference.target_name,
-                    reference.binding_name,
-                    reference.target_file_hint,
-                    reference.kind.to_string(),
-                    reference.provenance,
-                    reference.confidence,
-                    reference.explanation,
-                    reference.file,
-                    reference.line as i64
-                ],
-            )?;
+            )?
+            .execute(params![
+                file_id,
+                reference.source_id,
+                reference.target_name,
+                reference.binding_name,
+                reference.target_file_hint,
+                reference.kind.to_string(),
+                reference.provenance,
+                reference.confidence,
+                reference.explanation,
+                reference.file,
+                reference.line as i64
+            ])?;
         }
         Ok(())
     }
@@ -577,58 +600,94 @@ impl Store {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(calls_statement);
 
+        let mut direct_statement = tx.prepare(
+            "SELECT public_id,qualified_name,file_id
+             FROM symbols
+             WHERE name=?1 AND language=?2
+             ORDER BY qualified_name,public_id",
+        )?;
+        let mut import_statement = tx.prepare(
+            "SELECT s.public_id,s.qualified_name,s.file_id
+             FROM import_bindings b
+             JOIN symbols s ON s.public_id=b.target_public_id
+             WHERE b.file_id=?1 AND b.binding_name=?2 AND s.language=?3
+             ORDER BY s.qualified_name,s.public_id",
+        )?;
+        let mut candidate_cache =
+            HashMap::<(String, String, i64, String), Vec<(String, String, i64)>>::new();
         for (caller_id, callee_name, receiver_type, file, line, language, file_id) in calls {
-            let mut target_statement = tx.prepare(
-                "SELECT s.public_id,s.qualified_name,
-                        CASE
-                          WHEN ?5 <> '' AND (
-                            s.qualified_name=?5 || '.' || ?1 OR
-                            s.qualified_name LIKE '%.' || ?5 || '.' || ?1
-                          ) THEN 0
-                          WHEN s.file_id=?4 THEN 1
-                          WHEN EXISTS (
-                            SELECT 1 FROM import_bindings b
-                            WHERE b.target_public_id=s.public_id
-                              AND b.file_id=?4
-                              AND b.binding_name=?1
-                          ) THEN 2
-                          ELSE 3
-                        END AS scope_rank
-                 FROM symbols s
-                 WHERE s.public_id<>?2 AND s.language=?3
-                   AND (
-                     s.name=?1 OR EXISTS (
-                       SELECT 1 FROM import_bindings imported
-                       WHERE imported.target_public_id=s.public_id
-                         AND imported.file_id=?4
-                         AND imported.binding_name=?1
-                     )
-                   )
-                 ORDER BY scope_rank,qualified_name,public_id",
-            )?;
-            let mut targets = target_statement
-                .query_map(
-                    params![
-                        callee_name,
-                        caller_id,
-                        language,
-                        file_id,
-                        receiver_type.as_deref().unwrap_or("")
-                    ],
-                    |row| {
+            let receiver_type = receiver_type.unwrap_or_default();
+            let cache_key = (
+                callee_name.clone(),
+                language.clone(),
+                file_id,
+                receiver_type.clone(),
+            );
+            if !candidate_cache.contains_key(&cache_key) {
+                let mut candidates = HashMap::<String, (String, i64, bool)>::new();
+                for candidate in direct_statement
+                    .query_map(params![callee_name, language], |row| {
                         Ok((
                             row.get::<_, String>(0)?,
                             row.get::<_, String>(1)?,
                             row.get::<_, i64>(2)?,
                         ))
-                    },
-                )?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+                {
+                    candidates.insert(candidate.0, (candidate.1, candidate.2, false));
+                }
+                for candidate in import_statement
+                    .query_map(params![file_id, callee_name, language], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+                {
+                    candidates
+                        .entry(candidate.0)
+                        .and_modify(|value| value.2 = true)
+                        .or_insert((candidate.1, candidate.2, true));
+                }
+                let mut targets = candidates
+                    .into_iter()
+                    .map(|(public_id, (qualified_name, target_file_id, imported))| {
+                        let receiver_match = !receiver_type.is_empty()
+                            && (qualified_name == format!("{receiver_type}.{callee_name}")
+                                || qualified_name
+                                    .ends_with(&format!(".{receiver_type}.{callee_name}")));
+                        let rank = if receiver_match {
+                            0
+                        } else if target_file_id == file_id {
+                            1
+                        } else if imported {
+                            2
+                        } else {
+                            3
+                        };
+                        (public_id, qualified_name, rank)
+                    })
+                    .collect::<Vec<_>>();
+                targets.sort_by(|left, right| {
+                    left.2
+                        .cmp(&right.2)
+                        .then_with(|| left.1.cmp(&right.1))
+                        .then_with(|| left.0.cmp(&right.0))
+                });
+                candidate_cache.insert(cache_key.clone(), targets);
+            }
+            let targets = &candidate_cache[&cache_key];
             let Some(best_rank) = targets.first().map(|target| target.2) else {
                 continue;
             };
-            targets.retain(|target| target.2 == best_rank);
-            let confidence = match (best_rank, targets.len()) {
+            let target_count = targets
+                .iter()
+                .take_while(|target| target.2 == best_rank)
+                .count();
+            let confidence = match (best_rank, target_count) {
                 (0, 1) => 0.995,
                 (1, 1) => 0.99,
                 (2, 1) => 0.97,
@@ -642,12 +701,14 @@ impl Store {
                 2 => "explicit import scope",
                 _ => "language-wide fallback",
             };
-            for (target_id, qualified_name, _) in targets {
+            for (target_id, qualified_name, _) in
+                targets.iter().take_while(|target| target.2 == best_rank)
+            {
                 Self::insert_relationship(
                     tx,
                     &Relationship {
                         source_id: caller_id.clone(),
-                        target_id,
+                        target_id: target_id.clone(),
                         kind: RelationshipKind::Calls,
                         evidence: Evidence::new(
                             "tree-sitter/name-resolution",
@@ -788,22 +849,22 @@ impl Store {
     }
 
     fn insert_relationship(tx: &Transaction<'_>, relationship: &Relationship) -> Result<()> {
-        tx.execute(
+        tx.prepare_cached(
             "INSERT OR REPLACE INTO relationships(
                 source_public_id, target_public_id, kind, provenance, confidence,
                 explanation, evidence_file, evidence_line
              ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![
-                relationship.source_id,
-                relationship.target_id,
-                relationship.kind.to_string(),
-                relationship.evidence.provenance,
-                relationship.evidence.confidence,
-                relationship.evidence.explanation,
-                relationship.evidence.file,
-                relationship.evidence.line as i64
-            ],
-        )?;
+        )?
+        .execute(params![
+            relationship.source_id,
+            relationship.target_id,
+            relationship.kind.to_string(),
+            relationship.evidence.provenance,
+            relationship.evidence.confidence,
+            relationship.evidence.explanation,
+            relationship.evidence.file,
+            relationship.evidence.line as i64
+        ])?;
         Ok(())
     }
 
