@@ -44,10 +44,15 @@ structurely init /path/to/project
 structurely status /path/to/project
 structurely search UserController --path /path/to/project
 structurely explore authentication --path /path/to/project
+structurely watch /path/to/project
 ```
 
 Indexes are stored in `/path/to/project/.structurely/graph.db`. Source code and
 graph data stay local.
+
+`structurely watch` keeps the graph synchronized through native recursive
+filesystem notifications. Changes are debounced into one transactional graph
+epoch; press Ctrl-C for a graceful final flush and shutdown.
 
 ## MCP
 

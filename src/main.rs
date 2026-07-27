@@ -1,6 +1,11 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::time::Duration;
 use structurely::{mcp, Engine};
 
 #[derive(Parser)]
@@ -76,6 +81,12 @@ enum Command {
         query: String,
         #[arg(long, default_value_t = 20)]
         iterations: usize,
+    },
+    Watch {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value_t = 250)]
+        debounce_ms: u64,
     },
     Serve {
         #[arg(long)]
@@ -182,6 +193,22 @@ fn main() -> Result<()> {
                 "{}",
                 serde_json::to_string_pretty(&engine.benchmark(&query, iterations, initial)?)?
             );
+        }
+        Command::Watch { path, debounce_ms } => {
+            let mut engine = Engine::open(path)?;
+            let stop = Arc::new(AtomicBool::new(false));
+            let signal = Arc::clone(&stop);
+            ctrlc::set_handler(move || signal.store(true, Ordering::Relaxed))?;
+            eprintln!(
+                "Watching {} (debounce: {} ms). Press Ctrl-C to stop.",
+                engine.root().display(),
+                debounce_ms
+            );
+            engine.watch(stop, Duration::from_millis(debounce_ms.max(10)), |report| {
+                if let Ok(rendered) = serde_json::to_string(report) {
+                    println!("{rendered}");
+                }
+            })?;
         }
         Command::Serve { mcp: true, path } => mcp::serve_stdio(&path)?,
         Command::Serve { mcp: false, .. } => {

@@ -5,11 +5,17 @@ use crate::{
 };
 use anyhow::{bail, Context, Result};
 use ignore::WalkBuilder;
+use notify::{Event, EventKind, RecursiveMode, Watcher};
 use serde::Serialize;
 use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
+    time::Duration,
     time::Instant,
 };
 
@@ -277,6 +283,66 @@ impl Engine {
             indexed_files: snapshot.files.len(),
             symbols: snapshot.symbols.len(),
             relationships: snapshot.relationships.len(),
+        })
+    }
+
+    pub fn watch(
+        &mut self,
+        stop: Arc<AtomicBool>,
+        debounce: Duration,
+        mut on_sync: impl FnMut(&IndexReport),
+    ) -> Result<()> {
+        let (sender, receiver) = mpsc::channel::<notify::Result<Event>>();
+        let mut watcher = notify::recommended_watcher(move |event| {
+            let _ = sender.send(event);
+        })?;
+        watcher.watch(&self.root, RecursiveMode::Recursive)?;
+        let poll = Duration::from_millis(50);
+        let mut last_relevant_event: Option<Instant> = None;
+
+        while !stop.load(Ordering::Relaxed) {
+            match receiver.recv_timeout(poll) {
+                Ok(Ok(event)) if self.relevant_watch_event(&event) => {
+                    last_relevant_event = Some(Instant::now());
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => return Err(error.into()),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    bail!("filesystem watcher disconnected")
+                }
+            }
+            if last_relevant_event.is_some_and(|last| last.elapsed() >= debounce) {
+                let report = self.sync()?;
+                if report.files_changed > 0 || report.files_deleted > 0 {
+                    on_sync(&report);
+                }
+                last_relevant_event = None;
+            }
+        }
+        if last_relevant_event.is_some() {
+            let report = self.sync()?;
+            if report.files_changed > 0 || report.files_deleted > 0 {
+                on_sync(&report);
+            }
+        }
+        drop(watcher);
+        Ok(())
+    }
+
+    fn relevant_watch_event(&self, event: &Event) -> bool {
+        if matches!(event.kind, EventKind::Access(_)) {
+            return false;
+        }
+        event.paths.iter().any(|path| {
+            path.strip_prefix(&self.root).is_ok_and(|relative| {
+                !relative
+                    .components()
+                    .any(|part| part.as_os_str() == PROJECT_DIR)
+                    && (crate::model::Language::from_path(relative).is_some()
+                        || path.is_dir()
+                        || !path.exists())
+            })
         })
     }
 
@@ -850,5 +916,35 @@ mod tests {
         assert_eq!(callees[0].symbol.file, "defs.ts");
         assert_eq!(callees[0].symbol.name, "helper");
         assert_eq!(callees[0].evidence.confidence, 0.97);
+    }
+
+    #[test]
+    fn watcher_makes_saved_symbols_query_visible() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("main.ts"), "function before() {}\n").unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let watcher_stop = Arc::clone(&stop);
+        let (report_sender, report_receiver) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let mut engine = engine;
+            engine
+                .watch(watcher_stop, Duration::from_millis(50), |report| {
+                    let _ = report_sender.send(report.clone());
+                })
+                .unwrap();
+            engine
+        });
+
+        std::thread::sleep(Duration::from_millis(250));
+        fs::write(temp.path().join("main.ts"), "function afterSave() {}\n").unwrap();
+        let report = report_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(report.files_changed, 1);
+        stop.store(true, Ordering::Relaxed);
+        let engine = handle.join().unwrap();
+        let hits = engine.search("afterSave", 10).unwrap();
+        assert_eq!(hits[0].symbol.name, "afterSave");
     }
 }
