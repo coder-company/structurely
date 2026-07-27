@@ -834,6 +834,32 @@ mod tests {
     }
 
     #[test]
+    fn injected_failure_cannot_publish_a_partial_graph_epoch() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("main.ts"), "function before() {}\n").unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let before = serde_json::to_string(&engine.snapshot().unwrap()).unwrap();
+        let epoch = engine.status().unwrap().epoch;
+
+        let replacement = parse_file("main.ts", "function after() {}\n").unwrap();
+        engine
+            .store
+            .inject_rolled_back_publish(&[replacement], &[])
+            .unwrap();
+
+        assert_eq!(engine.status().unwrap().epoch, epoch);
+        assert_eq!(
+            serde_json::to_string(&engine.snapshot().unwrap()).unwrap(),
+            before
+        );
+        assert!(engine.search("after", 10).unwrap().is_empty());
+        assert_eq!(
+            engine.search("before", 10).unwrap()[0].symbol.name,
+            "before"
+        );
+    }
+
+    #[test]
     fn incremental_and_clean_snapshots_are_identical() {
         let incremental_dir = tempfile::tempdir().unwrap();
         let clean_dir = tempfile::tempdir().unwrap();

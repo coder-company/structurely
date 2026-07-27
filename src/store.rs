@@ -392,13 +392,29 @@ impl Store {
     ) -> Result<(u64, usize)> {
         let next_epoch = self.epoch()? + 1;
         let tx = self.connection.transaction()?;
+        let relationships_resolved = Self::apply_epoch(&tx, facts, deleted, next_epoch)?;
+        tx.commit()?;
+        let _: (u32, u32, u32) =
+            self.connection
+                .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?;
+        Ok((next_epoch, relationships_resolved))
+    }
+
+    fn apply_epoch(
+        tx: &Transaction<'_>,
+        facts: &[FileFacts],
+        deleted: &[String],
+        next_epoch: u64,
+    ) -> Result<usize> {
         for path in deleted {
-            Self::delete_file(&tx, path)?;
+            Self::delete_file(tx, path)?;
         }
         for file in facts {
-            Self::replace_file(&tx, file, next_epoch)?;
+            Self::replace_file(tx, file, next_epoch)?;
         }
-        let relationships_resolved = Self::resolve_calls(&tx)?;
+        let relationships_resolved = Self::resolve_calls(tx)?;
         tx.execute(
             "UPDATE metadata SET value = ?1 WHERE key = 'graph_epoch'",
             [next_epoch.to_string()],
@@ -408,13 +424,20 @@ impl Store {
              ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             [GRAPH_MODEL_VERSION.to_string()],
         )?;
-        tx.commit()?;
-        let _: (u32, u32, u32) =
-            self.connection
-                .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                })?;
-        Ok((next_epoch, relationships_resolved))
+        Ok(relationships_resolved)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_rolled_back_publish(
+        &mut self,
+        facts: &[FileFacts],
+        deleted: &[String],
+    ) -> Result<()> {
+        let next_epoch = self.epoch()? + 1;
+        let tx = self.connection.transaction()?;
+        Self::apply_epoch(&tx, facts, deleted, next_epoch)?;
+        tx.rollback()?;
+        Ok(())
     }
 
     fn delete_file(tx: &Transaction<'_>, path: &str) -> Result<()> {

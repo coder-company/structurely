@@ -8,7 +8,7 @@ Structurely is complete only when all gates are evidenced on pinned fixtures.
 - Line-only and comment-only edits preserve symbol IDs.
 - Every relationship contains valid evidence and a confidence in `[0, 1]`.
 - Differential MCP fixtures preserve required CodeGraph fields.
-- Crash injection cannot expose a partially updated graph epoch.
+- Injected rollback cannot expose a partially updated graph epoch.
 
 ## Quality
 
@@ -18,8 +18,8 @@ Structurely is complete only when all gates are evidenced on pinned fixtures.
 
 ## Performance
 
-- Common one-file changes become query-visible within 300 ms on the reference
-  fixture.
+- Common one-file changes become query-visible within 300 ms on the pinned
+  semantic fixture in Linux CI.
 - Large-repository indexing is at least 2x the pinned CodeGraph baseline or
   delivers a statistically significant semantic-quality improvement.
 - Peak memory is sublinear in worker count.

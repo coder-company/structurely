@@ -47,5 +47,32 @@ jobs:
             --path fixtures/semantic \
             --manifest fixtures/semantic/quality.json
 
+      - name: Enforce incremental visibility budget
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import pathlib
+          import subprocess
+
+          source = pathlib.Path("fixtures/semantic/main.ts")
+          source.write_text(source.read_text() + "\n// incremental CI edit\n")
+          result = subprocess.run(
+              ["cargo", "run", "--quiet", "--locked", "--", "sync", "fixtures/semantic"],
+              check=True,
+              capture_output=True,
+              text=True,
+          )
+          report = json.loads(result.stdout)
+          assert report["files_changed"] == 1, report
+          assert report["duration_ms"] <= 300, report
+          print(json.dumps(report, indent=2))
+          PY
+
+      - name: Test benchmark comparator
+        if: runner.os == 'Linux'
+        run: python3 -m unittest scripts/test_compare_benchmarks.py
+
       - name: Build release binary
         run: cargo build --release --locked

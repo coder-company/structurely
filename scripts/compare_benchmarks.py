@@ -19,7 +19,7 @@ def load(path: Path) -> dict[str, Any]:
 
 def positive_number(report: dict[str, Any], key: str) -> float:
     value = report.get(key)
-    if not isinstance(value, (int, float)) or value < 0:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
         raise ValueError(f"{key} must be a non-negative number")
     return float(value)
 
@@ -77,4 +77,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
