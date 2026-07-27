@@ -1,7 +1,7 @@
 use crate::{
     model::{Evidence, FileFacts, RelationshipKind},
     parser::parse_file,
-    store::{FileSummary, SearchHit, Store},
+    store::{FileSummary, SearchHit, StorageMetrics, Store},
 };
 use anyhow::{bail, Context, Result};
 use ignore::WalkBuilder;
@@ -45,6 +45,7 @@ pub struct ProjectStatus {
     pub epoch: u64,
     pub indexed_files: usize,
     pub pending_files: usize,
+    pub storage: StorageMetrics,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -221,6 +222,7 @@ impl Engine {
             epoch: self.store.epoch()?,
             indexed_files: indexed.len(),
             pending_files: pending,
+            storage: self.store.storage_metrics()?,
         })
     }
 
@@ -805,6 +807,30 @@ mod tests {
         let mut engine = Engine::open(temp.path()).unwrap();
         let report = engine.sync().unwrap();
         assert_eq!(report.files_changed, 1);
+    }
+
+    #[test]
+    fn repeated_epochs_checkpoint_and_report_bounded_wal_storage() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("main.rs");
+        fs::write(&source, "fn revision_0() {}\n").unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+
+        for revision in 1..=300 {
+            fs::write(&source, format!("fn revision_{revision}() {{}}\n")).unwrap();
+            engine.sync().unwrap();
+        }
+
+        let status = engine.status().unwrap();
+        assert_eq!(status.epoch, 301);
+        assert_eq!(status.storage.wal_autocheckpoint_pages, 256);
+        assert_eq!(status.storage.journal_size_limit_bytes, 16 * 1024 * 1024);
+        assert!(status.storage.database_bytes > 0);
+        assert!(
+            status.storage.wal_bytes <= status.storage.journal_size_limit_bytes,
+            "WAL was {} bytes",
+            status.storage.wal_bytes
+        );
     }
 
     #[test]

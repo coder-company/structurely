@@ -17,6 +17,11 @@ The CLI and MCP compatibility surface call the same engine interface. SQLite
 is the durable source of truth; WAL mode permits concurrent read snapshots
 while one writer publishes an update.
 
+The connection checkpoints after every published epoch, auto-checkpoints after
+256 WAL pages, applies a 16 MiB journal size limit, and waits up to five seconds
+for a busy writer. `structurely status` reports database and WAL bytes plus the
+configured checkpoint limits so growth is observable without opening SQLite.
+
 ## Invariants
 
 1. A reader observes exactly one committed graph epoch.
@@ -40,4 +45,3 @@ while one writer publishes an update.
 These are deliberately deep modules: callers use a small interface while
 parsing, transaction ordering, schema details, and compatibility behavior stay
 local to their implementations.
-

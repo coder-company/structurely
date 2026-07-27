@@ -8,6 +8,8 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 const SCHEMA_VERSION: u32 = 1;
+const WAL_AUTOCHECKPOINT_PAGES: u32 = 256;
+const JOURNAL_SIZE_LIMIT_BYTES: u64 = 16 * 1024 * 1024;
 
 pub struct Store {
     connection: Connection,
@@ -42,6 +44,14 @@ pub struct GraphSnapshot {
     pub relationships: Vec<Relationship>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct StorageMetrics {
+    pub database_bytes: u64,
+    pub wal_bytes: u64,
+    pub wal_autocheckpoint_pages: u32,
+    pub journal_size_limit_bytes: u64,
+}
+
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -53,6 +63,9 @@ impl Store {
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.pragma_update(None, "synchronous", "NORMAL")?;
+        connection.pragma_update(None, "busy_timeout", 5_000)?;
+        connection.pragma_update(None, "wal_autocheckpoint", WAL_AUTOCHECKPOINT_PAGES)?;
+        connection.pragma_update(None, "journal_size_limit", JOURNAL_SIZE_LIMIT_BYTES)?;
         let mut store = Self {
             connection,
             path: path.to_owned(),
@@ -63,6 +76,24 @@ impl Store {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn storage_metrics(&self) -> Result<StorageMetrics> {
+        let wal_path = PathBuf::from(format!("{}-wal", self.path.display()));
+        Ok(StorageMetrics {
+            database_bytes: file_size(&self.path)?,
+            wal_bytes: file_size(&wal_path)?,
+            wal_autocheckpoint_pages: self.connection.pragma_query_value(
+                None,
+                "wal_autocheckpoint",
+                |row| row.get(0),
+            )?,
+            journal_size_limit_bytes: self.connection.pragma_query_value(
+                None,
+                "journal_size_limit",
+                |row| row.get(0),
+            )?,
+        })
     }
 
     fn migrate(&mut self) -> Result<()> {
@@ -378,8 +409,11 @@ impl Store {
             [GRAPH_MODEL_VERSION.to_string()],
         )?;
         tx.commit()?;
-        self.connection
-            .pragma_update(None, "wal_checkpoint", "PASSIVE")?;
+        let _: (u32, u32, u32) =
+            self.connection
+                .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?;
         Ok((next_epoch, relationships_resolved))
     }
 
@@ -882,6 +916,14 @@ impl Store {
             start_line: row.get::<_, i64>(9)? as usize,
             end_line: row.get::<_, i64>(10)? as usize,
         })
+    }
+}
+
+fn file_size(path: &Path) -> Result<u64> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.len()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error).with_context(|| format!("read metadata for {}", path.display())),
     }
 }
 

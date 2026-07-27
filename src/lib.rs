@@ -11,4 +11,4 @@ pub use engine::{
 };
 pub use model::{Evidence, Language, Relationship, RelationshipKind, Symbol, SymbolKind};
 pub use quality::{LanguageQuality, QualityReport};
-pub use store::{FileSummary, GraphSnapshot, SnapshotFile};
+pub use store::{FileSummary, GraphSnapshot, SnapshotFile, StorageMetrics};
