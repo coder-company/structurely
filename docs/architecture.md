@@ -34,9 +34,12 @@ configured checkpoint limits so growth is observable without opening SQLite.
 7. Parser failure for one file cannot corrupt the previous committed graph.
 
 Call resolution ranks receiver-type evidence ahead of same-file, explicit
-import, and language-wide candidates. A locally constructed TypeScript receiver
-therefore selects its class method even when another class in the same file has
-the same method name; the emitted edge records the winning scope and confidence.
+import, and language-wide candidates. Locally constructed receivers in
+TypeScript/JavaScript, Java, Python, and Rust therefore select their class
+method even when another class in the same file has the same method name; the
+emitted edge records the winning scope and confidence. Constructor inference
+supports `new Type()`, Python `Type()` assignments, declared Java-style local
+types, and Rust `Type::new()` values.
 
 ## Modules
 

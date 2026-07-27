@@ -985,6 +985,60 @@ mod tests {
     }
 
     #[test]
+    fn receiver_resolution_is_precise_across_java_python_and_rust() {
+        for (file, source, caller, expected) in [
+            (
+                "Services.java",
+                "class UserService { void save() {} }\n\
+                 class AuditService { void save() {} }\n\
+                 class Runner { void persist() { UserService service = new UserService(); service.save(); } }\n",
+                "persist",
+                "UserService.save",
+            ),
+            (
+                "services.py",
+                "class UserService:\n\
+                 \x20   def save(self): pass\n\
+                 class AuditService:\n\
+                 \x20   def save(self): pass\n\
+                 def persist():\n\
+                 \x20   service = UserService()\n\
+                 \x20   service.save()\n",
+                "persist",
+                "UserService.save",
+            ),
+            (
+                "services.rs",
+                "struct UserService; struct AuditService;\n\
+                 impl UserService { fn new() -> Self { Self } fn save(&self) {} }\n\
+                 impl AuditService { fn save(&self) {} }\n\
+                 fn persist() { let service = UserService::new(); service.save(); }\n",
+                "persist",
+                "UserService.save",
+            ),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            fs::write(temp.path().join(file), source).unwrap();
+            let (engine, _) = Engine::init(temp.path()).unwrap();
+            let caller = engine
+                .search(caller, 10)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.name == caller)
+                .unwrap();
+            let save_edges = engine
+                .callees(&caller.symbol.id)
+                .unwrap()
+                .into_iter()
+                .filter(|(symbol, _)| symbol.name == "save")
+                .collect::<Vec<_>>();
+            assert_eq!(save_edges.len(), 1, "{file}");
+            assert_eq!(save_edges[0].0.qualified_name, expected, "{file}");
+            assert_eq!(save_edges[0].1.confidence, 0.995, "{file}");
+        }
+    }
+
+    #[test]
     fn explicit_import_scope_beats_global_fallback() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("defs.ts"), "export function helper() {}\n").unwrap();

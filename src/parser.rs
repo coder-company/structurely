@@ -632,14 +632,18 @@ fn collect_calls(
 fn receiver_type_hint(function: Node<'_>, call: Node<'_>, source: &[u8]) -> Option<String> {
     let receiver = function
         .child_by_field_name("object")
-        .or_else(|| function.child_by_field_name("receiver"))?;
+        .or_else(|| function.child_by_field_name("receiver"))
+        .or_else(|| function.child_by_field_name("expression"))
+        .or_else(|| function.child_by_field_name("value"))
+        .or_else(|| call.child_by_field_name("object"))
+        .or_else(|| call.child_by_field_name("receiver"))?;
     if matches!(
         receiver.kind(),
         "new_expression" | "object_creation_expression"
     ) {
         return constructor_type(receiver, source);
     }
-    if receiver.kind() != "identifier" {
+    if !matches!(receiver.kind(), "identifier" | "simple_identifier" | "name") {
         return None;
     }
     let variable = node_text(receiver, source);
@@ -659,14 +663,29 @@ fn find_variable_constructor(
     if node.start_byte() >= before_byte {
         return None;
     }
-    if matches!(node.kind(), "variable_declarator" | "lexical_declaration") {
-        let name = node.child_by_field_name("name");
-        let value = node.child_by_field_name("value");
+    if matches!(
+        node.kind(),
+        "variable_declarator"
+            | "lexical_declaration"
+            | "let_declaration"
+            | "assignment"
+            | "assignment_expression"
+    ) {
+        let name = node
+            .child_by_field_name("name")
+            .or_else(|| node.child_by_field_name("pattern"))
+            .or_else(|| node.child_by_field_name("left"));
+        let value = node
+            .child_by_field_name("value")
+            .or_else(|| node.child_by_field_name("right"));
         if name.is_some_and(|name| node_text(name, source) == variable) {
             if let Some(value) = value {
                 if let Some(inferred) = constructor_type(value, source) {
                     return Some(inferred);
                 }
+            }
+            if let Some(declared) = declared_variable_type(node, source) {
+                return Some(declared);
             }
         }
     }
@@ -685,10 +704,48 @@ fn constructor_type(node: Node<'_>, source: &[u8]) -> Option<String> {
         node.child_by_field_name("constructor")
             .or_else(|| node.child_by_field_name("type"))
             .or_else(|| node.named_child(0))
+    } else if matches!(node.kind(), "call" | "call_expression") {
+        node.child_by_field_name("function")
+            .or_else(|| node.named_child(0))
     } else {
         None
     }?;
-    call_name(constructor, source)
+    if matches!(
+        constructor.kind(),
+        "scoped_identifier" | "scoped_type_identifier"
+    ) {
+        return constructor
+            .child_by_field_name("scope")
+            .or_else(|| constructor.child_by_field_name("path"))
+            .map(|scope| node_text(scope, source));
+    }
+    let name = call_name(constructor, source)?;
+    name.chars()
+        .next()
+        .is_some_and(char::is_uppercase)
+        .then_some(name)
+}
+
+fn declared_variable_type(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut declaration = node.parent();
+    while let Some(parent) = declaration {
+        if matches!(
+            parent.kind(),
+            "local_variable_declaration" | "variable_declaration"
+        ) {
+            return parent
+                .child_by_field_name("type")
+                .map(|kind| node_text(kind, source));
+        }
+        if matches!(
+            parent.kind(),
+            "function_declaration" | "method_declaration" | "statement_block" | "block"
+        ) {
+            break;
+        }
+        declaration = parent.parent();
+    }
+    None
 }
 
 fn call_target_node(node: Node<'_>) -> Option<Node<'_>> {
@@ -799,6 +856,50 @@ mod tests {
             .find(|call| call.callee_name == "save")
             .unwrap();
         assert_eq!(call.receiver_type.as_deref(), Some("UserService"));
+    }
+
+    #[test]
+    fn infers_receiver_types_across_constructor_dialects() {
+        for (file, source, callee, expected) in [
+            (
+                "Demo.java",
+                "class UserService { void save() {} }\n\
+                 class Demo { void run() { UserService service = new UserService(); service.save(); } }\n",
+                "save",
+                "UserService",
+            ),
+            (
+                "demo.py",
+                "class UserService:\n\
+                 \x20   def save(self):\n\
+                 \x20       pass\n\
+                 def run():\n\
+                 \x20   service = UserService()\n\
+                 \x20   service.save()\n",
+                "save",
+                "UserService",
+            ),
+            (
+                "demo.rs",
+                "struct UserService;\n\
+                 impl UserService { fn new() -> Self { Self } fn save(&self) {} }\n\
+                 fn run() { let service = UserService::new(); service.save(); }\n",
+                "save",
+                "UserService",
+            ),
+        ] {
+            let facts = parse_file(file, source).unwrap();
+            let call = facts
+                .unresolved_calls
+                .iter()
+                .find(|call| call.callee_name == callee)
+                .unwrap_or_else(|| panic!("{file} did not extract {callee}"));
+            assert_eq!(
+                call.receiver_type.as_deref(),
+                Some(expected),
+                "receiver inference failed for {file}"
+            );
+        }
     }
 
     #[test]
