@@ -20,8 +20,8 @@ Structurely is complete only when all gates are evidenced on pinned fixtures.
 
 - Common one-file changes become query-visible within 300 ms on the pinned
   semantic fixture in Linux CI.
-- Large-repository indexing is at least 2x the pinned CodeGraph baseline or
-  delivers a statistically significant semantic-quality improvement.
+- Large-repository end-to-end indexing is at least 2x the pinned CodeGraph
+  baseline on an identical file intersection.
 - Peak memory is sublinear in worker count.
 - WAL growth is bounded and checkpointed.
 

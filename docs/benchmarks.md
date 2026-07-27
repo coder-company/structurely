@@ -54,6 +54,13 @@ Structurely with pinned CodeGraph 1.5.0 on the four-file semantic fixture. It is
 explicitly a startup smoke test; large-repository claims require a separate
 pinned run.
 
+The
+[`codegraph-source-intersection-2026-07-27`](../benchmarks/codegraph-source-intersection-2026-07-27/README.md)
+run is the large-repository comparison. Both engines index the same 441 files
+from the pinned CodeGraph source tree across five fresh trials. Structurely's
+median end-to-end indexing is 3.96× faster, query p50 is 37.66× faster, and
+peak initialization RSS is 91.1% lower on that host.
+
 ## Semantic quality
 
 Quality manifests list expected caller/callee edges by language. Evaluate a
