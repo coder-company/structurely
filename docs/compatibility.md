@@ -37,5 +37,9 @@ integer arguments in its MCP schemas, returns standard protocol errors for
 malformed requests, and reports tool execution failures through MCP `isError`
 content without terminating the session.
 
+Initialization negotiates MCP revisions `2024-11-05`, `2025-03-26`, and
+`2025-06-18`. Unknown or omitted revisions fall back to CodeGraph 1.5.0's
+`2024-11-05` revision.
+
 The SQLite schema is explicitly not compatible. A future importer may read an
 existing CodeGraph index, but Structurely owns its versioned graph model.

@@ -75,7 +75,7 @@ fn handle(engine: &mut Engine, request: Value) -> Result<Option<Value>> {
     }
     let result = match method {
         "initialize" => json!({
-            "protocolVersion": "2025-03-26",
+            "protocolVersion": negotiated_protocol_version(&request),
             "capabilities": { "tools": {} },
             "serverInfo": { "name": "structurely", "version": env!("CARGO_PKG_VERSION") }
         }),
@@ -110,6 +110,15 @@ fn handle(engine: &mut Engine, request: Value) -> Result<Option<Value>> {
     Ok(Some(
         json!({ "jsonrpc": "2.0", "id": id, "result": result }),
     ))
+}
+
+fn negotiated_protocol_version(request: &Value) -> &'static str {
+    match request["params"]["protocolVersion"].as_str() {
+        Some("2025-06-18") => "2025-06-18",
+        Some("2025-03-26") => "2025-03-26",
+        Some("2024-11-05") => "2024-11-05",
+        _ => "2024-11-05",
+    }
 }
 
 fn tool_definitions() -> Vec<Value> {
@@ -623,6 +632,33 @@ mod tests {
         .unwrap();
         assert_eq!(invalid_params["error"]["code"], -32602);
         assert_eq!(invalid_params["id"], 9);
+    }
+
+    #[test]
+    fn initialize_negotiates_supported_versions_with_upstream_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("main.ts"), "function main() {}\n").unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+
+        for (requested, expected) in [
+            ("2024-11-05", "2024-11-05"),
+            ("2025-03-26", "2025-03-26"),
+            ("2025-06-18", "2025-06-18"),
+            ("2099-01-01", "2024-11-05"),
+        ] {
+            let response = handle(
+                &mut engine,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": { "protocolVersion": requested }
+                }),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(response["result"]["protocolVersion"], expected);
+        }
     }
 
     #[test]
