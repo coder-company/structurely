@@ -12,6 +12,7 @@ struct WorkspacePackage {
     root: PathBuf,
     entries: Vec<String>,
     provenance: &'static str,
+    directory_entry: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -82,6 +83,7 @@ impl ProjectResolutionContext {
         });
         let mut workspace_packages = load_workspace_packages(root);
         workspace_packages.extend(load_cargo_packages(root));
+        workspace_packages.extend(load_go_packages(root));
         workspace_packages.sort_by(|left, right| right.name.len().cmp(&left.name.len()));
         Self {
             root: root.to_owned(),
@@ -108,6 +110,17 @@ impl ProjectResolutionContext {
                         _ => "JavaScript workspace package",
                     }
                 );
+            }
+        }
+        for call in &mut facts.unresolved_calls {
+            let Some(hint) = call.target_file_hint.as_deref() else {
+                continue;
+            };
+            if let Some((resolved, provenance)) = self.resolve_import(hint) {
+                call.target_file_hint = Some(resolved);
+                call.provenance = provenance.to_owned();
+                call.explanation =
+                    format!("{} through imported Go workspace package", call.explanation);
             }
         }
     }
@@ -167,10 +180,16 @@ impl ProjectResolutionContext {
             }
             if let Some(subpath) = subpath {
                 let relative = package.root.join(subpath);
+                if package.directory_entry && self.root.join(&relative).is_dir() {
+                    return Some((normalize_path(&relative), package.provenance));
+                }
                 if let Some(hint) = canonical_source_hint(&self.root, &relative) {
                     return Some((hint, package.provenance));
                 }
                 continue;
+            }
+            if package.directory_entry {
+                return Some((normalize_path(&package.root), package.provenance));
             }
             for entry in &package.entries {
                 if let Some(hint) = canonical_source_hint(&self.root, &package.root.join(entry)) {
@@ -263,6 +282,7 @@ fn load_workspace_packages(root: &Path) -> Vec<WorkspacePackage> {
             root: relative_root.to_owned(),
             entries,
             provenance: "workspace/package",
+            directory_entry: false,
         });
     }
     packages
@@ -373,9 +393,77 @@ fn load_cargo_packages(root: &Path) -> Vec<WorkspacePackage> {
             root: relative_root.to_owned(),
             entries,
             provenance: "cargo/workspace",
+            directory_entry: false,
         });
     }
     packages
+}
+
+fn load_go_packages(root: &Path) -> Vec<WorkspacePackage> {
+    let mut member_roots = load_go_work_members(root);
+    if root.join("go.mod").is_file() {
+        member_roots.push(PathBuf::new());
+    }
+    member_roots.sort();
+    member_roots.dedup();
+    let mut packages = Vec::new();
+    for member_root in member_roots {
+        let Some(source) = fs::read_to_string(root.join(&member_root).join("go.mod")).ok() else {
+            continue;
+        };
+        let Some(name) = source.lines().find_map(|line| {
+            line.trim()
+                .strip_prefix("module ")
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+        }) else {
+            continue;
+        };
+        packages.push(WorkspacePackage {
+            name: name.to_owned(),
+            root: member_root,
+            entries: Vec::new(),
+            provenance: "go/workspace",
+            directory_entry: true,
+        });
+    }
+    packages
+}
+
+fn load_go_work_members(root: &Path) -> Vec<PathBuf> {
+    let Ok(source) = fs::read_to_string(root.join("go.work")) else {
+        return Vec::new();
+    };
+    let mut members = Vec::new();
+    let mut in_use_block = false;
+    for raw_line in source.lines() {
+        let line = raw_line.split("//").next().unwrap_or_default().trim();
+        if line == "use (" {
+            in_use_block = true;
+            continue;
+        }
+        if in_use_block && line == ")" {
+            in_use_block = false;
+            continue;
+        }
+        let value = if in_use_block {
+            line
+        } else {
+            line.strip_prefix("use ").unwrap_or_default().trim()
+        };
+        if value.is_empty() {
+            continue;
+        }
+        let normalized = normalize_absolute(Path::new(value.trim_matches(['`', '"'])));
+        if !normalized.is_absolute()
+            && !normalized
+                .components()
+                .any(|component| component == Component::ParentDir)
+        {
+            members.push(normalized);
+        }
+    }
+    members
 }
 
 fn read_json(path: &Path) -> Option<serde_json::Value> {
@@ -642,6 +730,32 @@ mod tests {
         assert_eq!(
             context.resolve_workspace_package("core_lib"),
             Some(("crates/core-lib/src/lib".to_owned(), "cargo/workspace"))
+        );
+    }
+
+    #[test]
+    fn go_work_modules_resolve_package_and_subpackage_directories() {
+        let root = tempdir().unwrap();
+        fs::create_dir_all(root.path().join("modules/core/subpkg")).unwrap();
+        fs::write(
+            root.path().join("go.work"),
+            "go 1.24\nuse (\n  ./modules/core\n)\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("modules/core/go.mod"),
+            "module example.com/core\n\ngo 1.24\n",
+        )
+        .unwrap();
+
+        let context = ProjectResolutionContext::load(root.path());
+        assert_eq!(
+            context.resolve_workspace_package("example.com/core"),
+            Some(("modules/core".to_owned(), "go/workspace"))
+        );
+        assert_eq!(
+            context.resolve_workspace_package("example.com/core/subpkg"),
+            Some(("modules/core/subpkg".to_owned(), "go/workspace"))
         );
     }
 }

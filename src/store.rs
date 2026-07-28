@@ -161,6 +161,7 @@ impl Store {
                 caller_public_id TEXT NOT NULL,
                 callee_name TEXT NOT NULL,
                 receiver_type TEXT,
+                target_file_hint TEXT,
                 provenance TEXT NOT NULL DEFAULT 'tree-sitter/name-resolution',
                 confidence REAL NOT NULL DEFAULT 1.0,
                 explanation TEXT NOT NULL DEFAULT 'direct call expression',
@@ -216,6 +217,12 @@ impl Store {
             &self.connection,
             "unresolved_calls",
             "receiver_type",
+            "TEXT",
+        )?;
+        Self::ensure_column(
+            &self.connection,
+            "unresolved_calls",
+            "target_file_hint",
             "TEXT",
         )?;
         Self::ensure_column(
@@ -586,15 +593,16 @@ impl Store {
         for call in &file.unresolved_calls {
             tx.prepare_cached(
                 "INSERT INTO unresolved_calls(
-                    file_id, caller_public_id, callee_name, receiver_type, provenance,
-                    confidence, explanation, resolvable, evidence_file, evidence_line
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    file_id,caller_public_id,callee_name,receiver_type,target_file_hint,
+                    provenance,confidence,explanation,resolvable,evidence_file,evidence_line
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             )?
             .execute(params![
                 file_id,
                 call.caller_id,
                 call.callee_name,
                 call.receiver_type,
+                call.target_file_hint,
                 call.provenance,
                 call.confidence,
                 call.explanation,
@@ -660,9 +668,9 @@ impl Store {
             [],
         )?;
         let mut calls_statement = tx.prepare(
-            "SELECT u.caller_public_id,u.callee_name,u.receiver_type,u.provenance,
-                    u.confidence,u.explanation,u.evidence_file,u.evidence_line,s.language,u.file_id,
-                    u.resolvable
+            "SELECT u.caller_public_id,u.callee_name,u.receiver_type,u.target_file_hint,
+                    u.provenance,u.confidence,u.explanation,u.evidence_file,u.evidence_line,
+                    s.language,u.file_id,u.resolvable
              FROM unresolved_calls u
              JOIN symbols s ON s.public_id=u.caller_public_id
              ORDER BY u.evidence_file,u.evidence_line,u.id",
@@ -673,38 +681,41 @@ impl Store {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, Option<String>>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, f64>(4)?,
-                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, f64>(5)?,
                     row.get::<_, String>(6)?,
-                    row.get::<_, i64>(7)? as usize,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, i64>(9)?,
-                    row.get::<_, bool>(10)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, i64>(8)? as usize,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, bool>(11)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(calls_statement);
 
         let mut direct_statement = tx.prepare(
-            "SELECT public_id,qualified_name,file_id
-             FROM symbols
-             WHERE name=?1 AND language=?2
-             ORDER BY qualified_name,public_id",
+            "SELECT s.public_id,s.qualified_name,s.file_id,f.path
+             FROM symbols s JOIN files f ON f.id=s.file_id
+             WHERE s.name=?1 AND s.language=?2
+             ORDER BY s.qualified_name,s.public_id",
         )?;
         let mut import_statement = tx.prepare(
-            "SELECT s.public_id,s.qualified_name,s.file_id
+            "SELECT s.public_id,s.qualified_name,s.file_id,f.path
              FROM import_bindings b
              JOIN symbols s ON s.public_id=b.target_public_id
+             JOIN files f ON f.id=s.file_id
              WHERE b.file_id=?1 AND b.binding_name=?2 AND s.language=?3
              ORDER BY s.qualified_name,s.public_id",
         )?;
         let mut candidate_cache =
-            HashMap::<(String, String, i64, String), Vec<(String, String, i64)>>::new();
+            HashMap::<(String, String, i64, String, String), Vec<(String, String, i64)>>::new();
         for (
             caller_id,
             callee_name,
             receiver_type,
+            target_file_hint,
             provenance,
             fact_confidence,
             explanation,
@@ -719,25 +730,28 @@ impl Store {
                 continue;
             }
             let receiver_type = receiver_type.unwrap_or_default();
+            let target_file_hint = target_file_hint.unwrap_or_default();
             let cache_key = (
                 callee_name.clone(),
                 language.clone(),
                 file_id,
                 receiver_type.clone(),
+                target_file_hint.clone(),
             );
             if !candidate_cache.contains_key(&cache_key) {
-                let mut candidates = HashMap::<String, (String, i64, bool)>::new();
+                let mut candidates = HashMap::<String, (String, i64, String, bool)>::new();
                 for candidate in direct_statement
                     .query_map(params![callee_name, language], |row| {
                         Ok((
                             row.get::<_, String>(0)?,
                             row.get::<_, String>(1)?,
                             row.get::<_, i64>(2)?,
+                            row.get::<_, String>(3)?,
                         ))
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?
                 {
-                    candidates.insert(candidate.0, (candidate.1, candidate.2, false));
+                    candidates.insert(candidate.0, (candidate.1, candidate.2, candidate.3, false));
                 }
                 for candidate in import_statement
                     .query_map(params![file_id, callee_name, language], |row| {
@@ -745,33 +759,38 @@ impl Store {
                             row.get::<_, String>(0)?,
                             row.get::<_, String>(1)?,
                             row.get::<_, i64>(2)?,
+                            row.get::<_, String>(3)?,
                         ))
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?
                 {
                     candidates
                         .entry(candidate.0)
-                        .and_modify(|value| value.2 = true)
-                        .or_insert((candidate.1, candidate.2, true));
+                        .and_modify(|value| value.3 = true)
+                        .or_insert((candidate.1, candidate.2, candidate.3, true));
                 }
                 let mut targets = candidates
                     .into_iter()
-                    .map(|(public_id, (qualified_name, target_file_id, imported))| {
-                        let receiver_match = !receiver_type.is_empty()
-                            && (qualified_name == format!("{receiver_type}.{callee_name}")
-                                || qualified_name
-                                    .ends_with(&format!(".{receiver_type}.{callee_name}")));
-                        let rank = if receiver_match {
-                            0
-                        } else if target_file_id == file_id {
-                            1
-                        } else if imported {
-                            2
-                        } else {
-                            3
-                        };
-                        (public_id, qualified_name, rank)
-                    })
+                    .map(
+                        |(public_id, (qualified_name, target_file_id, target_file, imported))| {
+                            let module_match = !target_file_hint.is_empty()
+                                && module_hint_matches(&target_file_hint, &target_file);
+                            let receiver_match = !receiver_type.is_empty()
+                                && (qualified_name == format!("{receiver_type}.{callee_name}")
+                                    || qualified_name
+                                        .ends_with(&format!(".{receiver_type}.{callee_name}")));
+                            let rank = if module_match || receiver_match {
+                                0
+                            } else if target_file_id == file_id {
+                                1
+                            } else if imported {
+                                2
+                            } else {
+                                3
+                            };
+                            (public_id, qualified_name, rank)
+                        },
+                    )
                     .collect::<Vec<_>>();
                 targets.sort_by(|left, right| {
                     left.2
@@ -798,6 +817,7 @@ impl Store {
                 _ => 0.35,
             };
             let scope = match best_rank {
+                0 if !target_file_hint.is_empty() => "imported package",
                 0 => "receiver type",
                 1 => "same-file lexical scope",
                 2 => "explicit import scope",
@@ -1357,6 +1377,7 @@ fn module_hint_matches(hint: &str, candidate: &str) -> bool {
         .map(|(stem, _)| stem)
         .unwrap_or(&candidate);
     candidate_without_extension == hint
+        || candidate_without_extension.starts_with(&format!("{hint}/"))
         || candidate_without_extension.ends_with(&format!("/{hint}"))
         || candidate_without_extension.ends_with(&format!("/{hint}/index"))
 }
@@ -1509,6 +1530,7 @@ mod tests {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         assert!(call_columns.contains(&"receiver_type".to_owned()));
+        assert!(call_columns.contains(&"target_file_hint".to_owned()));
         assert!(call_columns.contains(&"provenance".to_owned()));
         assert!(call_columns.contains(&"confidence".to_owned()));
         assert!(call_columns.contains(&"explanation".to_owned()));

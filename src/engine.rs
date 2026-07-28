@@ -1440,6 +1440,55 @@ mod tests {
     }
 
     #[test]
+    fn go_workspace_import_aliases_constrain_cross_module_calls() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("modules/core")).unwrap();
+        fs::create_dir_all(temp.path().join("modules/decoy")).unwrap();
+        fs::create_dir_all(temp.path().join("apps/main")).unwrap();
+        fs::write(
+            temp.path().join("go.work"),
+            "go 1.24\nuse (\n ./modules/core\n ./modules/decoy\n ./apps/main\n)\n",
+        )
+        .unwrap();
+        for (directory, module) in [
+            ("modules/core", "example.com/core"),
+            ("modules/decoy", "example.com/decoy"),
+            ("apps/main", "example.com/app"),
+        ] {
+            fs::write(
+                temp.path().join(directory).join("go.mod"),
+                format!("module {module}\n\ngo 1.24\n"),
+            )
+            .unwrap();
+        }
+        fs::write(
+            temp.path().join("modules/core/helper.go"),
+            "package core\nfunc Execute() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("modules/decoy/helper.go"),
+            "package decoy\nfunc Execute() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("apps/main/main.go"),
+            "package main\n\
+             import core \"example.com/core\"\n\
+             func Caller() { core.Execute() }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let callees = engine.callees_named("Caller", None, 10).unwrap();
+        assert_eq!(callees.len(), 1);
+        assert_eq!(callees[0].symbol.file, "modules/core/helper.go");
+        assert_eq!(callees[0].evidence.provenance, "go/workspace");
+        assert_eq!(callees[0].evidence.confidence, 0.995);
+        assert!(callees[0].evidence.explanation.contains("imported package"));
+    }
+
+    #[test]
     fn named_callback_registrations_create_evidence_bearing_call_edges() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(

@@ -75,15 +75,16 @@ pub(crate) fn parse_file_as(
         .collect::<HashMap<_, _>>();
     let mut receiver_bindings = HashMap::<String, Vec<(usize, String)>>::new();
     collect_receiver_bindings(tree.root_node(), source_bytes, &mut receiver_bindings);
-    collect_calls(
-        tree.root_node(),
-        source_bytes,
-        relative_path,
-        &symbol_owners,
-        &receiver_bindings,
-        &file_symbol.id,
-        &mut unresolved_calls,
-    );
+    let module_bindings = collect_module_bindings(tree.root_node(), source_bytes, language);
+    let call_context = CallCollectionContext {
+        source: source_bytes,
+        file: relative_path,
+        symbol_owners: &symbol_owners,
+        receiver_bindings: &receiver_bindings,
+        module_bindings: &module_bindings,
+        file_symbol_id: &file_symbol.id,
+    };
+    collect_calls(tree.root_node(), &call_context, &mut unresolved_calls);
     let mut unresolved_references = Vec::new();
     collect_structural_references(
         tree.root_node(),
@@ -658,13 +659,18 @@ fn rust_impl_container(node: Node<'_>, source: &[u8], parent: Option<&str>) -> O
     )
 }
 
+struct CallCollectionContext<'a> {
+    source: &'a [u8],
+    file: &'a str,
+    symbol_owners: &'a HashMap<(usize, usize), String>,
+    receiver_bindings: &'a HashMap<String, Vec<(usize, String)>>,
+    module_bindings: &'a HashMap<String, String>,
+    file_symbol_id: &'a str,
+}
+
 fn collect_calls(
     node: Node<'_>,
-    source: &[u8],
-    file: &str,
-    symbol_owners: &HashMap<(usize, usize), String>,
-    receiver_bindings: &HashMap<String, Vec<(usize, String)>>,
-    file_symbol_id: &str,
+    context: &CallCollectionContext<'_>,
     output: &mut Vec<UnresolvedCall>,
 ) {
     if matches!(
@@ -681,13 +687,14 @@ fn collect_calls(
             | "function_call"
     ) {
         if let Some(function) = call_target_node(node) {
-            if let Some(name) = call_name(function, source) {
-                let resolvable = !is_parameter_invocation(node, &name, source);
+            if let Some(name) = call_name(function, context.source) {
+                let resolvable = !is_parameter_invocation(node, &name, context.source);
                 let mut owner = node.parent();
                 let mut caller_id = None;
                 while let Some(ancestor) = owner {
-                    if let Some(symbol_id) =
-                        symbol_owners.get(&(ancestor.start_byte(), ancestor.end_byte()))
+                    if let Some(symbol_id) = context
+                        .symbol_owners
+                        .get(&(ancestor.start_byte(), ancestor.end_byte()))
                     {
                         caller_id = Some(symbol_id.as_str());
                         break;
@@ -695,14 +702,21 @@ fn collect_calls(
                     owner = ancestor.parent();
                 }
                 output.push(UnresolvedCall {
-                    caller_id: caller_id.unwrap_or(file_symbol_id).to_owned(),
+                    caller_id: caller_id.unwrap_or(context.file_symbol_id).to_owned(),
                     callee_name: name,
-                    receiver_type: receiver_type_hint(function, node, source, receiver_bindings),
+                    receiver_type: receiver_type_hint(
+                        function,
+                        node,
+                        context.source,
+                        context.receiver_bindings,
+                    ),
+                    target_file_hint: call_receiver_name(function, context.source)
+                        .and_then(|receiver| context.module_bindings.get(&receiver).cloned()),
                     provenance: "tree-sitter/name-resolution".to_owned(),
                     confidence: 1.0,
                     explanation: "direct call expression".to_owned(),
                     resolvable,
-                    file: file.to_owned(),
+                    file: context.file.to_owned(),
                     line: node.start_position().row + 1,
                 });
             }
@@ -710,16 +724,53 @@ fn collect_calls(
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        collect_calls(
-            child,
-            source,
-            file,
-            symbol_owners,
-            receiver_bindings,
-            file_symbol_id,
-            output,
-        );
+        collect_calls(child, context, output);
     }
+}
+
+fn collect_module_bindings(
+    node: Node<'_>,
+    source: &[u8],
+    language: Language,
+) -> HashMap<String, String> {
+    let mut bindings = HashMap::new();
+    if language == Language::Go {
+        collect_go_import_bindings(node, source, &mut bindings);
+    }
+    bindings
+}
+
+fn collect_go_import_bindings(node: Node<'_>, source: &[u8], output: &mut HashMap<String, String>) {
+    if node.kind() == "import_spec" {
+        if let Some(path_node) = node
+            .child_by_field_name("path")
+            .or_else(|| node.named_child(node.named_child_count().saturating_sub(1)))
+        {
+            let path = node_text(path_node, source)
+                .trim_matches(['`', '"'])
+                .to_owned();
+            let alias = node
+                .child_by_field_name("name")
+                .map(|name| node_text(name, source))
+                .unwrap_or_else(|| path.rsplit('/').next().unwrap_or_default().to_owned());
+            if !path.is_empty() && !alias.is_empty() && alias != "_" && alias != "." {
+                output.insert(alias, path);
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_go_import_bindings(child, source, output);
+    }
+}
+
+fn call_receiver_name(function: Node<'_>, source: &[u8]) -> Option<String> {
+    let receiver = function
+        .child_by_field_name("object")
+        .or_else(|| function.child_by_field_name("operand"))
+        .or_else(|| function.child_by_field_name("value"))?;
+    matches!(receiver.kind(), "identifier" | "package_identifier")
+        .then(|| node_text(receiver, source))
 }
 
 fn is_parameter_invocation(call: Node<'_>, name: &str, source: &[u8]) -> bool {
@@ -903,6 +954,9 @@ fn call_name(node: Node<'_>, source: &[u8]) -> Option<String> {
             .child_by_field_name("attribute")
             .map(|attribute| node_text(attribute, source)),
         "field_expression" => node
+            .child_by_field_name("field")
+            .map(|field| node_text(field, source)),
+        "selector_expression" => node
             .child_by_field_name("field")
             .map(|field| node_text(field, source)),
         "field_access" | "member_access_expression" => node
