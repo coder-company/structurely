@@ -1,0 +1,97 @@
+{
+  "protocol": {
+    "trials": 5,
+    "query_processes": 20,
+    "query": "CodeGraph",
+    "corpus_files": 441
+  },
+  "structurely": {
+    "fresh_index_wall_samples_ms": [
+      2137.204992,
+      1841.179089,
+      1781.072827,
+      1765.315984,
+      1801.482352
+    ],
+    "fresh_index_wall_p50_ms": 1801.482352,
+    "reported_engine_samples_ms": [2101, 1806, 1758, 1733, 1773],
+    "reported_engine_p50_ms": 1773,
+    "query_samples_us": [
+      32685,
+      33650,
+      34309,
+      43226,
+      33854,
+      33544,
+      34178,
+      33126,
+      32836,
+      45634,
+      32806,
+      32957,
+      33215,
+      34182,
+      32663,
+      33250,
+      32835,
+      33527,
+      33600,
+      32823
+    ],
+    "query_p50_us": 33388.5,
+    "query_p95_us": 45634,
+    "database_bytes": 36937728,
+    "indexed_files": 441,
+    "symbols": 5177,
+    "relationships": 36892,
+    "max_rss_kb": 101316
+  },
+  "codegraph": {
+    "fresh_index_wall_samples_ms": [
+      7110.58935,
+      6684.066519,
+      6729.275963,
+      6649.797826,
+      6618.180275
+    ],
+    "fresh_index_wall_p50_ms": 6684.066519,
+    "reported_engine_samples_ms": [3500, 3300, 3200, 3200, 3200],
+    "reported_engine_p50_ms": 3200,
+    "query_samples_us": [
+      301646,
+      304466,
+      315394,
+      295463,
+      315259,
+      326966,
+      295629,
+      295191,
+      313760,
+      315727,
+      313431,
+      310271,
+      292789,
+      307722,
+      299930,
+      307869,
+      299839,
+      303059,
+      309292,
+      298818
+    ],
+    "query_p50_us": 306094.0,
+    "query_p95_us": 326966,
+    "database_bytes": 44453888,
+    "indexed_files": 441,
+    "nodes": 8957,
+    "edges": 35801,
+    "max_rss_kb": 1010040
+  },
+  "acceptance": {
+    "index_speedup": 3.710314736960576,
+    "query_speedup": 9.167647543315812,
+    "minimum_index_speedup": 2.0,
+    "minimum_query_speedup": 2.0,
+    "passed": true
+  }
+}

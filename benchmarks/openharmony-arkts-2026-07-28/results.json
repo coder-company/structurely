@@ -1,0 +1,47 @@
+{
+  "passed": true,
+  "repositories": [
+    {
+      "name": "openharmony",
+      "url": "https://github.com/openharmony/applications_app_samples",
+      "commit": "a826ab0e75fe51d028c1c5af58188e908736b53b",
+      "freshIndexWallMs": 106257.317,
+      "indexedFiles": 6995,
+      "symbols": 47909,
+      "relationships": 81917,
+      "databaseBytes": 181583872,
+      "assertions": [
+        {
+          "command": "search",
+          "query": "OperationView.build",
+          "passed": true,
+          "requiredText": [
+            "code/BasicFeature/International/International/entry/src/main/ets/component/OperationView.ets",
+            "\"language\": \"arkts\"",
+            "\"qualified_name\": \"OperationView.build\""
+          ],
+          "recordContains": [],
+          "matchingRecord": true
+        },
+        {
+          "command": "callers",
+          "query": "handleClick",
+          "passed": true,
+          "requiredText": [
+            "\"qualified_name\": \"OperationView.build\"",
+            "\"provenance\": \"framework/arkui-event\"",
+            "\"confidence\": 0.97",
+            "\"line\": 41"
+          ],
+          "recordContains": [
+            "\"qualified_name\": \"OperationView.build\"",
+            "\"provenance\": \"framework/arkui-event\"",
+            "\"confidence\": 0.97",
+            "\"line\": 41"
+          ],
+          "matchingRecord": true
+        }
+      ]
+    }
+  ]
+}

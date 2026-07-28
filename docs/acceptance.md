@@ -53,6 +53,9 @@ Run the pinned representative-repository assertions with
 commits and semantic expectations; the runner uses detached temporary clones
 so it cannot accept a dirty or drifting source tree. Current evidence is
 checked in under `benchmarks/real-repositories-2026-07-28/`.
+The pinned 6,995-file ArkTS acceptance result is recorded separately under
+`benchmarks/openharmony-arkts-2026-07-28/`; its event assertion correlates
+origin, provenance, confidence, and source line in one relationship record.
 
 The authoritative capability inventory is
 [`codegraph-parity.md`](codegraph-parity.md). A matching command name or schema

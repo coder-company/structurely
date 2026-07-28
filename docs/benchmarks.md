@@ -80,6 +80,12 @@ rerun covers Vue/Svelte extraction and corrected import fanout. Structurely
 remains 3.96× faster to index and 9.19× faster for query p50 while using 89.8%
 less peak memory.
 
+The
+[`codegraph-source-intersection-2026-07-28-post-arkts`](../benchmarks/codegraph-source-intersection-2026-07-28-post-arkts/README.md)
+rerun covers ArkTS/ArkUI extraction and invalid-source resilience. Structurely
+passes both enforced 2× gates: 3.71× faster indexing and 9.17× faster query p50,
+with 90.0% less peak initialization memory.
+
 ## Semantic quality
 
 Quality manifests list expected caller/callee edges by language. Evaluate a
@@ -103,4 +109,11 @@ and pinned CodeGraph, then scores required facts, relevant-file recall, file
 precision, flow-spine coverage, line-numbered source, and output budget. The
 checked-in [`differential-mcp-2026-07-28`](../benchmarks/differential-mcp-2026-07-28/README.md)
 run passes all 17 compatibility scenarios and scores Structurely 1.0000 versus
-CodeGraph 0.9583 on its flow fixture.
+CodeGraph 0.9583 on its flow fixture. The current live gate has 19 scenarios,
+adding ArkUI event and reactive-state flows; it verifies the comparator's
+declared Git commit and package version before running.
+
+Pinned large-repository ArkTS evidence is recorded in
+[`openharmony-arkts-2026-07-28`](../benchmarks/openharmony-arkts-2026-07-28/README.md).
+The exact 6,995-file ETS corpus indexed in 106.26 seconds and passed a
+correlated real ArkUI event-flow assertion.

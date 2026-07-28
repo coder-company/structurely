@@ -28,6 +28,10 @@ artifacts. Sync and status reports expose the skipped-file count. If a
 previously indexed file grows beyond the limit, the next atomic epoch removes
 its stale graph facts.
 
+Invalid UTF-8 bytes are replaced byte-for-byte with ASCII spaces while line
+breaks are preserved. This lets indexing continue across legacy source files
+without shifting parser byte offsets, line evidence, or incremental hashes.
+
 ## Invariants
 
 1. A reader observes exactly one committed graph epoch.
@@ -61,6 +65,14 @@ handlers. This keeps
 framework policy out of the storage Module while letting every adapter reuse
 import scope, alias resolution, evidence, atomic publication, and graph
 traversal.
+
+ArkTS uses its native grammar. Bounded ArkUI adapters connect `@Component` and
+`@ComponentV2` render trees, direct `this.<member>` event handlers, and
+mutations of decorated reactive fields to `build`. Intrinsic ArkUI DSL calls
+are pruned only when they do not collide with a local or imported project
+symbol. Harmony package manifests, router string targets, emitter channels,
+and decorated `@Builder`/`@Extend`/`@Styles` helper lifting are not yet
+resolved.
 
 Direct calls and registrations carry their own provenance, confidence, and
 explanation through one resolution path. Literal event dispatch joins only

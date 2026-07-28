@@ -5,9 +5,9 @@ agents. It indexes source into a transactional SQLite graph and exposes
 CodeGraph-compatible CLI and MCP tools with additional relationship confidence,
 provenance, and explanations.
 
-Structurely 0.1 supports TypeScript, TSX, JavaScript, JSX, Vue, Svelte, Python,
-Rust, Go, Java, C#, C, C++, Dart, Ruby, PHP, Swift, Lua, Kotlin, Scala, and R.
-Its production contract and reproducible evidence are listed in the
+Structurely 0.1 supports TypeScript, TSX, JavaScript, JSX, Vue, Svelte, ArkTS,
+Python, Rust, Go, Java, C#, C, C++, Dart, Ruby, PHP, Swift, Lua, Kotlin, Scala,
+and R. Its production contract and reproducible evidence are listed in the
 [acceptance gates](docs/acceptance.md).
 
 ## Build
