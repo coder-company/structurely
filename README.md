@@ -44,15 +44,30 @@ structurely init /path/to/project
 structurely status /path/to/project
 structurely search UserController --path /path/to/project
 structurely explore authentication --path /path/to/project
-structurely watch /path/to/project
+structurely daemon start --path /path/to/project
+structurely integrations install codex --path /path/to/project
 ```
 
 Indexes are stored in `/path/to/project/.structurely/graph.db`. Source code and
 graph data stay local.
 
-`structurely watch` keeps the graph synchronized through native recursive
-filesystem notifications. Changes are debounced into one transactional graph
-epoch; press Ctrl-C for a graceful final flush and shutdown.
+`structurely daemon start` keeps the graph synchronized through native
+recursive filesystem notifications and one exclusive project lock. Use
+`structurely daemon status` and `structurely daemon stop`; repeated start and
+stop operations are safe. MCP tools use the shared daemon epoch when healthy
+and disclose bounded foreground fallback when it is unavailable.
+
+Project-scoped coding-agent integration is available for `codex`, `claude`, and
+`cursor`:
+
+```bash
+structurely integrations install codex --path /path/to/project
+structurely integrations status codex --path /path/to/project
+structurely integrations uninstall codex --path /path/to/project
+```
+
+Install and uninstall preserve unrelated TOML/JSON settings and change only the
+`structurely` MCP server entry.
 
 ## MCP
 

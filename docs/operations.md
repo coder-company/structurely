@@ -32,6 +32,44 @@ $env:STRUCTURELY_VERSION = "v0.1.1"
 
 Confirm the installed binary with `structurely --version`.
 
+## Shared daemon
+
+Start one lock-protected indexer per project:
+
+```bash
+structurely daemon start --path /absolute/project
+structurely daemon status --path /absolute/project
+structurely daemon stop --path /absolute/project
+```
+
+Start and stop are idempotent. Status reports the owning PID, graph epoch,
+phase, last update time, and terminal indexing error when present. A failed
+watcher releases its lock, records the error, and can be restarted after the
+source problem is corrected.
+
+MCP requests prefer the shared daemon. Each tool response reports
+`_meta.freshness.mode`, `epoch`, and `daemonPid`. If daemon catch-up exceeds
+500 ms, the MCP process attempts a foreground sync and reports
+`foreground-fallback`; if that also fails, it serves the last committed graph
+with an explicit stale warning.
+
+## Coding-agent integrations
+
+Structurely can configure a project-local MCP entry for Codex, Claude Code, or
+Cursor:
+
+```bash
+structurely integrations install codex --path /absolute/project
+structurely integrations install claude --path /absolute/project
+structurely integrations install cursor --path /absolute/project
+```
+
+Replace `install` with `status` or `uninstall` for the corresponding operation.
+Codex uses `.codex/config.toml`; Claude Code uses `.mcp.json`; Cursor uses
+`.cursor/mcp.json`. The commands are idempotent, use the absolute installed
+Structurely executable and project path, preserve unrelated configuration, and
+remove only the `structurely` server entry.
+
 ## Uninstall
 
 Remove the binary managed by Cargo:
@@ -59,12 +97,14 @@ separate from Structurely runtime behavior.
 ## Troubleshooting
 
 `database is locked`
-: Stop duplicate writers for the same project. One `watch` process should own
-  synchronization; readers can continue through SQLite WAL snapshots.
+: Run `structurely daemon status --path /absolute/project` and stop an
+  unintended writer. The daemon owns one project lock; readers continue through
+  SQLite WAL snapshots.
 
 Search results are stale
-: Run `structurely sync /path/to/project`, or keep
-  `structurely watch /path/to/project` running. `status` reports pending files.
+: Run `structurely sync /path/to/project`, or start the shared daemon.
+  `structurely status` reports pending files and MCP responses disclose their
+  freshness mode.
 
 The graph model changed
 : Run `structurely sync`. Structurely detects the stored model version and
