@@ -3,13 +3,24 @@ use crate::model::{
     UnresolvedCall, UnresolvedReference,
 };
 use anyhow::{anyhow, Context, Result};
-use std::{collections::HashMap, path::Path};
+use std::collections::HashMap;
+#[cfg(test)]
+use std::path::Path;
 use tree_sitter::{Node, Parser, Tree};
 
+#[cfg(test)]
 pub(crate) fn parse_file(relative_path: &str, source: &str) -> Result<FileFacts> {
     let path = Path::new(relative_path);
     let language = Language::from_path(path)
         .ok_or_else(|| anyhow!("unsupported source language: {relative_path}"))?;
+    parse_file_as(relative_path, source, language)
+}
+
+pub(crate) fn parse_file_as(
+    relative_path: &str,
+    source: &str,
+    language: Language,
+) -> Result<FileFacts> {
     let tree = parse_tree(language, source)?;
     let content_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
     let source_bytes = source.as_bytes();

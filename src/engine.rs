@@ -1,7 +1,7 @@
 use crate::{
     inventory::ProjectInventory,
     model::{Evidence, RelationshipKind},
-    parser::parse_file,
+    parser::parse_file_as,
     store::{FileSummary, SearchHit, StorageMetrics, Store},
 };
 use anyhow::{anyhow, bail, Context, Result};
@@ -140,7 +140,7 @@ impl Engine {
         let started = Instant::now();
         let force_reindex = !self.store.is_current_graph_model()?;
         let indexed = self.store.indexed_file_hashes()?;
-        let delta = ProjectInventory::new(&self.root).delta(&indexed, force_reindex)?;
+        let delta = ProjectInventory::new(&self.root)?.delta(&indexed, force_reindex)?;
         let changed = delta.changed;
         let deleted = delta.deleted;
         let files_scanned = delta.files_scanned;
@@ -158,15 +158,16 @@ impl Engine {
             if changed.is_empty() && deleted.is_empty() {
                 (self.store.epoch()?, 0, 0, 0, 0)
             } else if parse_workers == 1 {
-                let facts = changed.iter().map(|(relative, path)| {
+                let facts = changed.iter().map(|(relative, path, language)| {
                     let source = fs::read_to_string(path)
                         .with_context(|| format!("read source {}", path.display()))?;
-                    parse_file(relative, &source)
+                    parse_file_as(relative, &source, *language)
                 });
                 self.store.publish(facts, &deleted)?
             } else {
                 thread::scope(|scope| {
-                    let (work_sender, work_receiver) = mpsc::channel::<(String, PathBuf)>();
+                    let (work_sender, work_receiver) =
+                        mpsc::channel::<(String, PathBuf, crate::model::Language)>();
                     let work_receiver = Arc::new(Mutex::new(work_receiver));
                     let (result_sender, result_receiver) =
                         mpsc::sync_channel::<Result<crate::model::FileFacts>>(
@@ -180,12 +181,12 @@ impl Engine {
                                 Ok(receiver) => receiver.recv(),
                                 Err(_) => return,
                             };
-                            let Ok((relative, path)) = work else {
+                            let Ok((relative, path, language)) = work else {
                                 return;
                             };
                             let facts = fs::read_to_string(&path)
                                 .with_context(|| format!("read source {}", path.display()))
-                                .and_then(|source| parse_file(&relative, &source));
+                                .and_then(|source| parse_file_as(&relative, &source, language));
                             if result_sender.send(facts).is_err() {
                                 return;
                             }
@@ -231,7 +232,7 @@ impl Engine {
 
     pub fn status(&self) -> Result<ProjectStatus> {
         let indexed = self.store.indexed_file_hashes()?;
-        let delta = ProjectInventory::new(&self.root).delta(&indexed, false)?;
+        let delta = ProjectInventory::new(&self.root)?.delta(&indexed, false)?;
         let pending = delta.changed.len() + delta.deleted.len();
         Ok(ProjectStatus {
             root: self.root.display().to_string(),
@@ -635,6 +636,7 @@ fn parse_worker_count(configured: Option<&str>, available: usize, files: usize) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::parse_file;
 
     #[test]
     fn parse_worker_configuration_is_bounded_and_never_zero() {
@@ -710,6 +712,40 @@ mod tests {
         )
         .unwrap();
         assert_eq!(engine.status().unwrap().pending_files, 1);
+    }
+
+    #[test]
+    fn project_config_controls_custom_extensions_and_explicit_excludes() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("vendor")).unwrap();
+        fs::write(
+            temp.path().join("structurely.json"),
+            r#"{
+                "extensions": { ".view": "typescript" },
+                "exclude": ["vendor/**"]
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("page.view"),
+            "export function configuredPage() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("vendor/ignored.ts"),
+            "export function vendorOnly() {}\n",
+        )
+        .unwrap();
+
+        let (engine, report) = Engine::init(temp.path()).unwrap();
+        assert_eq!(report.files_scanned, 1);
+        assert!(engine
+            .search("configuredPage", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.symbol.name == "configuredPage"));
+        assert!(engine.search("vendorOnly", 10).unwrap().is_empty());
+        assert_eq!(engine.status().unwrap().pending_files, 0);
     }
 
     #[test]

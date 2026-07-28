@@ -1,6 +1,7 @@
 use crate::{
     engine::{MAX_SOURCE_BYTES, PROJECT_DIR},
     model::Language,
+    project_config::ProjectConfig,
 };
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
@@ -12,7 +13,7 @@ use std::{
 
 #[derive(Debug)]
 pub(crate) struct ProjectDelta {
-    pub(crate) changed: Vec<(String, PathBuf)>,
+    pub(crate) changed: Vec<(String, PathBuf, Language)>,
     pub(crate) deleted: Vec<String>,
     pub(crate) files_scanned: usize,
     pub(crate) files_skipped: usize,
@@ -20,11 +21,15 @@ pub(crate) struct ProjectDelta {
 
 pub(crate) struct ProjectInventory<'a> {
     root: &'a Path,
+    config: ProjectConfig,
 }
 
 impl<'a> ProjectInventory<'a> {
-    pub(crate) fn new(root: &'a Path) -> Self {
-        Self { root }
+    pub(crate) fn new(root: &'a Path) -> Result<Self> {
+        Ok(Self {
+            root,
+            config: ProjectConfig::load(root)?,
+        })
     }
 
     pub(crate) fn delta(
@@ -50,7 +55,10 @@ impl<'a> ProjectInventory<'a> {
                 continue;
             }
             let relative_path = entry.path().strip_prefix(self.root)?;
-            if Language::from_path(relative_path).is_none() {
+            let Some(language) = self.config.language_for_path(relative_path) else {
+                continue;
+            };
+            if self.config.excludes(relative_path, false) {
                 continue;
             }
             if entry.metadata()?.len() > MAX_SOURCE_BYTES {
@@ -65,7 +73,7 @@ impl<'a> ProjectInventory<'a> {
                 .with_context(|| format!("read source {}", entry.path().display()))?;
             let hash = blake3::hash(source.as_bytes()).to_hex().to_string();
             if force_reindex || indexed.get(&relative) != Some(&hash) {
-                changed.push((relative, entry.path().to_owned()));
+                changed.push((relative, entry.path().to_owned(), language));
             }
         }
 
@@ -114,6 +122,7 @@ mod tests {
         indexed.insert("kept.ts".to_owned(), "stale".to_owned());
         indexed.insert("deleted.ts".to_owned(), "old".to_owned());
         let delta = ProjectInventory::new(root.path())
+            .unwrap()
             .delta(&indexed, false)
             .unwrap();
 

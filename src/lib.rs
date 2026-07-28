@@ -3,6 +3,7 @@ mod inventory;
 pub mod mcp;
 pub mod model;
 pub mod parser;
+mod project_config;
 pub mod quality;
 pub mod store;
 
