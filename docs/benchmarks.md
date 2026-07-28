@@ -142,3 +142,16 @@ The pinned
 [`OpenHarmony router gate`](../benchmarks/openharmony-router-2026-07-28/README.md)
 indexes all 6,995 ETS files in 114.929 seconds and passes four correlated
 semantic assertions, including the exact `Index.build → DocumentPage` route.
+
+After decorated ArkUI style-helper resolution, the
+[`post-helper differential`](../benchmarks/differential-mcp-2026-07-28-post-arkui-helper/README.md)
+passes 22/22 scenarios for both engines and explicitly requires
+`framework/arkui-helper` evidence from Structurely.
+The enforced
+[`post-helper performance run`](../benchmarks/codegraph-source-intersection-2026-07-28-post-arkui-helper/README.md)
+remains 4.35× faster to index and 9.23× faster for query p50 while using 88.0%
+less peak initialization memory.
+The pinned
+[`OpenHarmony helper gate`](../benchmarks/openharmony-arkui-helper-2026-07-28/README.md)
+indexes all 6,995 ETS files and passes 6/6 assertions, including real global
+`@Extend` and component-owned `@Styles` call edges.

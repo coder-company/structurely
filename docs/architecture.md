@@ -78,7 +78,11 @@ owning Harmony module only when the receiver has a verified `@ohos.router` or
 `@kit.ArkUI` import and the normalized path identifies exactly one `@Entry`
 symbol. Dynamic paths, lexical router shadows, traversal, non-entry pages, and
 ambiguous page files fail closed. Emitter channels and decorated
-`@Builder`/`@Extend`/`@Styles` helper lifting are not yet resolved.
+`@Builder` helpers are not yet resolved. Same-file `@Extend(Intrinsic)` style
+helpers resolve only when the ArkUI chain root matches the declared intrinsic;
+component-owned `@Styles` methods resolve only from the same component.
+Undecorated, wrong-intrinsic, cross-component, and ambiguous candidates fail
+closed.
 
 Direct calls and registrations carry their own provenance, confidence, and
 explanation through one resolution path. Literal event dispatch joins only

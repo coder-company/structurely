@@ -61,6 +61,9 @@ cross-package component assertion through a real `oh-package.json5` dependency.
 The `benchmarks/openharmony-router-2026-07-28/` gate adds an exact,
 evidence-bearing literal page transition and retains all earlier ArkTS
 assertions across the same 6,995-file pin.
+The `benchmarks/openharmony-arkui-helper-2026-07-28/` gate adds exact global
+`@Extend` and component-owned `@Styles` helper edges and passes 6/6 correlated
+assertions on that pin.
 
 The authoritative capability inventory is
 [`codegraph-parity.md`](codegraph-parity.md). A matching command name or schema
