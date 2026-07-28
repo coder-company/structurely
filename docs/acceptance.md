@@ -70,6 +70,10 @@ correlated assertions on that pin. The matching differential and performance
 artifacts prove 22/22 shared compatibility, one separately scored
 Structurely-only emitter flow, and both enforced 2× speed thresholds at the
 same Structurely commit.
+The `benchmarks/openharmony-imported-emitter-2026-07-28/` gate adds a real
+cross-file immutable event descriptor from KeyManager and passes 8/8
+correlated assertions. Matching differential and performance artifacts pin the
+same clean Structurely commit.
 
 The authoritative capability inventory is
 [`codegraph-parity.md`](codegraph-parity.md). A matching command name or schema

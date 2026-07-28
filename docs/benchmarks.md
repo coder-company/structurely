@@ -170,3 +170,14 @@ The pinned
 indexes all 6,995 ETS files and passes 7/7 assertions, including an exact
 app-scoped `PageThreadModel.build → PageThreadModel.build.callback` dispatch
 edge with emitter provenance.
+
+The follow-up
+[`imported-emitter differential`](../benchmarks/differential-mcp-2026-07-28-post-imported-emitter/README.md)
+retains 22/22 shared compatibility and 1.0000 usefulness for both engines.
+Its enforced
+[`performance run`](../benchmarks/codegraph-source-intersection-2026-07-28-post-imported-emitter/README.md)
+is 3.675× faster to index and 9.622× faster at query p50 while using 89.87%
+less peak memory. The
+[`real OpenHarmony gate`](../benchmarks/openharmony-imported-emitter-2026-07-28/README.md)
+passes 8/8 assertions and adds the cross-file imported KeyManager event
+descriptor flow.

@@ -87,12 +87,17 @@ Harmony emitter analysis requires a verified default or alias import from
 `@ohos.events.emitter`, or a verified named `emitter` import from
 `@kit.BasicServicesKit`. String, integer, single-`eventId` object, and unique
 same-file immutable descriptor channels connect `on`/`once` registrations to
-`emit` calls inside the longest matching Harmony application root. Numeric and
-string channel identities remain distinct; dynamic IDs, reassignment, lexical
-emitter shadows, ambiguous registrations, and cross-application matches fail
-closed. Named and inline callbacks are supported. Imported/member constants,
-constructor-built descriptors, callback-argument propagation, and advanced
-decorated `@Builder` flows are intentionally not yet resolved.
+`emit` calls inside the longest matching Harmony application root. Immutable
+exported literals and single-`eventId` descriptors resolve through verified
+named imports; exported `static readonly` literal members resolve without
+evaluating arbitrary expressions. Named and star barrel exports propagate at
+most sixteen hops, reject cycles, and require all candidates to converge to one
+canonical value. Numeric and string channel identities remain distinct;
+dynamic IDs, mutable exports, reassignment, lexical shadows, ambiguous
+registrations or exports, and cross-application matches fail closed. Named and
+inline callbacks are supported. Constructor-built descriptors,
+callback-argument propagation, and advanced decorated `@Builder` flows are
+intentionally not yet resolved.
 
 Direct calls and registrations carry their own provenance, confidence, and
 explanation through one resolution path. Literal event dispatch joins only
