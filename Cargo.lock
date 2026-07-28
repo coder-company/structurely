@@ -747,6 +747,7 @@ dependencies = [
  "thiserror",
  "toml_edit",
  "tree-sitter",
+ "tree-sitter-arkts",
  "tree-sitter-c",
  "tree-sitter-c-sharp",
  "tree-sitter-cpp",
@@ -856,6 +857,16 @@ dependencies = [
  "regex-syntax",
  "serde_json",
  "streaming-iterator",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-arkts"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a57ea8f49745a1c7687ed0625540aa0b189977ece05954b266d5869214b904cb"
+dependencies = [
+ "cc",
  "tree-sitter-language",
 ]
 

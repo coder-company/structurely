@@ -3,6 +3,7 @@ use crate::{
     model::{Evidence, RelationshipKind},
     parser::parse_file_as,
     project_resolution::ProjectResolutionContext,
+    source::read_source,
     store::{FileSummary, SearchHit, StorageMetrics, Store},
 };
 use anyhow::{anyhow, bail, Context, Result};
@@ -170,8 +171,7 @@ impl Engine {
                 (self.store.epoch()?, 0, 0, 0, 0)
             } else if parse_workers == 1 {
                 let facts = changed.iter().map(|(relative, path, language)| {
-                    let source = fs::read_to_string(path)
-                        .with_context(|| format!("read source {}", path.display()))?;
+                    let source = read_source(path)?;
                     let mut facts = parse_file_as(relative, &source, *language)?;
                     resolution_context.apply(&mut facts);
                     Ok(facts)
@@ -198,13 +198,11 @@ impl Engine {
                             let Ok((relative, path, language)) = work else {
                                 return;
                             };
-                            let facts = fs::read_to_string(&path)
-                                .with_context(|| format!("read source {}", path.display()))
-                                .and_then(|source| {
-                                    let mut facts = parse_file_as(&relative, &source, language)?;
-                                    resolution_context.apply(&mut facts);
-                                    Ok(facts)
-                                });
+                            let facts = read_source(&path).and_then(|source| {
+                                let mut facts = parse_file_as(&relative, &source, language)?;
+                                resolution_context.apply(&mut facts);
+                                Ok(facts)
+                            });
                             if result_sender.send(facts).is_err() {
                                 return;
                             }
@@ -896,6 +894,34 @@ mod tests {
         assert_eq!(status.indexed_files, 0);
         assert_eq!(status.pending_files, 0);
         assert_eq!(status.skipped_files, 1);
+    }
+
+    #[test]
+    fn invalid_utf8_bytes_do_not_abort_or_destabilize_the_index() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("legacy.ts"),
+            b"// legacy byte: \xff\nexport function recovered() { return 1; }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("healthy.ts"),
+            "export function healthy() { return recovered(); }\n",
+        )
+        .unwrap();
+
+        let (mut engine, report) = Engine::init(temp.path()).unwrap();
+        assert_eq!(report.files_changed, 2);
+        let recovered = engine
+            .search("recovered", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.name == "recovered")
+            .unwrap()
+            .symbol;
+        assert_eq!(recovered.file, "legacy.ts");
+        assert_eq!(recovered.start_line, 2);
+        assert_eq!(engine.sync().unwrap().files_changed, 0);
     }
 
     #[test]
@@ -2305,6 +2331,219 @@ mod tests {
             assert!(callees.iter().any(|(symbol, evidence)| {
                 symbol.name == handler && evidence.provenance == provenance
             }));
+        }
+    }
+
+    #[test]
+    fn arkui_components_link_state_rebuilds_children_and_event_handlers() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("Index.ets"),
+            "@Entry\n\
+             @Component\n\
+             struct Counter {\n\
+               @State count: number = 0\n\
+               increment() { this.count++ }\n\
+               build() {\n\
+                 Column() {\n\
+                   TodoRow()\n\
+                   Button('Add').onClick(this.increment)\n\
+                 }\n\
+               }\n\
+             }\n\
+             @Component\n\
+             struct TodoRow { build() { Text('row') } }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let symbol = |qualified_name: &str| {
+            engine
+                .search(qualified_name, 20)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.qualified_name == qualified_name)
+                .unwrap()
+                .symbol
+        };
+        let increment = symbol("Counter.increment");
+        assert!(engine
+            .callees(&increment.id)
+            .unwrap()
+            .iter()
+            .any(|(target, evidence)| {
+                target.qualified_name == "Counter.build"
+                    && evidence.provenance == "framework/arkui-state"
+                    && evidence.confidence == 0.95
+            }));
+
+        let build = symbol("Counter.build");
+        let callees = engine.callees(&build.id).unwrap();
+        assert!(callees.iter().any(|(target, evidence)| {
+            target.name == "TodoRow"
+                && evidence.provenance == "framework/arkui-render"
+                && evidence.confidence == 0.97
+        }));
+        assert!(callees.iter().any(|(target, evidence)| {
+            target.qualified_name == "Counter.increment"
+                && evidence.provenance == "framework/arkui-event"
+                && evidence.confidence == 0.97
+        }));
+    }
+
+    #[test]
+    fn arkui_state_bridge_requires_component_and_reactive_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("Decoy.ets"),
+            "struct NotAComponent {\n\
+               value: number = 0\n\
+               change() { this.value++ }\n\
+               build() { Text('x') }\n\
+             }\n\
+             @Component\n\
+             struct ReadOnly {\n\
+               @State value: number = 0\n\
+               inspect() { return this.value }\n\
+               build() { Text(`${this.value}`) }\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        for qualified_name in ["NotAComponent.change", "ReadOnly.inspect"] {
+            let method = engine
+                .search(qualified_name, 10)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.qualified_name == qualified_name)
+                .unwrap()
+                .symbol;
+            assert!(engine
+                .callees(&method.id)
+                .unwrap()
+                .iter()
+                .all(|(_, evidence)| evidence.provenance != "framework/arkui-state"));
+        }
+    }
+
+    #[test]
+    fn arkui_inference_bounds_decorators_intrinsics_events_and_nested_state() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("Adversarial.ets"),
+            "@Component\n\
+             struct Decorated {\n\
+               @State value: number = 0\n\
+               change() { this.value++ }\n\
+               build() { Text('decorated') }\n\
+             }\n\
+             struct PlainSibling {\n\
+               @State value: number = 0\n\
+               change() { this.value++ }\n\
+               build() { Text('plain') }\n\
+             }\n\
+             @ComponentV2\n\
+             struct Modern {\n\
+               @Local value: number = 0\n\
+               change() { this.value++ }\n\
+               deferred() { const later = () => { this.value++ } }\n\
+               shadowed() { let value = 0; value++ }\n\
+               handle() {}\n\
+               build() {\n\
+                 Button('ok').onClick(this.handle)\n\
+                 Button('no').onward(this.handle)\n\
+               }\n\
+             }\n\
+             function Text() { return 'project function' }\n\
+             export function callProjectText() { return Text() }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let symbol = |qualified_name: &str| {
+            engine
+                .search(qualified_name, 20)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.qualified_name == qualified_name)
+                .unwrap()
+                .symbol
+        };
+        assert!(engine
+            .callees(&symbol("Modern.change").id)
+            .unwrap()
+            .iter()
+            .any(|(target, evidence)| {
+                target.qualified_name == "Modern.build"
+                    && evidence.provenance == "framework/arkui-state"
+            }));
+        for method in ["PlainSibling.change", "Modern.deferred", "Modern.shadowed"] {
+            assert!(engine
+                .callees(&symbol(method).id)
+                .unwrap()
+                .iter()
+                .all(|(_, evidence)| evidence.provenance != "framework/arkui-state"));
+        }
+        let build_edges = engine.callees(&symbol("Modern.build").id).unwrap();
+        assert_eq!(
+            build_edges
+                .iter()
+                .filter(|(target, evidence)| {
+                    target.qualified_name == "Modern.handle"
+                        && evidence.provenance == "framework/arkui-event"
+                })
+                .count(),
+            1
+        );
+        assert!(engine
+            .callees(&symbol("callProjectText").id)
+            .unwrap()
+            .iter()
+            .any(|(target, _)| target.name == "Text"));
+    }
+
+    #[test]
+    fn arkts_and_typescript_imports_resolve_in_both_directions() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("entry/pages")).unwrap();
+        fs::write(
+            temp.path().join("entry/logic.ts"),
+            "export function formatLabel() { return 'ready'; }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("entry/pages/Index.ets"),
+            "import { formatLabel } from '../logic'\n\
+             export function arkHelper() { return formatLabel(); }\n\
+             @Component\n\
+             struct Index { build() { Text(formatLabel()) } }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("entry/consumer.ts"),
+            "import { arkHelper } from './pages/Index.ets';\n\
+             export function consume() { return arkHelper(); }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        for (caller_name, target_name, target_file) in [
+            ("Index.build", "formatLabel", "entry/logic.ts"),
+            ("consume", "arkHelper", "entry/pages/Index.ets"),
+        ] {
+            let caller = engine
+                .search(caller_name, 20)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.qualified_name == caller_name)
+                .unwrap()
+                .symbol;
+            assert!(engine
+                .callees(&caller.id)
+                .unwrap()
+                .iter()
+                .any(|(target, _)| target.name == target_name && target.file == target_file));
         }
     }
 

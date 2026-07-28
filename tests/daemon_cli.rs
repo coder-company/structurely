@@ -1,4 +1,6 @@
 use serde_json::Value;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     fs,
     io::Write,
@@ -105,26 +107,40 @@ fn daemon_start_status_catch_up_and_stop_are_idempotent() {
         ],
     );
     assert_eq!(restarted["started"], true);
-    fs::write(temp.path().join("broken.ts"), [0xff, 0xfe, 0xfd]).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let status = run_json(
-            temp.path(),
-            &["daemon", "status", "--path", temp.path().to_str().unwrap()],
-        );
-        if !status["running"].as_bool().unwrap() {
-            assert_eq!(status["state"]["phase"], "stopped");
-            assert!(status["state"]["error"].as_str().is_some());
-            break;
+    #[cfg(unix)]
+    {
+        let broken = temp.path().join("broken.ts");
+        fs::write(&broken, "function unreadable() {}\n").unwrap();
+        fs::set_permissions(&broken, fs::Permissions::from_mode(0o000)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let status = run_json(
+                temp.path(),
+                &["daemon", "status", "--path", temp.path().to_str().unwrap()],
+            );
+            if !status["running"].as_bool().unwrap() {
+                assert_eq!(status["state"]["phase"], "stopped");
+                assert!(status["state"]["error"].as_str().is_some());
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "daemon did not release its lock after an indexing failure"
+            );
+            thread::sleep(Duration::from_millis(50));
         }
-        assert!(
-            Instant::now() < deadline,
-            "daemon did not release its lock after an indexing failure"
-        );
-        thread::sleep(Duration::from_millis(50));
+        fs::set_permissions(&broken, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::remove_file(broken).unwrap();
     }
 
-    fs::remove_file(temp.path().join("broken.ts")).unwrap();
+    #[cfg(not(unix))]
+    {
+        let stopped = run_json(
+            temp.path(),
+            &["daemon", "stop", "--path", temp.path().to_str().unwrap()],
+        );
+        assert_eq!(stopped["stopped"], true);
+    }
     let recovered = run_json(
         temp.path(),
         &["daemon", "start", "--path", temp.path().to_str().unwrap()],

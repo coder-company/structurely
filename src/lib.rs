@@ -9,6 +9,7 @@ mod project_config;
 mod project_resolution;
 pub mod quality;
 mod semantic;
+mod source;
 pub mod store;
 
 pub use engine::{

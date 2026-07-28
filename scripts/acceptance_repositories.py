@@ -85,6 +85,10 @@ def main() -> None:
             name = repository["name"]
             project = root / name
             checked_out_copy(sources[name], project, repository["commit"])
+            if config := repository.get("structurelyConfig"):
+                (project / "structurely.json").write_text(
+                    json.dumps(config, indent=2) + "\n"
+                )
             started = time.perf_counter_ns()
             initialized = json.loads(run([str(binary), "init", str(project)]).stdout)
             wall_ms = (time.perf_counter_ns() - started) / 1_000_000
@@ -93,6 +97,11 @@ def main() -> None:
                 raise RuntimeError(
                     f"{name}: indexed {indexed_files}, expected at least "
                     f"{repository['minimumIndexedFiles']}"
+                )
+            if indexed_files > repository.get("maximumIndexedFiles", indexed_files):
+                raise RuntimeError(
+                    f"{name}: indexed {indexed_files}, expected at most "
+                    f"{repository['maximumIndexedFiles']}"
                 )
 
             checks = []
@@ -103,18 +112,27 @@ def main() -> None:
                     for expected in assertion["contains"]
                     if expected not in output
                 ]
+                record_text = assertion.get("recordContains", [])
+                parsed = json.loads(output)
+                records = parsed if isinstance(parsed, list) else [parsed]
+                matching_record = not record_text or any(
+                    all(expected in json.dumps(record) for expected in record_text)
+                    for record in records
+                )
                 checks.append(
                     {
                         "command": assertion["command"],
                         "query": assertion["query"],
                         "passed": not missing_text,
                         "requiredText": assertion["contains"],
+                        "recordContains": record_text,
+                        "matchingRecord": matching_record,
                     }
                 )
-                if missing_text:
+                if missing_text or not matching_record:
                     raise RuntimeError(
                         f"{name}: {assertion['command']} {assertion['query']!r} "
-                        f"missed {missing_text}"
+                        f"missed {missing_text or ['one correlated output record']}"
                     )
 
             status = json.loads(run([str(binary), "status", str(project)]).stdout)

@@ -108,6 +108,30 @@
       }
     },
     {
+      "label": "arkui-event",
+      "method": "tools/call",
+      "params": {
+        "name": "codegraph_callees",
+        "arguments": {
+          "symbol": "Counter.build",
+          "file": "arkui.ets",
+          "limit": 20
+        }
+      }
+    },
+    {
+      "label": "arkui-state",
+      "method": "tools/call",
+      "params": {
+        "name": "codegraph_callees",
+        "arguments": {
+          "symbol": "Counter.increment",
+          "file": "arkui.ets",
+          "limit": 20
+        }
+      }
+    },
+    {
       "label": "impact",
       "method": "tools/call",
       "params": {

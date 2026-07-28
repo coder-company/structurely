@@ -818,14 +818,20 @@ impl Store {
                     }
                 }
                 if targets.is_empty() {
-                    if let Some(imported) =
-                        imported_candidates.get(&(file_id, callee_name.clone(), language.clone()))
+                    for candidate_language in
+                        std::iter::once(language.as_str()).chain(compatible_web_language(&language))
                     {
-                        targets.extend(
-                            imported
-                                .iter()
-                                .map(|candidate| (candidate.0.clone(), candidate.1.clone(), 2)),
-                        );
+                        if let Some(imported) = imported_candidates.get(&(
+                            file_id,
+                            callee_name.clone(),
+                            candidate_language.to_owned(),
+                        )) {
+                            targets.extend(
+                                imported
+                                    .iter()
+                                    .map(|candidate| (candidate.0.clone(), candidate.1.clone(), 2)),
+                            );
+                        }
                     }
                 }
                 if targets.is_empty() {
@@ -1308,7 +1314,12 @@ impl Store {
             let mut target_statement = tx.prepare(
                 "SELECT s.public_id,s.qualified_name,f.path,s.file_id
                  FROM symbols s JOIN files f ON f.id=s.file_id
-                 WHERE s.name=?1 AND s.public_id<>?2 AND s.language=?3
+                 WHERE s.name=?1 AND s.public_id<>?2
+                   AND (
+                     s.language=?3
+                     OR (?3='arkts' AND s.language='typescript')
+                     OR (?3='typescript' AND s.language='arkts')
+                   )
                  ORDER BY s.qualified_name,s.public_id",
             )?;
             let mut targets = target_statement
@@ -1604,6 +1615,7 @@ fn parse_language(value: &str) -> Language {
         "jsx" => Language::Jsx,
         "vue" => Language::Vue,
         "svelte" => Language::Svelte,
+        "arkts" => Language::ArkTs,
         "python" => Language::Python,
         "rust" => Language::Rust,
         "go" => Language::Go,
@@ -1620,6 +1632,14 @@ fn parse_language(value: &str) -> Language {
         "scala" => Language::Scala,
         "r" => Language::R,
         _ => Language::TypeScript,
+    }
+}
+
+fn compatible_web_language(language: &str) -> Option<&'static str> {
+    match language {
+        "arkts" => Some("typescript"),
+        "typescript" => Some("arkts"),
+        _ => None,
     }
 }
 

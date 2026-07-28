@@ -2,8 +2,9 @@ use crate::{
     engine::{MAX_SOURCE_BYTES, PROJECT_DIR},
     model::Language,
     project_config::ProjectConfig,
+    source::read_source,
 };
-use anyhow::{Context, Result};
+use anyhow::Result;
 use ignore::WalkBuilder;
 use std::{
     collections::{HashMap, HashSet},
@@ -143,8 +144,7 @@ impl<'a> ProjectInventory<'a> {
             return Ok(());
         }
         *files_scanned += 1;
-        let source =
-            fs::read_to_string(path).with_context(|| format!("read source {}", path.display()))?;
+        let source = read_source(path)?;
         let hash = blake3::hash(source.as_bytes()).to_hex().to_string();
         if force_reindex || indexed.get(&relative) != Some(&hash) {
             changed.push((relative, path.to_owned(), language));

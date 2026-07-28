@@ -181,6 +181,79 @@
           ]
         }
       ]
+    },
+    {
+      "name": "openharmony",
+      "url": "https://github.com/openharmony/applications_app_samples",
+      "commit": "a826ab0e75fe51d028c1c5af58188e908736b53b",
+      "minimumIndexedFiles": 6995,
+      "maximumIndexedFiles": 6995,
+      "structurelyConfig": {
+        "exclude": [
+          "**/*.c",
+          "**/*.cc",
+          "**/*.cjs",
+          "**/*.cpp",
+          "**/*.cs",
+          "**/*.cxx",
+          "**/*.dart",
+          "**/*.go",
+          "**/*.h",
+          "**/*.hh",
+          "**/*.hpp",
+          "**/*.hxx",
+          "**/*.java",
+          "**/*.js",
+          "**/*.jsx",
+          "**/*.kt",
+          "**/*.kts",
+          "**/*.lua",
+          "**/*.mjs",
+          "**/*.php",
+          "**/*.phtml",
+          "**/*.py",
+          "**/*.pyi",
+          "**/*.r",
+          "**/*.rake",
+          "**/*.rb",
+          "**/*.rs",
+          "**/*.sc",
+          "**/*.scala",
+          "**/*.svelte",
+          "**/*.swift",
+          "**/*.ts",
+          "**/*.tsx",
+          "**/*.vue"
+        ]
+      },
+      "assertions": [
+        {
+          "command": "search",
+          "query": "OperationView.build",
+          "contains": [
+            "code/BasicFeature/International/International/entry/src/main/ets/component/OperationView.ets",
+            "\"language\": \"arkts\"",
+            "\"qualified_name\": \"OperationView.build\""
+          ]
+        },
+        {
+          "command": "callers",
+          "query": "handleClick",
+          "file": "code/BasicFeature/International/International/entry/src/main/ets/component/OperationView.ets",
+          "contains": [
+            "\"qualified_name\": \"OperationView.build\"",
+            "\"provenance\": \"framework/arkui-event\"",
+            "\"confidence\": 0.97",
+            "\"line\": 41"
+          ],
+          "recordContains": [
+            "\"qualified_name\": \"OperationView.build\"",
+            "\"provenance\": \"framework/arkui-event\"",
+            "\"confidence\": 0.97",
+            "\"line\": 41"
+          ]
+        }
+      ]
     }
   ]
 }

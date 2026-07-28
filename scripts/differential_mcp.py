@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -71,8 +72,12 @@ def tool_names(response: dict[str, Any]) -> set[str]:
     return {tool["name"] for tool in response["result"]["tools"]}
 
 
-def predicates(capture: dict[str, Any]) -> dict[str, bool]:
+def predicates(
+    capture: dict[str, Any], *, require_structurely_evidence: bool = False
+) -> dict[str, bool]:
     expected_tools = {f"codegraph_{name}" for name in TOOLS.split(",")}
+    arkui_event = result_text(capture["arkui-event"])
+    arkui_state = result_text(capture["arkui-state"])
     return {
         "initialize": capture["initialize"]["result"]["protocolVersion"]
         in {"2024-11-05", "2025-03-26", "2025-06-18"},
@@ -88,6 +93,16 @@ def predicates(capture: dict[str, Any]) -> dict[str, bool]:
         "interface-dispatch": all(
             value in result_text(capture["interface-dispatch"])
             for value in ("handle", "contracts.ts")
+        ),
+        "arkui-event": "increment" in arkui_event
+        and (
+            not require_structurely_evidence
+            or "framework/arkui-event" in arkui_event
+        ),
+        "arkui-state": "build" in arkui_state.lower()
+        and (
+            not require_structurely_evidence
+            or "framework/arkui-state" in arkui_state
         ),
         "impact": "showUser" in result_text(capture["impact"]),
         "node-window": "showUser" in result_text(capture["node-window"]),
@@ -168,6 +183,37 @@ def normalize(value: Any, roots: list[Path]) -> Any:
     return value
 
 
+def git_checkout_for(path: Path) -> Path:
+    for candidate in [path.parent, *path.parents]:
+        if (candidate / ".git").exists():
+            return candidate
+    raise RuntimeError(f"{path} is not inside a Git checkout")
+
+
+def verify_codegraph(path: Path, expected: dict[str, str]) -> dict[str, str]:
+    checkout = git_checkout_for(path.resolve())
+    commit = run(["git", "-C", str(checkout), "rev-parse", "HEAD"]).stdout.strip()
+    if commit != expected["commit"]:
+        raise RuntimeError(
+            f"CodeGraph commit mismatch: expected {expected['commit']}, got {commit}"
+        )
+    package = json.loads((checkout / "package.json").read_text())
+    version = package.get("version")
+    if version != expected["version"]:
+        raise RuntimeError(
+            f"CodeGraph version mismatch: expected {expected['version']}, got {version}"
+        )
+    return {"version": version, "commit": commit}
+
+
+def binary_identity(path: Path) -> dict[str, str]:
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    checkout = git_checkout_for(path.resolve())
+    commit = run(["git", "-C", str(checkout), "rev-parse", "HEAD"]).stdout.strip()
+    dirty = bool(run(["git", "-C", str(checkout), "status", "--porcelain"]).stdout)
+    return {"commit": commit, "sha256": digest, "worktree": "dirty" if dirty else "clean"}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--structurely", required=True, type=Path)
@@ -180,6 +226,8 @@ def main() -> None:
     args = parser.parse_args()
 
     manifest = json.loads((args.fixture / "scenarios.json").read_text())
+    codegraph_identity = verify_codegraph(args.codegraph, manifest["pinnedCodeGraph"])
+    structurely_identity = binary_identity(args.structurely)
     requests = manifest["requests"]
     with tempfile.TemporaryDirectory(prefix="structurely-differential-") as temporary:
         root = Path(temporary)
@@ -213,7 +261,7 @@ def main() -> None:
         normalized_codegraph = normalize(codegraph, [codegraph_project])
         normalized_structurely = normalize(structurely, [structurely_project])
 
-    structurely_checks = predicates(structurely)
+    structurely_checks = predicates(structurely, require_structurely_evidence=True)
     codegraph_checks = predicates(codegraph)
     structurely_usefulness = context_usefulness(
         structurely, manifest["contextUsefulness"]
@@ -224,7 +272,8 @@ def main() -> None:
         for label in structurely_checks
     }
     report = {
-        "pinnedCodeGraph": manifest["pinnedCodeGraph"],
+        "pinnedCodeGraph": codegraph_identity,
+        "structurelyBinary": structurely_identity,
         "compatibility": {
             "passed": sum(shared.values()),
             "total": len(shared),
@@ -258,7 +307,11 @@ def main() -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report["compatibility"], indent=2))
-    if not all(shared.values()) or not report["contextUsefulness"]["atLeastPinnedCodeGraph"]:
+    if (
+        not all(shared.values())
+        or not report["contextUsefulness"]["atLeastPinnedCodeGraph"]
+        or report.get("baselineMatches") is False
+    ):
         raise SystemExit(1)
 
 

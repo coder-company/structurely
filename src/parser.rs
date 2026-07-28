@@ -478,6 +478,7 @@ fn parse_tree(language: Language, source: &str) -> Result<Tree> {
         Language::Tsx => tree_sitter_typescript::LANGUAGE_TSX,
         Language::JavaScript | Language::Jsx => tree_sitter_javascript::LANGUAGE,
         Language::Vue | Language::Svelte => tree_sitter_typescript::LANGUAGE_TSX,
+        Language::ArkTs => tree_sitter_arkts::LANGUAGE,
         Language::Python => tree_sitter_python::LANGUAGE,
         Language::Rust => tree_sitter_rust::LANGUAGE,
         Language::Go => tree_sitter_go::LANGUAGE,
@@ -636,6 +637,9 @@ fn declaration_at<'a>(
         "struct_declaration" | "record_declaration" => {
             (SymbolKind::Struct, node.child_by_field_name("name")?)
         }
+        "public_field_definition" if _language == Language::ArkTs => {
+            (SymbolKind::Variable, node.child_by_field_name("name")?)
+        }
         "enum_declaration" => (SymbolKind::Enum, node.child_by_field_name("name")?),
         "type_spec" => {
             let value = node.child_by_field_name("type")?;
@@ -774,6 +778,7 @@ fn collect_calls(
             | "scoped_call_expression"
             | "function_call"
             | "new_expression"
+            | "arkui_component_expression"
     ) {
         if let Some(function) = call_target_node(node) {
             if let Some(name) = call_name(function, context.source) {
@@ -1145,6 +1150,50 @@ mod tests {
                 .unwrap();
             assert_eq!(call.line, function_line);
         }
+    }
+
+    #[test]
+    fn extracts_arkts_component_struct_members_and_dsl_calls() {
+        let facts = parse_file(
+            "entry/src/main/ets/pages/Index.ets",
+            "@Entry\n\
+             @Component\n\
+             struct Counter {\n\
+               @State count: number = 0\n\
+               increment() { this.count++ }\n\
+               build() {\n\
+                 Column() {\n\
+                   TodoRow()\n\
+                   Button('Add').onClick(this.increment)\n\
+                 }\n\
+               }\n\
+             }\n\
+             @Component\n\
+             struct TodoRow { build() { Text('row') } }\n",
+        )
+        .unwrap();
+        assert_eq!(facts.language, Language::ArkTs);
+        for qualified_name in [
+            "Counter",
+            "Counter.count",
+            "Counter.increment",
+            "Counter.build",
+            "TodoRow",
+            "TodoRow.build",
+        ] {
+            assert!(facts
+                .symbols
+                .iter()
+                .any(|symbol| symbol.qualified_name == qualified_name));
+        }
+        assert!(facts
+            .unresolved_calls
+            .iter()
+            .any(|call| call.callee_name == "TodoRow"));
+        assert!(facts
+            .unresolved_calls
+            .iter()
+            .all(|call| !matches!(call.callee_name.as_str(), "Column" | "Button" | "Text")));
     }
 
     #[test]

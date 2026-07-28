@@ -788,7 +788,8 @@ mod tests {
         )
         .unwrap();
         let (mut engine, _) = Engine::init(temp.path()).unwrap();
-        fs::write(temp.path().join("broken.ts"), [0xff, 0xfe, 0xfd]).unwrap();
+        let unavailable = temp.path().with_extension("unavailable");
+        fs::rename(temp.path(), &unavailable).unwrap();
 
         let stale = call_tool(
             &mut engine,
@@ -812,7 +813,7 @@ mod tests {
             "committedSymbol"
         );
 
-        fs::remove_file(temp.path().join("broken.ts")).unwrap();
+        fs::rename(&unavailable, temp.path()).unwrap();
         let current = call_tool(
             &mut engine,
             &json!({

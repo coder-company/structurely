@@ -2,7 +2,7 @@ use crate::model::{
     DynamicEventFact, EventAction, Evidence, FileFacts, Language, Relationship, RelationshipKind,
     SourceSpan, Symbol, SymbolKind, UnresolvedCall, UnresolvedReference,
 };
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 use tree_sitter::Node;
 
 pub(crate) fn enrich_file_facts(root: Node<'_>, source: &[u8], facts: &mut FileFacts) {
@@ -12,10 +12,15 @@ pub(crate) fn enrich_file_facts(root: Node<'_>, source: &[u8], facts: &mut FileF
         | Language::JavaScript
         | Language::Jsx
         | Language::Vue
-        | Language::Svelte => {
+        | Language::Svelte
+        | Language::ArkTs => {
             collect_javascript_registrations(root, source, facts);
             collect_javascript_function_references(root, source, facts);
             collect_nestjs_routes(root, source, facts);
+            if facts.language == Language::ArkTs {
+                collect_arkui_semantics(root, source, facts);
+                remove_arkui_intrinsic_calls(facts);
+            }
             if matches!(
                 facts.language,
                 Language::Tsx | Language::Jsx | Language::Vue | Language::Svelte
@@ -33,6 +38,474 @@ pub(crate) fn enrich_file_facts(root: Node<'_>, source: &[u8], facts: &mut FileF
         }
         _ => {}
     }
+}
+
+fn collect_arkui_semantics(node: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+    if node.kind() == "struct_declaration"
+        && ["Component", "ComponentV2"]
+            .iter()
+            .any(|decorator| has_decorator(node, decorator, source))
+    {
+        enrich_arkui_component(node, source, facts);
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_arkui_semantics(child, source, facts);
+    }
+}
+
+fn enrich_arkui_component(component: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+    const REACTIVE_DECORATORS: &[&str] = &[
+        "State",
+        "Prop",
+        "Link",
+        "StorageLink",
+        "Local",
+        "Param",
+        "Provide",
+        "Consume",
+        "Provider",
+        "Consumer",
+        "ObjectLink",
+    ];
+    let Some(component_name) = component
+        .child_by_field_name("name")
+        .map(|name| text(name, source))
+        .filter(|name| !name.is_empty())
+    else {
+        return;
+    };
+    let Some(body) = component.child_by_field_name("body") else {
+        return;
+    };
+    let children = direct_named_children(body);
+    let mut reactive_fields = Vec::new();
+    let mut methods = Vec::new();
+    let mut pending_decorators = Vec::new();
+    for child in children {
+        if child.kind() == "decorator" {
+            if let Some(name) = decorator_identifier(child, source) {
+                pending_decorators.push(name);
+            }
+            continue;
+        }
+        let decorators = direct_decorators(child)
+            .filter_map(|decorator| decorator_identifier(decorator, source))
+            .chain(pending_decorators.drain(..))
+            .collect::<Vec<_>>();
+        match child.kind() {
+            "public_field_definition"
+                if decorators
+                    .iter()
+                    .any(|name| REACTIVE_DECORATORS.contains(&name.as_str())) =>
+            {
+                if let Some(name) = child.child_by_field_name("name") {
+                    reactive_fields.push(text(name, source));
+                }
+            }
+            "method_definition" => methods.push(child),
+            _ => {}
+        }
+    }
+    let build = methods.iter().copied().find(|method| {
+        method
+            .child_by_field_name("name")
+            .is_some_and(|name| text(name, source) == "build")
+    });
+    for method in &methods {
+        collect_arkui_runtime_calls(*method, &component_name, source, facts);
+    }
+    let Some(build) = build else {
+        return;
+    };
+    for method in methods {
+        if method.id() == build.id() || !mutates_arkui_state(method, &reactive_fields, source) {
+            continue;
+        }
+        let Some(owner) = owning_callable_symbol(method, &facts.symbols) else {
+            continue;
+        };
+        facts.unresolved_calls.push(UnresolvedCall {
+            caller_id: owner.id.clone(),
+            callee_name: "build".to_owned(),
+            receiver_type: Some(component_name.clone()),
+            target_file_hint: Some(facts.path.clone()),
+            provenance: "framework/arkui-state".to_owned(),
+            confidence: 0.95,
+            explanation: format!(
+                "{} mutates reactive ArkUI state and schedules {component_name}.build",
+                owner.qualified_name
+            ),
+            resolvable: true,
+            file: facts.path.clone(),
+            line: method.start_position().row + 1,
+        });
+    }
+}
+
+fn collect_arkui_runtime_calls(
+    node: Node<'_>,
+    component_name: &str,
+    source: &[u8],
+    facts: &mut FileFacts,
+) {
+    if node.kind() == "arkui_component_expression" {
+        if let Some(target) = node
+            .child_by_field_name("function")
+            .and_then(|function| call_name_text(function, source))
+            .filter(|target| target.starts_with(char::is_uppercase))
+            .filter(|target| arkui_target_is_project_defined(target, facts))
+        {
+            append_arkui_call(
+                node,
+                target,
+                component_name,
+                "framework/arkui-render",
+                0.97,
+                facts,
+            );
+        }
+        let mut property_cursor = node.walk();
+        let properties = node
+            .children_by_field_name("property", &mut property_cursor)
+            .collect::<Vec<_>>();
+        let mut argument_cursor = node.walk();
+        let argument_lists = node
+            .children_by_field_name("arguments", &mut argument_cursor)
+            .collect::<Vec<_>>();
+        for (property, arguments) in properties
+            .into_iter()
+            .zip(argument_lists.into_iter().skip(1))
+        {
+            if !is_arkui_event_property(&text(property, source)) {
+                continue;
+            }
+            let mut cursor = arguments.walk();
+            let handler = arguments
+                .named_children(&mut cursor)
+                .next()
+                .and_then(|argument| referenced_callable_name(argument, source));
+            if let Some(handler) =
+                handler.filter(|name| arkui_component_has_method(component_name, name, facts))
+            {
+                append_arkui_call(
+                    property,
+                    handler,
+                    component_name,
+                    "framework/arkui-event",
+                    0.97,
+                    facts,
+                );
+            }
+        }
+    } else if node.kind() == "call_expression" {
+        if let Some(function) = node.child_by_field_name("function") {
+            if function.kind() == "member_expression" {
+                let method = function
+                    .child_by_field_name("property")
+                    .map(|property| text(property, source))
+                    .unwrap_or_default();
+                if is_arkui_event_property(&method) {
+                    if let Some(arguments) = node.child_by_field_name("arguments") {
+                        let mut cursor = arguments.walk();
+                        let handler = arguments
+                            .named_children(&mut cursor)
+                            .next()
+                            .and_then(|argument| referenced_callable_name(argument, source));
+                        if let Some(handler) = handler
+                            .filter(|name| arkui_component_has_method(component_name, name, facts))
+                        {
+                            append_arkui_call(
+                                node,
+                                handler,
+                                component_name,
+                                "framework/arkui-event",
+                                0.97,
+                                facts,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_arkui_runtime_calls(child, component_name, source, facts);
+    }
+}
+
+fn arkui_target_is_project_defined(target: &str, facts: &FileFacts) -> bool {
+    facts.symbols.iter().any(|symbol| {
+        matches!(symbol.kind, SymbolKind::Struct | SymbolKind::Component) && symbol.name == target
+    }) || facts.unresolved_references.iter().any(|reference| {
+        reference.kind == RelationshipKind::Imports && reference.binding_name == target
+    })
+}
+
+fn arkui_component_has_method(component_name: &str, method_name: &str, facts: &FileFacts) -> bool {
+    facts.symbols.iter().any(|symbol| {
+        symbol.kind == SymbolKind::Method
+            && symbol.qualified_name == format!("{component_name}.{method_name}")
+    })
+}
+
+fn is_arkui_event_property(name: &str) -> bool {
+    name.strip_prefix("on")
+        .and_then(|suffix| suffix.chars().next())
+        .is_some_and(char::is_uppercase)
+}
+
+fn remove_arkui_intrinsic_calls(facts: &mut FileFacts) {
+    const ARKUI_INTRINSICS: &[&str] = &[
+        "$r",
+        "$rawfile",
+        "AlphabetIndexer",
+        "Badge",
+        "Blank",
+        "Button",
+        "CalendarPicker",
+        "Canvas",
+        "Checkbox",
+        "CheckboxGroup",
+        "Circle",
+        "Column",
+        "ColumnSplit",
+        "Counter",
+        "DataPanel",
+        "DatePicker",
+        "Divider",
+        "Ellipse",
+        "Flex",
+        "FlowItem",
+        "FolderStack",
+        "FormLink",
+        "Gauge",
+        "Grid",
+        "GridItem",
+        "GridRow",
+        "GridCol",
+        "Hyperlink",
+        "Image",
+        "ImageAnimator",
+        "Line",
+        "List",
+        "ListItem",
+        "ListItemGroup",
+        "LoadingProgress",
+        "Marquee",
+        "Menu",
+        "MenuItem",
+        "MenuItemGroup",
+        "NavDestination",
+        "Navigation",
+        "Navigator",
+        "NodeContainer",
+        "Panel",
+        "Path",
+        "PatternLock",
+        "PluginComponent",
+        "Polygon",
+        "Polyline",
+        "Progress",
+        "QRCode",
+        "Radio",
+        "Rating",
+        "Rect",
+        "RelativeContainer",
+        "RichEditor",
+        "RootScene",
+        "Row",
+        "RowSplit",
+        "Scroll",
+        "Search",
+        "Select",
+        "Shape",
+        "SideBarContainer",
+        "Slider",
+        "Span",
+        "Stack",
+        "Stepper",
+        "StepperItem",
+        "Swiper",
+        "SymbolGlyph",
+        "TabContent",
+        "Tabs",
+        "Text",
+        "TextArea",
+        "TextClock",
+        "TextInput",
+        "TextPicker",
+        "TextTimer",
+        "TimePicker",
+        "Toggle",
+        "Video",
+        "Web",
+        "XComponent",
+    ];
+    let project_names = facts
+        .symbols
+        .iter()
+        .map(|symbol| symbol.name.as_str())
+        .chain(
+            facts
+                .unresolved_references
+                .iter()
+                .filter(|reference| reference.kind == RelationshipKind::Imports)
+                .map(|reference| reference.binding_name.as_str()),
+        )
+        .collect::<HashSet<_>>();
+    facts.unresolved_calls.retain(|call| {
+        call.provenance != "tree-sitter/name-resolution"
+            || !ARKUI_INTRINSICS.contains(&call.callee_name.as_str())
+            || project_names.contains(call.callee_name.as_str())
+    });
+}
+
+fn append_arkui_call(
+    observation: Node<'_>,
+    target: String,
+    component_name: &str,
+    provenance: &str,
+    confidence: f64,
+    facts: &mut FileFacts,
+) {
+    let Some(owner) = owning_callable_symbol(observation, &facts.symbols) else {
+        return;
+    };
+    if facts.unresolved_calls.iter().any(|pending| {
+        pending.caller_id == owner.id
+            && pending.callee_name == target
+            && pending.provenance == provenance
+    }) {
+        return;
+    }
+    facts.unresolved_calls.push(UnresolvedCall {
+        caller_id: owner.id.clone(),
+        callee_name: target.clone(),
+        receiver_type: (provenance == "framework/arkui-event").then(|| component_name.to_owned()),
+        target_file_hint: None,
+        provenance: provenance.to_owned(),
+        confidence,
+        explanation: format!("{component_name} ArkUI flow invokes {target}"),
+        resolvable: true,
+        file: facts.path.clone(),
+        line: observation.start_position().row + 1,
+    });
+}
+
+fn mutates_arkui_state(node: Node<'_>, fields: &[String], source: &[u8]) -> bool {
+    if fields.is_empty() {
+        return false;
+    }
+    if matches!(
+        node.kind(),
+        "assignment_expression" | "augmented_assignment_expression" | "update_expression"
+    ) {
+        let changed = node
+            .child_by_field_name("left")
+            .or_else(|| node.child_by_field_name("argument"))
+            .or_else(|| node.named_child(0))
+            .map(|target| text(target, source));
+        if changed
+            .is_some_and(|target| fields.iter().any(|field| target == format!("this.{field}")))
+        {
+            return true;
+        }
+    }
+    if node.kind() == "call_expression" {
+        const MUTATORS: &[&str] = &[
+            "push", "pop", "shift", "unshift", "splice", "sort", "reverse", "fill",
+        ];
+        if let Some(function) = node.child_by_field_name("function") {
+            if function.kind() == "member_expression" {
+                let receiver = function
+                    .child_by_field_name("object")
+                    .map(|object| text(object, source))
+                    .unwrap_or_default();
+                let method = function
+                    .child_by_field_name("property")
+                    .map(|property| text(property, source))
+                    .unwrap_or_default();
+                if MUTATORS.contains(&method.as_str())
+                    && fields
+                        .iter()
+                        .any(|field| receiver == format!("this.{field}"))
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    let found = node.named_children(&mut cursor).any(|child| {
+        !matches!(
+            child.kind(),
+            "arrow_function"
+                | "function_expression"
+                | "function_declaration"
+                | "generator_function"
+                | "generator_function_declaration"
+                | "method_definition"
+        ) && mutates_arkui_state(child, fields, source)
+    });
+    found
+}
+
+fn has_decorator(node: Node<'_>, expected: &str, source: &[u8]) -> bool {
+    if has_attached_or_adjacent_decorator(node, expected, source) {
+        return true;
+    }
+    node.parent().is_some_and(|parent| {
+        matches!(
+            parent.kind(),
+            "export_statement" | "export_default_declaration"
+        ) && has_attached_or_adjacent_decorator(parent, expected, source)
+    })
+}
+
+fn has_attached_or_adjacent_decorator(node: Node<'_>, expected: &str, source: &[u8]) -> bool {
+    if direct_decorators(node)
+        .filter_map(|decorator| decorator_identifier(decorator, source))
+        .any(|name| name == expected)
+    {
+        return true;
+    }
+    let mut sibling = node.prev_named_sibling();
+    while let Some(candidate) = sibling {
+        if candidate.kind() != "decorator" {
+            break;
+        }
+        if decorator_identifier(candidate, source).as_deref() == Some(expected) {
+            return true;
+        }
+        sibling = candidate.prev_named_sibling();
+    }
+    false
+}
+
+fn decorator_identifier(decorator: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut cursor = decorator.walk();
+    let name = decorator
+        .named_children(&mut cursor)
+        .find_map(|child| match child.kind() {
+            "identifier" => Some(text(child, source)),
+            "call_expression" => child
+                .child_by_field_name("function")
+                .map(|function| text(function, source)),
+            _ => None,
+        });
+    name
+}
+
+fn call_name_text(node: Node<'_>, source: &[u8]) -> Option<String> {
+    matches!(node.kind(), "identifier" | "property_identifier").then(|| text(node, source))
+}
+
+fn direct_named_children(node: Node<'_>) -> Vec<Node<'_>> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor).collect()
 }
 
 fn collect_component_template_edges(root: Node<'_>, source: &[u8], facts: &mut FileFacts) {

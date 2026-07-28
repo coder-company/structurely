@@ -123,6 +123,7 @@ fn parse_language(value: &str) -> Option<Language> {
         "jsx" => Some(Language::Jsx),
         "vue" => Some(Language::Vue),
         "svelte" => Some(Language::Svelte),
+        "arkts" => Some(Language::ArkTs),
         "python" => Some(Language::Python),
         "rust" => Some(Language::Rust),
         "go" => Some(Language::Go),

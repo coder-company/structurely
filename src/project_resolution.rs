@@ -520,7 +520,7 @@ fn normalize_absolute(path: &Path) -> PathBuf {
 
 fn canonical_source_hint(root: &Path, relative: &Path) -> Option<String> {
     const EXTENSIONS: &[&str] = &[
-        "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts", "vue", "svelte", "json", "rs",
+        "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts", "vue", "svelte", "ets", "json", "rs",
     ];
     let direct = root.join(relative);
     if direct.is_file() {
