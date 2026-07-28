@@ -85,11 +85,17 @@ pub struct NodeFile {
     pub file: String,
     pub source: Option<String>,
     pub symbols: Vec<crate::model::Symbol>,
+    pub total_lines: usize,
+    pub shown_start_line: Option<usize>,
+    pub shown_end_line: Option<usize>,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct NodeResult {
     pub files: Vec<NodeFile>,
+    pub ambiguous: bool,
+    pub guidance: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -441,40 +447,83 @@ impl Engine {
                 });
             }
             let wants_source = !symbols_only && (symbol.is_none() || include_code);
-            let source = if wants_source {
-                let raw = fs::read_to_string(self.root.join(&path))
-                    .with_context(|| format!("read source {}", path))?;
+            let raw = fs::read_to_string(self.root.join(&path))
+                .with_context(|| format!("read source {}", path))?;
+            let total_lines = raw.lines().count().max(1);
+            let (source, shown_start_line, shown_end_line, truncated) = if wants_source {
                 if symbol.is_some() {
                     let snippets = symbols
                         .iter()
-                        .filter_map(|symbol| raw.get(symbol.start_byte..symbol.end_byte))
+                        .filter_map(|symbol| {
+                            raw.get(symbol.start_byte..symbol.end_byte).map(|source| {
+                                source
+                                    .lines()
+                                    .enumerate()
+                                    .map(|(offset, line)| {
+                                        format!("{}\t{}", symbol.start_line + offset, line)
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            })
+                        })
                         .collect::<Vec<_>>()
                         .join("\n\n");
-                    Some(snippets)
+                    let start = symbols.iter().map(|symbol| symbol.start_line).min();
+                    let end = symbols.iter().map(|symbol| symbol.end_line).max();
+                    let (snippets, truncated) = bounded_source(&snippets, 64_000);
+                    (Some(snippets), start, end, truncated)
                 } else {
                     let start = offset.unwrap_or(1).saturating_sub(1);
                     let maximum = limit.unwrap_or(2_000).min(2_000);
-                    Some(
-                        raw.lines()
-                            .enumerate()
-                            .skip(start)
-                            .take(maximum)
-                            .map(|(index, line)| format!("{}\t{}", index + 1, line))
-                            .collect::<Vec<_>>()
-                            .join("\n"),
+                    let selected = raw
+                        .lines()
+                        .enumerate()
+                        .skip(start)
+                        .take(maximum)
+                        .map(|(index, line)| format!("{}\t{}", index + 1, line))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let (selected, character_truncated) = bounded_source(&selected, 64_000);
+                    let rendered_lines = selected.lines().count();
+                    let shown_start = (rendered_lines > 0).then_some(start + 1);
+                    let shown_end = (rendered_lines > 0).then_some(start + rendered_lines);
+                    (
+                        Some(selected),
+                        shown_start,
+                        shown_end,
+                        character_truncated || start + rendered_lines < total_lines,
                     )
                 }
             } else {
-                None
+                (None, None, None, false)
             };
             files.push(NodeFile {
                 file: path,
                 source,
                 symbols,
+                total_lines,
+                shown_start_line,
+                shown_end_line,
+                truncated,
             });
         }
         files.sort_by(|left, right| left.file.cmp(&right.file));
-        Ok(NodeResult { files })
+        let ambiguous = files.len() > 1;
+        let guidance = if ambiguous {
+            Some(
+                "Multiple files matched; pass an exact project-relative file path or stable symbol id."
+                    .to_owned(),
+            )
+        } else if files.is_empty() {
+            Some("No indexed file or symbol matched the request.".to_owned())
+        } else {
+            None
+        };
+        Ok(NodeResult {
+            files,
+            ambiguous,
+            guidance,
+        })
     }
 
     pub fn explore(&self, query: &str, max_files: usize) -> Result<Vec<ExploreHit>> {
@@ -837,6 +886,11 @@ mod tests {
             .node(None, Some("main.ts"), false, Some(2), Some(1), false)
             .unwrap();
         assert_eq!(file.files[0].source.as_deref(), Some("2\t  return 42;"));
+        assert_eq!(file.files[0].total_lines, 3);
+        assert_eq!(file.files[0].shown_start_line, Some(2));
+        assert_eq!(file.files[0].shown_end_line, Some(2));
+        assert!(file.files[0].truncated);
+        assert!(!file.ambiguous);
 
         let symbol = engine
             .node(Some("main"), None, true, None, None, false)
@@ -845,7 +899,40 @@ mod tests {
             .source
             .as_deref()
             .unwrap()
-            .contains("function main"));
+            .contains("1\tfunction main"));
+    }
+
+    #[test]
+    fn node_discloses_ambiguity_and_character_truncation() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("first")).unwrap();
+        fs::create_dir_all(temp.path().join("second")).unwrap();
+        fs::write(
+            temp.path().join("first/main.ts"),
+            format!("export const huge = \"{}\";\n", "x".repeat(100_000)),
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("second/main.ts"),
+            "export const small = 1;\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+
+        let result = engine
+            .node(None, Some("main.ts"), true, None, None, false)
+            .unwrap();
+        assert!(result.ambiguous);
+        assert!(result.guidance.as_deref().unwrap().contains("exact"));
+        let huge = result
+            .files
+            .iter()
+            .find(|file| file.file == "first/main.ts")
+            .unwrap();
+        assert!(huge.truncated);
+        assert!(huge.source.as_deref().unwrap().chars().count() <= 64_000);
+        assert_eq!(huge.total_lines, 1);
+        assert_eq!(huge.shown_start_line, Some(1));
     }
 
     #[test]
