@@ -892,7 +892,9 @@ fn enrich_arkui_builder_registration(
     emitted: &mut HashSet<(String, String, usize)>,
 ) {
     let method = if call.kind() == "arkui_component_expression" {
-        call.child_by_field_name("property")
+        let mut property_cursor = call.walk();
+        call.children_by_field_name("property", &mut property_cursor)
+            .last()
             .map(|property| text(property, source))
     } else {
         call.child_by_field_name("function")

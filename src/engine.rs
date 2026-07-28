@@ -3108,7 +3108,8 @@ mod tests {
                @Builder PopupBuilder() { Text('popup') }\n\
                PlainBuilder() { Text('plain') }\n\
                build() {\n\
-                 Row().bindPopup(this.open, { builder: this.PopupBuilder })\n\
+                 Row().onClick(() => { this.open = true })\n\
+                   .bindPopup(this.open, { builder: this.PopupBuilder })\n\
                  Row().bindPopup(this.open, { builder: this.PlainBuilder })\n\
                  customApi({ builder: this.PopupBuilder })\n\
                }\n\
@@ -3142,7 +3143,7 @@ mod tests {
         assert_eq!(registered.len(), 1);
         assert_eq!(registered[0].0.qualified_name, "PopupCard.PopupBuilder");
         assert_eq!(registered[0].1.confidence, 0.97);
-        assert_eq!(registered[0].1.line, 7);
+        assert_eq!(registered[0].1.line, 8);
 
         fs::write(
             &source,
