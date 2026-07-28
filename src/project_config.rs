@@ -128,6 +128,7 @@ fn parse_language(value: &str) -> Option<Language> {
         "csharp" | "c#" => Some(Language::CSharp),
         "c" => Some(Language::C),
         "cpp" | "c++" => Some(Language::Cpp),
+        "dart" => Some(Language::Dart),
         "ruby" => Some(Language::Ruby),
         "php" => Some(Language::Php),
         "swift" => Some(Language::Swift),

@@ -16,7 +16,7 @@ behavioral evidence; matching a command or tool name is not enough.
 | Nested repositories and worktrees | Compatible (core) | opted-in embedded repositories and submodule gitdirs are indexed; linked worktree gitdirs are skipped as duplicate views; worktree roots require and support independent local indexes | real-git cross-platform subprocess coverage |
 | Framework resolvers | Partial | Express, FastAPI, React Router JSX/object routes, Django `path`/`re_path`/legacy `url`, and DRF viewsets; adversarial fixtures; pinned Express, LightRAG, Graphiti, and Django acceptance runs | prioritized remaining adapters; second real repository per adapter |
 | Callbacks and dynamic dispatch | Partial | named callbacks; initializer/object/array/assignment references; strict import/local resolution; literal events, fanout cap, incremental cleanup, provenance and shadowing tests | broader member/type dispatch and differential fixtures |
-| Language/dialect breadth | Behind | 18 language dialects | prioritized missing grammars and kernel-parity fixtures |
+| Language/dialect breadth | Behind | 19 language dialects, including core Dart class/function/method/call extraction | prioritize Vue/Svelte component dialects, Objective-C, and kernel-parity fixtures |
 | Daemon and shared live index | Compatible (core) | spawned-process start/status/catch-up/stop test; exclusive project lock; failure release/restart; MCP daemon/foreground fallback metadata | cross-platform CI evidence and sustained fault-injection soak |
 | Installers and agent integrations | Compatible (core) | idempotent project-scoped Codex, Claude Code and Cursor install/status/uninstall tests preserve unrelated TOML/JSON | executable client discovery smoke tests on release artifacts |
 

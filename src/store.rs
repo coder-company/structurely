@@ -1471,6 +1471,7 @@ fn parse_language(value: &str) -> Language {
         "csharp" => Language::CSharp,
         "c" => Language::C,
         "cpp" => Language::Cpp,
+        "dart" => Language::Dart,
         "ruby" => Language::Ruby,
         "php" => Language::Php,
         "swift" => Language::Swift,

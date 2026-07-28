@@ -1536,6 +1536,34 @@ mod tests {
     }
 
     #[test]
+    fn dart_methods_own_sibling_bodies_and_resolve_calls() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("service.dart"),
+            "class Service {\n\
+               void run() { helper(); }\n\
+             }\n\
+             void helper() {}\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let run = engine
+            .search("run", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.name == "run")
+            .unwrap()
+            .symbol;
+        assert_eq!(run.language, crate::model::Language::Dart);
+        assert_eq!(run.qualified_name, "Service.run");
+        let callees = engine.callees(&run.id).unwrap();
+        assert_eq!(callees.len(), 1);
+        assert_eq!(callees[0].0.name, "helper");
+        assert_eq!(callees[0].0.language, crate::model::Language::Dart);
+    }
+
+    #[test]
     fn named_callback_registrations_create_evidence_bearing_call_edges() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(

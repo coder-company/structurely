@@ -68,11 +68,14 @@ pub(crate) fn parse_file_as(
     }
 
     let mut unresolved_calls = Vec::new();
-    let symbol_owners = symbols
+    let mut symbol_owners = symbols
         .iter()
         .skip(1)
         .map(|symbol| ((symbol.start_byte, symbol.end_byte), symbol.id.clone()))
         .collect::<HashMap<_, _>>();
+    if language == Language::Dart {
+        collect_dart_body_owners(tree.root_node(), &symbols, &mut symbol_owners);
+    }
     let mut receiver_bindings = HashMap::<String, Vec<(usize, String)>>::new();
     collect_receiver_bindings(tree.root_node(), source_bytes, &mut receiver_bindings);
     let module_bindings = collect_module_bindings(tree.root_node(), source_bytes, language);
@@ -106,6 +109,46 @@ pub(crate) fn parse_file_as(
     };
     enrich_file_facts(tree.root_node(), source_bytes, &mut facts);
     Ok(facts)
+}
+
+fn collect_dart_body_owners(
+    node: Node<'_>,
+    symbols: &[Symbol],
+    owners: &mut HashMap<(usize, usize), String>,
+) {
+    if node.kind() == "function_body" {
+        if let Some(signature) = node.prev_named_sibling() {
+            let signature_start = if signature.kind() == "method_signature" {
+                first_descendant(signature, "function_signature")
+                    .or_else(|| first_descendant(signature, "constructor_signature"))
+                    .map(|child| child.start_byte())
+                    .unwrap_or_else(|| signature.start_byte())
+            } else {
+                signature.start_byte()
+            };
+            if let Some(symbol) = symbols
+                .iter()
+                .find(|symbol| symbol.start_byte == signature_start)
+            {
+                owners.insert((node.start_byte(), node.end_byte()), symbol.id.clone());
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_dart_body_owners(child, symbols, owners);
+    }
+}
+
+fn first_descendant<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
+    if node.kind() == kind {
+        return Some(node);
+    }
+    let mut cursor = node.walk();
+    let found = node
+        .named_children(&mut cursor)
+        .find_map(|child| first_descendant(child, kind));
+    found
 }
 
 fn disambiguate_duplicate_symbols(symbols: &mut [Symbol]) {
@@ -438,6 +481,7 @@ fn parse_tree(language: Language, source: &str) -> Result<Tree> {
         Language::CSharp => tree_sitter_c_sharp::LANGUAGE,
         Language::C => tree_sitter_c::LANGUAGE,
         Language::Cpp => tree_sitter_cpp::LANGUAGE,
+        Language::Dart => tree_sitter_dart_orchard::LANGUAGE,
         Language::Ruby => tree_sitter_ruby::LANGUAGE,
         Language::Php => tree_sitter_php::LANGUAGE_PHP,
         Language::Swift => tree_sitter_swift::LANGUAGE,
@@ -515,10 +559,17 @@ fn declaration_at<'a>(
             (kind, node.child_by_field_name("name")?)
         }
         "interface_declaration" => (SymbolKind::Interface, node.child_by_field_name("name")?),
-        "function_declaration"
-        | "function_signature"
-        | "generator_function_declaration"
-        | "function_item" => (SymbolKind::Function, node.child_by_field_name("name")?),
+        "function_declaration" | "generator_function_declaration" | "function_item" => {
+            (SymbolKind::Function, node.child_by_field_name("name")?)
+        }
+        "function_signature" => (
+            if _language == Language::Dart && container.is_some() {
+                SymbolKind::Method
+            } else {
+                SymbolKind::Function
+            },
+            node.child_by_field_name("name")?,
+        ),
         "function_definition" => (
             SymbolKind::Function,
             node.child_by_field_name("name")
@@ -685,6 +736,7 @@ fn collect_calls(
             | "nullsafe_member_call_expression"
             | "scoped_call_expression"
             | "function_call"
+            | "new_expression"
     ) {
         if let Some(function) = call_target_node(node) {
             if let Some(name) = call_name(function, context.source) {
@@ -929,7 +981,9 @@ fn call_target_node(node: Node<'_>) -> Option<Node<'_>> {
         }
         "function_call" => node.child_by_field_name("name"),
         "call_expression" if node.child_by_field_name("function").is_none() => node.named_child(0),
-        "method_invocation" => node.child_by_field_name("name"),
+        "method_invocation" => node
+            .child_by_field_name("name")
+            .or_else(|| node.child_by_field_name("function")),
         "object_creation_expression" => node.child_by_field_name("type"),
         "invocation_expression" => node
             .child_by_field_name("function")
@@ -1189,6 +1243,33 @@ mod tests {
         assert!(symbols.contains(&("Run", SymbolKind::Method)));
         assert!(symbols.contains(&("helper", SymbolKind::Function)));
         assert_eq!(facts.unresolved_calls[0].callee_name, "helper");
+    }
+
+    #[test]
+    fn extracts_dart_classes_functions_methods_and_calls() {
+        let source = "class Service {\n\
+               void run() { helper(); }\n\
+             }\n\
+             void helper() {}\n\
+             void boot() { helper(); }\n";
+        let facts = parse_file("service.dart", source).unwrap();
+        assert!(facts
+            .symbols
+            .iter()
+            .any(|symbol| symbol.kind == SymbolKind::Class && symbol.name == "Service"));
+        assert!(facts.symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Method
+                && symbol.name == "run"
+                && symbol.qualified_name == "Service.run"
+        }));
+        assert!(facts
+            .symbols
+            .iter()
+            .any(|symbol| symbol.kind == SymbolKind::Function && symbol.name == "helper"));
+        assert!(facts
+            .unresolved_calls
+            .iter()
+            .any(|call| call.callee_name == "helper"));
     }
 
     #[test]
