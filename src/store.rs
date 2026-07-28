@@ -653,6 +653,7 @@ impl Store {
                 'tree-sitter/name-resolution',
                 'tree-sitter/callback-registration',
                 'framework/express-route',
+                'framework/fastapi-route',
                 'dynamic/event-registration'
              )",
             [],

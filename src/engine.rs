@@ -1565,6 +1565,71 @@ mod tests {
     }
 
     #[test]
+    fn fastapi_decorators_create_routes_wired_to_sync_and_async_handlers() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("api.py"),
+            "@app.get('/users/{user_id}')\n\
+             async def show_user(user_id: str):\n\
+             \x20   return user_id\n\n\
+             @router.post(\n\
+             \x20   '',\n\
+             )\n\
+             def create_user():\n\
+             \x20   return None\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let snapshot = engine.snapshot().unwrap();
+        let routes = snapshot
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.kind == crate::model::SymbolKind::Route)
+            .collect::<Vec<_>>();
+        assert_eq!(routes.len(), 2);
+        assert!(routes
+            .iter()
+            .any(|route| route.name == "GET /users/{user_id}"));
+        assert!(routes.iter().any(|route| route.name == "POST /"));
+        for (route_name, handler_name) in [
+            ("GET /users/{user_id}", "show_user"),
+            ("POST /", "create_user"),
+        ] {
+            let route = routes
+                .iter()
+                .find(|route| route.name == route_name)
+                .unwrap();
+            let callees = engine.callees(&route.id).unwrap();
+            assert_eq!(callees.len(), 1);
+            assert_eq!(callees[0].0.name, handler_name);
+            assert_eq!(callees[0].1.provenance, "framework/fastapi-route");
+            assert_eq!(callees[0].1.confidence, 0.99);
+        }
+    }
+
+    #[test]
+    fn fastapi_adapter_ignores_docstrings_comments_and_dynamic_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("api.py"),
+            "\"\"\"Example: @app.get('/not-real')\"\"\"\n\
+             # @router.post('/also-not-real')\n\
+             path = '/dynamic'\n\
+             @app.get(path)\n\
+             def dynamic_route():\n\
+             \x20   pass\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        assert!(engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .iter()
+            .all(|symbol| symbol.kind != crate::model::SymbolKind::Route));
+    }
+
+    #[test]
     fn watcher_makes_saved_symbols_query_visible() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("main.ts"), "function before() {}\n").unwrap();

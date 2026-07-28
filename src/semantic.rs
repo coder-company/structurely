@@ -5,13 +5,13 @@ use crate::model::{
 use tree_sitter::Node;
 
 pub(crate) fn enrich_file_facts(root: Node<'_>, source: &[u8], facts: &mut FileFacts) {
-    if !matches!(
-        facts.language,
-        Language::TypeScript | Language::Tsx | Language::JavaScript | Language::Jsx
-    ) {
-        return;
+    match facts.language {
+        Language::TypeScript | Language::Tsx | Language::JavaScript | Language::Jsx => {
+            collect_javascript_registrations(root, source, facts);
+        }
+        Language::Python => collect_fastapi_routes(root, source, facts),
+        _ => {}
     }
-    collect_javascript_registrations(root, source, facts);
 }
 
 fn collect_javascript_registrations(node: Node<'_>, source: &[u8], facts: &mut FileFacts) {
@@ -22,6 +22,121 @@ fn collect_javascript_registrations(node: Node<'_>, source: &[u8], facts: &mut F
     for child in node.named_children(&mut cursor) {
         collect_javascript_registrations(child, source, facts);
     }
+}
+
+fn collect_fastapi_routes(node: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+    if node.kind() == "decorated_definition" {
+        enrich_fastapi_definition(node, source, facts);
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_fastapi_routes(child, source, facts);
+    }
+}
+
+fn enrich_fastapi_definition(definition: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+    let mut cursor = definition.walk();
+    let children = definition.named_children(&mut cursor).collect::<Vec<_>>();
+    let Some(handler) = children
+        .iter()
+        .copied()
+        .find(|child| child.kind() == "function_definition")
+    else {
+        return;
+    };
+    let Some(handler_name) = handler
+        .child_by_field_name("name")
+        .map(|name| text(name, source))
+    else {
+        return;
+    };
+    for decorator in children
+        .iter()
+        .copied()
+        .filter(|child| child.kind() == "decorator")
+    {
+        let Some(call) = first_descendant_of_kind(decorator, "call") else {
+            continue;
+        };
+        let Some(function) = call.child_by_field_name("function") else {
+            continue;
+        };
+        let Some(method) = member_method(function, source) else {
+            continue;
+        };
+        let Some(receiver) = member_receiver(function, source) else {
+            continue;
+        };
+        if !matches!(receiver.as_str(), "app" | "router")
+            || !matches!(
+                method.as_str(),
+                "get" | "post" | "put" | "patch" | "delete" | "options" | "head"
+            )
+        {
+            continue;
+        }
+        let Some(arguments) = call.child_by_field_name("arguments") else {
+            continue;
+        };
+        let mut argument_cursor = arguments.walk();
+        let Some(path_argument) = arguments.named_children(&mut argument_cursor).next() else {
+            continue;
+        };
+        let Some(mut path) = string_literal(path_argument, source) else {
+            continue;
+        };
+        if path.is_empty() {
+            path.push('/');
+        }
+        let verb = method.to_ascii_uppercase();
+        let name = format!("{verb} {path}");
+        let route = Symbol::new_disambiguated(
+            facts.language,
+            SymbolKind::Route,
+            &name,
+            &name,
+            &facts.path,
+            span(decorator),
+            &format!("fastapi|{verb}|{path}|{handler_name}"),
+        );
+        let file_symbol = facts.symbols.first().expect("file symbol");
+        facts.relationships.push(Relationship {
+            source_id: file_symbol.id.clone(),
+            target_id: route.id.clone(),
+            kind: RelationshipKind::Contains,
+            evidence: Evidence::new(
+                "framework/fastapi-route",
+                1.0,
+                format!("{name} is registered in {}", facts.path),
+                &facts.path,
+                decorator.start_position().row + 1,
+            ),
+        });
+        facts.unresolved_calls.push(UnresolvedCall {
+            caller_id: route.id.clone(),
+            callee_name: handler_name.clone(),
+            receiver_type: None,
+            provenance: "framework/fastapi-route".to_owned(),
+            confidence: 0.99,
+            explanation: format!("FastAPI route {name} decorates handler {handler_name}"),
+            resolvable: true,
+            file: facts.path.clone(),
+            line: decorator.start_position().row + 1,
+        });
+        facts.symbols.push(route);
+    }
+}
+
+fn first_descendant_of_kind<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
+    if node.kind() == kind {
+        return Some(node);
+    }
+    let mut cursor = node.walk();
+    let found = node
+        .named_children(&mut cursor)
+        .find_map(|child| first_descendant_of_kind(child, kind));
+    found
 }
 
 fn enrich_javascript_call(call: Node<'_>, source: &[u8], facts: &mut FileFacts) {
@@ -225,13 +340,20 @@ fn member_method(function: Node<'_>, source: &[u8]) -> Option<String> {
         "member_expression" => function
             .child_by_field_name("property")
             .map(|property| text(property, source)),
+        "attribute" => function
+            .child_by_field_name("attribute")
+            .map(|attribute| text(attribute, source)),
         _ => None,
     }
 }
 
 fn member_receiver(function: Node<'_>, source: &[u8]) -> Option<String> {
-    (function.kind() == "member_expression")
-        .then(|| function.child_by_field_name("object"))
+    matches!(function.kind(), "member_expression" | "attribute")
+        .then(|| {
+            function
+                .child_by_field_name("object")
+                .or_else(|| function.child_by_field_name("value"))
+        })
         .flatten()
         .filter(|object| object.kind() == "identifier")
         .map(|object| text(object, source))
