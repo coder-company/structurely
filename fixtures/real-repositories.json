@@ -252,6 +252,25 @@
             "\"confidence\": 0.97",
             "\"line\": 41"
           ]
+        },
+        {
+          "command": "callees",
+          "query": "VideoPlayer.build",
+          "file": "code/SystemFeature/WindowManagement/WindowManage/entry/src/main/ets/pages/Video.ets",
+          "contains": [
+            "\"qualified_name\": \"WindowComponent\"",
+            "code/SystemFeature/WindowManagement/WindowManage/WindowComponent/src/main/ets/components/MainPage/MainPage.ets",
+            "\"provenance\": \"framework/arkui-render\"",
+            "\"confidence\": 0.97",
+            "\"line\": 25"
+          ],
+          "recordContains": [
+            "\"qualified_name\": \"WindowComponent\"",
+            "code/SystemFeature/WindowManagement/WindowManage/WindowComponent/src/main/ets/components/MainPage/MainPage.ets",
+            "\"provenance\": \"framework/arkui-render\"",
+            "\"confidence\": 0.97",
+            "\"line\": 25"
+          ]
         }
       ]
     }

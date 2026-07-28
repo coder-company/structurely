@@ -104,6 +104,10 @@ def predicates(
             not require_structurely_evidence
             or "framework/arkui-state" in arkui_state
         ),
+        "ohpm-package": all(
+            value in result_text(capture["ohpm-package"])
+            for value in ("fetchProfile", "harmony/profile-data/Index.ets")
+        ),
         "impact": "showUser" in result_text(capture["impact"]),
         "node-window": "showUser" in result_text(capture["node-window"]),
         "explore-flow": all(

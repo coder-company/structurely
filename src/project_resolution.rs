@@ -2,6 +2,7 @@ use crate::model::FileFacts;
 use globset::{Glob, GlobSetBuilder};
 use ignore::WalkBuilder;
 use std::{
+    collections::{HashMap, HashSet, VecDeque},
     fs,
     path::{Component, Path, PathBuf},
 };
@@ -82,6 +83,15 @@ impl ProjectResolutionContext {
                 .then_with(|| left.wildcard.cmp(&right.wildcard))
         });
         let mut workspace_packages = load_workspace_packages(root);
+        let existing_names = workspace_packages
+            .iter()
+            .map(|package| package.name.clone())
+            .collect::<HashSet<_>>();
+        workspace_packages.extend(
+            load_ohpm_packages(root)
+                .into_iter()
+                .filter(|package| !existing_names.contains(&package.name)),
+        );
         workspace_packages.extend(load_cargo_packages(root));
         workspace_packages.extend(load_go_packages(root));
         workspace_packages.sort_by(|left, right| right.name.len().cmp(&left.name.len()));
@@ -107,6 +117,7 @@ impl ProjectResolutionContext {
                     match provenance {
                         "project/relative-import" => "source-relative import resolution",
                         "tsconfig/path-alias" => "project path alias",
+                        "harmony/ohpm" => "Harmony ohpm file dependency",
                         "cargo/workspace" => "Cargo workspace package",
                         _ => "JavaScript workspace package",
                     }
@@ -307,6 +318,129 @@ fn load_workspace_packages(root: &Path) -> Vec<WorkspacePackage> {
     packages
 }
 
+fn load_ohpm_packages(root: &Path) -> Vec<WorkspacePackage> {
+    const MANIFEST: &str = "oh-package.json5";
+    const MAX_DEPTH: usize = 6;
+    const DIRECTORY_BUDGET: usize = 8_000;
+    const SKIP_DIRECTORIES: &[&str] = &[
+        "node_modules",
+        "oh_modules",
+        ".git",
+        ".structurely",
+        ".codegraph",
+        ".hvigor",
+        ".preview",
+        "build",
+        "dist",
+        "out",
+        "target",
+    ];
+
+    let mut queue = VecDeque::from([(PathBuf::new(), 0_usize)]);
+    let mut visited = 0_usize;
+    let mut targets = HashMap::<String, PathBuf>::new();
+    let mut ambiguous = HashSet::<String>::new();
+    while let Some((relative, depth)) = queue.pop_front() {
+        visited += 1;
+        if visited > DIRECTORY_BUDGET {
+            break;
+        }
+        let absolute = root.join(&relative);
+        let Ok(entries) = fs::read_dir(&absolute) else {
+            continue;
+        };
+        let mut entries = entries.flatten().collect::<Vec<_>>();
+        entries.sort_by_key(fs::DirEntry::file_name);
+        for entry in entries {
+            let file_name = entry.file_name();
+            let Some(name) = file_name.to_str() else {
+                continue;
+            };
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                if depth < MAX_DEPTH && !name.starts_with('.') && !SKIP_DIRECTORIES.contains(&name)
+                {
+                    queue.push_back((relative.join(name), depth + 1));
+                }
+                continue;
+            }
+            if name != MANIFEST {
+                continue;
+            }
+            let Some(manifest) = read_jsonc(&entry.path()) else {
+                continue;
+            };
+            let Some(dependencies) = manifest
+                .get("dependencies")
+                .and_then(serde_json::Value::as_object)
+            else {
+                continue;
+            };
+            for (dependency, value) in dependencies {
+                let Some(target) = value
+                    .as_str()
+                    .and_then(|value| value.strip_prefix("file:"))
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                else {
+                    continue;
+                };
+                let target_absolute = normalize_absolute(&absolute.join(target));
+                if !target_absolute.starts_with(root) || !target_absolute.is_dir() {
+                    continue;
+                }
+                let Ok(target) = target_absolute.strip_prefix(root).map(Path::to_owned) else {
+                    continue;
+                };
+                match targets.get(dependency) {
+                    None if !ambiguous.contains(dependency) => {
+                        targets.insert(dependency.clone(), target);
+                    }
+                    Some(existing) if existing != &target => {
+                        targets.remove(dependency);
+                        ambiguous.insert(dependency.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let mut packages = targets
+        .into_iter()
+        .filter_map(|(name, package_root)| {
+            let manifest = read_jsonc(&root.join(&package_root).join(MANIFEST));
+            let entries = manifest
+                .as_ref()
+                .and_then(|value| value.get("main"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_owned)
+                .into_iter()
+                .collect::<Vec<_>>();
+            if entries.is_empty()
+                && ["src/index", "index"]
+                    .iter()
+                    .all(|entry| canonical_source_hint(root, &package_root.join(entry)).is_none())
+            {
+                return None;
+            }
+            Some(WorkspacePackage {
+                name,
+                root: package_root,
+                entries,
+                provenance: "harmony/ohpm",
+                directory_entry: false,
+            })
+        })
+        .collect::<Vec<_>>();
+    packages.sort_by(|left, right| left.name.cmp(&right.name));
+    packages
+}
+
 fn load_pnpm_patterns(root: &Path) -> Vec<String> {
     let Ok(source) = fs::read_to_string(root.join("pnpm-workspace.yaml")) else {
         return Vec::new();
@@ -489,6 +623,12 @@ fn read_json(path: &Path) -> Option<serde_json::Value> {
     fs::read_to_string(path)
         .ok()
         .and_then(|source| serde_json::from_str(&source).ok())
+}
+
+fn read_jsonc(path: &Path) -> Option<serde_json::Value> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|source| serde_json::from_str(&strip_jsonc(&source)).ok())
 }
 
 fn split_wildcard(pattern: &str) -> (String, String, bool) {
@@ -748,6 +888,80 @@ mod tests {
             context.resolve_workspace_package("@acme/core"),
             Some(("packages/core/src/index".to_owned(), "workspace/package"))
         );
+    }
+
+    #[test]
+    fn ohpm_file_dependencies_resolve_declared_entries_and_subpaths() {
+        let root = tempdir().unwrap();
+        fs::create_dir_all(root.path().join("apps/entry")).unwrap();
+        fs::create_dir_all(root.path().join("modules/data/src")).unwrap();
+        fs::write(
+            root.path().join("apps/entry/oh-package.json5"),
+            r#"{
+              // Registry packages remain external.
+              "dependencies": {
+                "data": "file:../../modules/data",
+                "@ohos/axios": "^2.0.0",
+                "escape": "file:../../../../outside",
+              },
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("modules/data/oh-package.json5"),
+            r#"{"name":"data","main":"Index.ets","dependencies":{}}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("modules/data/Index.ets"),
+            "export function loadData() {}",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("modules/data/src/testing.ets"),
+            "export function fixture() {}",
+        )
+        .unwrap();
+
+        let context = ProjectResolutionContext::load(root.path());
+        assert_eq!(
+            context.resolve_workspace_package("data"),
+            Some(("modules/data/Index".to_owned(), "harmony/ohpm"))
+        );
+        assert_eq!(
+            context.resolve_workspace_package("data/src/testing"),
+            Some(("modules/data/src/testing".to_owned(), "harmony/ohpm"))
+        );
+        assert_eq!(context.resolve_workspace_package("@ohos/axios"), None);
+        assert_eq!(context.resolve_workspace_package("escape"), None);
+    }
+
+    #[test]
+    fn ohpm_ambiguous_dependency_names_are_dropped() {
+        let root = tempdir().unwrap();
+        for (app, module) in [("one", "first"), ("two", "second")] {
+            fs::create_dir_all(root.path().join(format!("apps/{app}"))).unwrap();
+            fs::create_dir_all(root.path().join(format!("modules/{module}"))).unwrap();
+            fs::write(
+                root.path().join(format!("apps/{app}/oh-package.json5")),
+                format!(r#"{{"dependencies":{{"common":"file:../../modules/{module}"}}}}"#),
+            )
+            .unwrap();
+            fs::write(
+                root.path()
+                    .join(format!("modules/{module}/oh-package.json5")),
+                r#"{"name":"common","main":"Index.ets"}"#,
+            )
+            .unwrap();
+            fs::write(
+                root.path().join(format!("modules/{module}/Index.ets")),
+                "export function shared() {}",
+            )
+            .unwrap();
+        }
+
+        let context = ProjectResolutionContext::load(root.path());
+        assert_eq!(context.resolve_workspace_package("common"), None);
     }
 
     #[test]

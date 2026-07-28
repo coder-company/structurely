@@ -105,7 +105,14 @@ fn fixture_root() -> PathBuf {
 fn copy_fixture(source: &Path, destination: &Path) {
     for entry in fs::read_dir(source).unwrap() {
         let entry = entry.unwrap();
-        if entry.file_name() != "scenarios.json" {
+        if entry.file_name() == "scenarios.json" {
+            continue;
+        }
+        if entry.file_type().unwrap().is_dir() {
+            let target = destination.join(entry.file_name());
+            fs::create_dir(&target).unwrap();
+            copy_fixture(&entry.path(), &target);
+        } else {
             fs::copy(entry.path(), destination.join(entry.file_name())).unwrap();
         }
     }

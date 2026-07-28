@@ -2555,6 +2555,72 @@ mod tests {
     }
 
     #[test]
+    fn arkts_ohpm_file_dependencies_constrain_bare_imports() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("entry/src/main/ets/pages")).unwrap();
+        fs::create_dir_all(temp.path().join("features/data")).unwrap();
+        fs::write(
+            temp.path().join("entry/oh-package.json5"),
+            r#"{"dependencies":{"data":"file:../features/data"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("features/data/oh-package.json5"),
+            r#"{"name":"data","main":"Index.ets"}"#,
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("features/data/Index.ets"),
+            "export function loadData() { return 'local'; }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("entry/src/main/ets/pages/Home.ets"),
+            "import { loadData } from 'data'\n\
+             @Component\n\
+             struct Home { build() { Text(loadData()) } }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("decoy.ets"),
+            "export function loadData() { return 'wrong'; }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let build = engine
+            .search("Home.build", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.qualified_name == "Home.build")
+            .unwrap()
+            .symbol;
+        let edges = engine.callees(&build.id).unwrap();
+        assert!(edges.iter().any(|(target, evidence)| {
+            target.file == "features/data/Index.ets"
+                && target.name == "loadData"
+                && evidence.confidence == 0.97
+                && evidence.explanation.contains("explicit import scope")
+        }));
+        assert!(edges
+            .iter()
+            .all(|(target, _)| target.file != "decoy.ets" || target.name != "loadData"));
+        assert!(engine.snapshot().unwrap().relationships.iter().any(|edge| {
+            edge.kind == RelationshipKind::Imports
+                && edge.evidence.provenance == "harmony/ohpm"
+                && edge.target_id
+                    == engine
+                        .search("loadData", 10)
+                        .unwrap()
+                        .into_iter()
+                        .find(|hit| hit.symbol.file == "features/data/Index.ets")
+                        .unwrap()
+                        .symbol
+                        .id
+        }));
+    }
+
+    #[test]
     fn arkui_member_handlers_use_file_and_receiver_hints_together() {
         let temp = tempfile::tempdir().unwrap();
         for directory in ["first", "second"] {

@@ -132,6 +132,18 @@
       }
     },
     {
+      "label": "ohpm-package",
+      "method": "tools/call",
+      "params": {
+        "name": "codegraph_callees",
+        "arguments": {
+          "symbol": "loadProfile",
+          "file": "harmony/entry/Home.ets",
+          "limit": 20
+        }
+      }
+    },
+    {
       "label": "impact",
       "method": "tools/call",
       "params": {
