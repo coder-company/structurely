@@ -666,6 +666,8 @@ impl Store {
                 'framework/fastapi-route',
                 'framework/react-router',
                 'framework/arkui-route',
+                'framework/ohos-emitter-registration',
+                'framework/ohos-emitter',
                 'dynamic/event-registration'
              )",
             [],
@@ -1123,16 +1125,22 @@ impl Store {
              FROM dynamic_events r
              JOIN relationships rel
                ON rel.source_public_id=r.owner_public_id
-              AND rel.provenance='tree-sitter/callback-registration'
+              AND rel.provenance IN (
+                'tree-sitter/callback-registration',
+                'framework/ohos-emitter-registration',
+                'framework/ohos-emitter-inline-registration'
+              )
              JOIN symbols target
                ON target.public_id=rel.target_public_id
               AND target.name=r.callback_name
-             WHERE r.file_id=?1 AND r.receiver=?2 AND r.channel=?3
+             WHERE (r.file_id=?1 OR ?2 LIKE 'ohos-emitter@%')
+               AND r.receiver=?2 AND r.channel=?3
                AND r.action='register'
              ORDER BY r.evidence_file,r.evidence_line,rel.target_public_id",
         )?;
         let mut resolved = 0;
         for (_, file_id, dispatcher_id, receiver, channel, file, line) in dispatches {
+            let is_ohos_emitter = receiver.starts_with("ohos-emitter@");
             let targets = registrations
                 .query_map(params![file_id, receiver, channel], |row| {
                     Ok((
@@ -1156,12 +1164,24 @@ impl Store {
                         target_id,
                         kind: RelationshipKind::Calls,
                         evidence: Evidence::new(
-                            "dynamic/event-registration",
-                            0.92,
-                            format!(
-                                "literal event `{channel}` on `{receiver}` dispatches to a handler \
-                                 registered at {registration_file}:{registration_line}"
-                            ),
+                            if is_ohos_emitter {
+                                "framework/ohos-emitter"
+                            } else {
+                                "dynamic/event-registration"
+                            },
+                            if is_ohos_emitter { 0.97 } else { 0.92 },
+                            if is_ohos_emitter {
+                                format!(
+                                    "Harmony emitter channel `{channel}` dispatches to a handler \
+                                     registered at {registration_file}:{registration_line}"
+                                )
+                            } else {
+                                format!(
+                                    "literal event `{channel}` on `{receiver}` dispatches to a \
+                                     handler registered at \
+                                     {registration_file}:{registration_line}"
+                                )
+                            },
                             &file,
                             line,
                         ),

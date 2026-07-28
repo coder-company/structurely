@@ -20,6 +20,7 @@ pub(crate) fn enrich_file_facts(root: Node<'_>, source: &[u8], facts: &mut FileF
             if facts.language == Language::ArkTs {
                 collect_arkui_routes(root, source, facts);
                 collect_arkui_style_helper_calls(root, source, facts);
+                collect_ohos_emitter_semantics(root, source, facts);
                 collect_arkui_semantics(root, source, facts);
                 remove_arkui_intrinsic_calls(facts);
             }
@@ -37,6 +38,434 @@ pub(crate) fn enrich_file_facts(root: Node<'_>, source: &[u8], facts: &mut FileF
         Language::Python => {
             collect_fastapi_routes(root, source, facts);
             collect_django_routes(root, source, facts);
+        }
+        _ => {}
+    }
+}
+
+fn collect_ohos_emitter_semantics(root: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+    let bindings = ohos_emitter_bindings(root, source);
+    if bindings.is_empty() {
+        return;
+    }
+    facts
+        .dynamic_events
+        .retain(|event| !bindings.contains(&event.receiver));
+    let descriptors = ohos_emitter_descriptors(root, source);
+    let mut callback_ordinal = 0usize;
+    collect_ohos_emitter_calls(
+        root,
+        source,
+        facts,
+        &bindings,
+        &descriptors,
+        &mut callback_ordinal,
+    );
+}
+
+fn ohos_emitter_bindings(node: Node<'_>, source: &[u8]) -> HashSet<String> {
+    let mut bindings = HashSet::new();
+    collect_ohos_emitter_bindings(node, source, &mut bindings);
+    bindings
+}
+
+fn collect_ohos_emitter_bindings(node: Node<'_>, source: &[u8], bindings: &mut HashSet<String>) {
+    if node.kind() == "import_statement" {
+        let module = node
+            .child_by_field_name("source")
+            .and_then(|source_node| string_literal(source_node, source));
+        let statement = text(node, source);
+        let clause = statement
+            .strip_prefix("import")
+            .and_then(|body| body.rsplit_once(" from ").map(|(clause, _)| clause.trim()))
+            .filter(|clause| !clause.starts_with("type "));
+        match (module.as_deref(), clause) {
+            (Some("@ohos.events.emitter"), Some(clause)) => {
+                if let Some(binding) = arkui_default_or_namespace_binding(clause) {
+                    bindings.insert(binding);
+                }
+            }
+            (Some("@kit.BasicServicesKit"), Some(clause)) => {
+                bindings.extend(named_import_bindings(clause, "emitter"));
+            }
+            _ => {}
+        }
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_ohos_emitter_bindings(child, source, bindings);
+    }
+}
+
+fn named_import_bindings(clause: &str, imported_name: &str) -> Vec<String> {
+    let Some(body) = clause
+        .strip_prefix('{')
+        .and_then(|body| body.strip_suffix('}'))
+    else {
+        return Vec::new();
+    };
+    body.split(',')
+        .filter_map(|specifier| {
+            let mut words = specifier.split_whitespace();
+            (words.next()? == imported_name)
+                .then(|| match (words.next(), words.next()) {
+                    (Some("as"), Some(alias)) => alias,
+                    (None, None) => imported_name,
+                    _ => "",
+                })
+                .filter(|binding| is_javascript_identifier(binding))
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+fn ohos_emitter_descriptors(
+    node: Node<'_>,
+    source: &[u8],
+) -> std::collections::HashMap<String, String> {
+    let mut candidates = std::collections::HashMap::<String, Vec<String>>::new();
+    let mut reassigned = HashSet::new();
+    collect_ohos_emitter_descriptors(node, source, &mut candidates, &mut reassigned);
+    candidates
+        .into_iter()
+        .filter_map(|(name, mut values)| {
+            if reassigned.contains(&name) {
+                return None;
+            }
+            values.sort();
+            values.dedup();
+            (values.len() == 1).then(|| (name, values.remove(0)))
+        })
+        .collect()
+}
+
+fn collect_ohos_emitter_descriptors(
+    node: Node<'_>,
+    source: &[u8],
+    output: &mut std::collections::HashMap<String, Vec<String>>,
+    reassigned: &mut HashSet<String>,
+) {
+    if node.kind() == "variable_declarator" {
+        if let (Some(name), Some(value)) = (
+            node.child_by_field_name("name")
+                .filter(|name| name.kind() == "identifier")
+                .map(|name| text(name, source)),
+            node.child_by_field_name("value"),
+        ) {
+            if let Some(channel) =
+                canonical_ohos_emitter_channel(value, source, &Default::default())
+            {
+                output.entry(name).or_default().push(channel);
+            }
+        }
+    }
+    if matches!(node.kind(), "assignment" | "assignment_expression") {
+        if let Some(name) = node
+            .child_by_field_name("left")
+            .or_else(|| node.child_by_field_name("name"))
+            .filter(|name| name.kind() == "identifier")
+        {
+            reassigned.insert(text(name, source));
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_ohos_emitter_descriptors(child, source, output, reassigned);
+    }
+}
+
+fn canonical_ohos_emitter_channel(
+    node: Node<'_>,
+    source: &[u8],
+    descriptors: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    if let Some(value) = string_literal(node, source) {
+        return Some(format!("s:{value}"));
+    }
+    if matches!(
+        node.kind(),
+        "number" | "number_literal" | "integer_literal" | "decimal_integer_literal"
+    ) {
+        let raw = text(node, source).replace('_', "");
+        let value = raw.parse::<i128>().ok()?;
+        return Some(format!("n:{value}"));
+    }
+    if node.kind() == "identifier" {
+        return descriptors.get(&text(node, source)).cloned();
+    }
+    if node.kind() != "object" {
+        return None;
+    }
+    let mut cursor = node.walk();
+    let mut event_ids = node
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() == "pair")
+        .filter_map(|pair| {
+            let key = pair.child_by_field_name("key")?;
+            (text(key, source).trim_matches(['\'', '"']) == "eventId")
+                .then(|| pair.child_by_field_name("value"))
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    if event_ids.len() != 1 {
+        return None;
+    }
+    canonical_ohos_emitter_channel(event_ids.remove(0), source, descriptors)
+}
+
+fn collect_ohos_emitter_calls(
+    node: Node<'_>,
+    source: &[u8],
+    facts: &mut FileFacts,
+    bindings: &HashSet<String>,
+    descriptors: &std::collections::HashMap<String, String>,
+    callback_ordinal: &mut usize,
+) {
+    if node.kind() == "call_expression" {
+        enrich_ohos_emitter_call(node, source, facts, bindings, descriptors, callback_ordinal);
+    } else if node.kind() == "statement_block" {
+        collect_recovered_ohos_emitter_calls(
+            node,
+            source,
+            facts,
+            bindings,
+            descriptors,
+            callback_ordinal,
+        );
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_ohos_emitter_calls(
+            child,
+            source,
+            facts,
+            bindings,
+            descriptors,
+            callback_ordinal,
+        );
+    }
+}
+
+fn collect_recovered_ohos_emitter_calls(
+    block: Node<'_>,
+    source: &[u8],
+    facts: &mut FileFacts,
+    bindings: &HashSet<String>,
+    descriptors: &std::collections::HashMap<String, String>,
+    callback_ordinal: &mut usize,
+) {
+    let children = direct_named_children(block);
+    for window in children.windows(3) {
+        let receiver = text(window[0], source)
+            .trim()
+            .trim_end_matches(';')
+            .to_owned();
+        let method = text(window[1], source)
+            .trim()
+            .trim_start_matches('.')
+            .trim_end_matches(';')
+            .to_owned();
+        if !bindings.contains(&receiver)
+            || !matches!(method.as_str(), "on" | "once" | "emit")
+            || window[2].kind() != "expression_statement"
+        {
+            continue;
+        }
+        let Some(parenthesized) = first_descendant_of_kind(window[2], "parenthesized_expression")
+        else {
+            continue;
+        };
+        let mut cursor = parenthesized.walk();
+        let direct = parenthesized
+            .named_children(&mut cursor)
+            .collect::<Vec<_>>();
+        let arguments = if direct.len() == 1 && direct[0].kind() == "sequence_expression" {
+            let mut sequence_cursor = direct[0].walk();
+            direct[0]
+                .named_children(&mut sequence_cursor)
+                .collect::<Vec<_>>()
+        } else {
+            direct
+        };
+        enrich_ohos_emitter_parts(
+            window[2],
+            &receiver,
+            &method,
+            &arguments,
+            source,
+            facts,
+            descriptors,
+            callback_ordinal,
+        );
+    }
+}
+
+fn enrich_ohos_emitter_call(
+    call: Node<'_>,
+    source: &[u8],
+    facts: &mut FileFacts,
+    bindings: &HashSet<String>,
+    descriptors: &std::collections::HashMap<String, String>,
+    callback_ordinal: &mut usize,
+) {
+    let Some(function) = call
+        .child_by_field_name("function")
+        .filter(|function| function.kind() == "member_expression")
+    else {
+        return;
+    };
+    let Some(receiver) = function
+        .child_by_field_name("object")
+        .filter(|receiver| receiver.kind() == "identifier")
+        .map(|receiver| text(receiver, source))
+        .filter(|receiver| bindings.contains(receiver))
+    else {
+        return;
+    };
+    let method = function
+        .child_by_field_name("property")
+        .map(|property| text(property, source))
+        .unwrap_or_default();
+    let Some(arguments) = call.child_by_field_name("arguments") else {
+        return;
+    };
+    let mut cursor = arguments.walk();
+    let arguments = arguments.named_children(&mut cursor).collect::<Vec<_>>();
+    enrich_ohos_emitter_parts(
+        call,
+        &receiver,
+        &method,
+        &arguments,
+        source,
+        facts,
+        descriptors,
+        callback_ordinal,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn enrich_ohos_emitter_parts(
+    observation: Node<'_>,
+    receiver: &str,
+    method: &str,
+    arguments: &[Node<'_>],
+    source: &[u8],
+    facts: &mut FileFacts,
+    descriptors: &std::collections::HashMap<String, String>,
+    callback_ordinal: &mut usize,
+) {
+    if arkui_router_binding_is_shadowed(observation, receiver, source) {
+        return;
+    }
+    let Some(channel) = arguments
+        .first()
+        .and_then(|argument| canonical_ohos_emitter_channel(*argument, source, descriptors))
+    else {
+        return;
+    };
+    let owner = owning_callable_symbol(observation, &facts.symbols)
+        .or_else(|| facts.symbols.first())
+        .cloned()
+        .expect("file symbol");
+    match method {
+        "emit" => facts.dynamic_events.push(DynamicEventFact {
+            owner_id: owner.id,
+            receiver: "ohos-emitter".to_owned(),
+            channel,
+            action: EventAction::Dispatch,
+            callback_name: None,
+            file: facts.path.clone(),
+            line: observation.start_position().row + 1,
+        }),
+        "on" | "once" => {
+            let Some(callback) = arguments.get(1).copied() else {
+                return;
+            };
+            let callback_name = if let Some(name) = referenced_callable_name(callback, source) {
+                let target_file_hint = facts
+                    .unresolved_references
+                    .iter()
+                    .find(|reference| {
+                        reference.kind == RelationshipKind::Imports
+                            && reference.binding_name == name
+                    })
+                    .and_then(|reference| reference.target_file_hint.clone())
+                    .or_else(|| Some(facts.path.clone()));
+                let receiver_type = (callback.kind() == "member_expression"
+                    && callback
+                        .child_by_field_name("object")
+                        .is_some_and(|object| text(object, source) == "this"))
+                .then(|| {
+                    owner
+                        .qualified_name
+                        .split('.')
+                        .next()
+                        .unwrap_or_default()
+                        .to_owned()
+                })
+                .filter(|receiver| !receiver.is_empty());
+                facts.unresolved_calls.push(UnresolvedCall {
+                    caller_id: owner.id.clone(),
+                    callee_name: name.clone(),
+                    receiver_type,
+                    target_file_hint,
+                    provenance: "framework/ohos-emitter-registration".to_owned(),
+                    confidence: 0.97,
+                    explanation: format!(
+                        "{} registers Harmony emitter callback {name} on {channel}",
+                        owner.qualified_name
+                    ),
+                    resolvable: true,
+                    file: facts.path.clone(),
+                    line: observation.start_position().row + 1,
+                });
+                name
+            } else if matches!(callback.kind(), "arrow_function" | "function_expression") {
+                *callback_ordinal += 1;
+                let name = format!("<emitter callback {channel}>");
+                let qualified_name = format!("{}.{name}", owner.qualified_name);
+                let symbol = Symbol::new_disambiguated(
+                    Language::ArkTs,
+                    SymbolKind::Function,
+                    &name,
+                    &qualified_name,
+                    &facts.path,
+                    span(callback),
+                    &format!(
+                        "ohos-emitter-callback|{}|{}|{}",
+                        owner.semantic_key, channel, callback_ordinal
+                    ),
+                );
+                facts.relationships.push(Relationship {
+                    source_id: owner.id.clone(),
+                    target_id: symbol.id.clone(),
+                    kind: RelationshipKind::Calls,
+                    evidence: Evidence::new(
+                        "framework/ohos-emitter-inline-registration",
+                        0.97,
+                        format!(
+                            "{} registers inline Harmony emitter callback on {channel}",
+                            owner.qualified_name
+                        ),
+                        &facts.path,
+                        observation.start_position().row + 1,
+                    ),
+                });
+                facts.symbols.push(symbol);
+                name
+            } else {
+                return;
+            };
+            facts.dynamic_events.push(DynamicEventFact {
+                owner_id: owner.id,
+                receiver: "ohos-emitter".to_owned(),
+                channel,
+                action: EventAction::Register,
+                callback_name: Some(callback_name),
+                file: facts.path.clone(),
+                line: observation.start_position().row + 1,
+            });
         }
         _ => {}
     }
@@ -647,25 +1076,7 @@ fn arkui_default_or_namespace_binding(clause: &str) -> Option<String> {
 }
 
 fn arkui_named_router_bindings(clause: &str) -> Vec<String> {
-    let Some(body) = clause
-        .strip_prefix('{')
-        .and_then(|body| body.strip_suffix('}'))
-    else {
-        return Vec::new();
-    };
-    body.split(',')
-        .filter_map(|specifier| {
-            let mut words = specifier.split_whitespace();
-            (words.next()? == "router")
-                .then(|| match (words.next(), words.next()) {
-                    (Some("as"), Some(alias)) => alias,
-                    (None, None) => "router",
-                    _ => "",
-                })
-                .filter(|binding| is_javascript_identifier(binding))
-                .map(str::to_owned)
-        })
-        .collect()
+    named_import_bindings(clause, "router")
 }
 
 fn is_javascript_identifier(value: &str) -> bool {

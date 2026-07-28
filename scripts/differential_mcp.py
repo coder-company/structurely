@@ -143,6 +143,13 @@ def predicates(
         ),
     }
 
+def structurely_extensions(capture: dict[str, Any]) -> dict[str, bool]:
+    emitter = result_text(capture["ohos-emitter"])
+    return {
+        "ohos-emitter": "receiveRefresh" in emitter
+        and "framework/ohos-emitter" in emitter
+    }
+
 
 def context_usefulness(
     capture: dict[str, Any], expectations: dict[str, Any]
@@ -283,6 +290,7 @@ def main() -> None:
 
     structurely_checks = predicates(structurely, require_structurely_evidence=True)
     codegraph_checks = predicates(codegraph)
+    structurely_extension_checks = structurely_extensions(structurely)
     structurely_usefulness = context_usefulness(
         structurely, manifest["contextUsefulness"]
     )
@@ -303,6 +311,11 @@ def main() -> None:
         "structurely": {
             "passed": sum(structurely_checks.values()),
             "predicates": structurely_checks,
+        },
+        "structurelyExtensions": {
+            "passed": sum(structurely_extension_checks.values()),
+            "total": len(structurely_extension_checks),
+            "predicates": structurely_extension_checks,
         },
         "codegraph": {
             "passed": sum(codegraph_checks.values()),
@@ -329,6 +342,7 @@ def main() -> None:
     print(json.dumps(report["compatibility"], indent=2))
     if (
         not all(shared.values())
+        or not all(structurely_extension_checks.values())
         or not report["contextUsefulness"]["atLeastPinnedCodeGraph"]
         or report.get("baselineMatches") is False
     ):

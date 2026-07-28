@@ -168,6 +168,18 @@
       }
     },
     {
+      "label": "ohos-emitter",
+      "method": "tools/call",
+      "params": {
+        "name": "codegraph_callees",
+        "arguments": {
+          "symbol": "sendRefresh",
+          "file": "harmony/entry/src/main/ets/pages/EmitterHome.ets",
+          "limit": 20
+        }
+      }
+    },
+    {
       "label": "impact",
       "method": "tools/call",
       "params": {

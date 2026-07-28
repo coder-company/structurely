@@ -2965,6 +2965,109 @@ mod tests {
     }
 
     #[test]
+    fn harmony_emitter_channels_join_exact_callbacks_with_app_scope_and_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        for app in ["first", "second"] {
+            fs::create_dir_all(temp.path().join(format!("{app}/AppScope"))).unwrap();
+            fs::create_dir_all(temp.path().join(format!("{app}/entry/src/main/ets"))).unwrap();
+            fs::write(temp.path().join(format!("{app}/AppScope/app.json5")), "{}").unwrap();
+        }
+        let listener = temp.path().join("first/entry/src/main/ets/listener.ets");
+        fs::write(
+            &listener,
+            "import bus from '@ohos.events.emitter'\n\
+             function handleFive() { return 'named' }\n\
+             export function registerFive() {\n\
+               let event: bus.InnerEvent = { eventId: 5, priority: 1 }\n\
+               bus.on(event, handleFive)\n\
+               bus.once({ eventId: 5 }, () => { console.info('inline') })\n\
+               bus.on({ eventId: '5' }, () => { console.info('string') })\n\
+               bus.on({ eventId: unknownId }, handleFive)\n\
+             }\n\
+             export function reassigned() {\n\
+               let changed = { eventId: 5 }\n\
+               changed = { eventId: 6 }\n\
+               bus.on(changed, handleFive)\n\
+             }\n\
+             export function shadowed(bus: LocalEmitter) {\n\
+               bus.on({ eventId: 5 }, handleFive)\n\
+             }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("first/entry/src/main/ets/sender.ets"),
+            "import { emitter as bus } from '@kit.BasicServicesKit'\n\
+             export function sendFive() { bus.emit({ eventId: 5 }) }\n\
+             export function sendStringFive() { bus.emit({ eventId: '5' }) }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("second/entry/src/main/ets/listener.ets"),
+            "import emitter from '@ohos.events.emitter'\n\
+             function otherFive() {}\n\
+             export function registerOther() { emitter.on({ eventId: 5 }, otherFive) }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("first/entry/src/main/ets/lookalike.ets"),
+            "function fake() {}\n\
+             export function wrongImport() { emitter.on({ eventId: 5 }, fake) }\n",
+        )
+        .unwrap();
+
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let emitter_targets = |engine: &Engine, caller_name: &str| {
+            let caller = engine
+                .search(caller_name, 10)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.qualified_name == caller_name)
+                .unwrap()
+                .symbol;
+            engine
+                .callees(&caller.id)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, evidence)| evidence.provenance == "framework/ohos-emitter")
+                .collect::<Vec<_>>()
+        };
+        let number_targets = emitter_targets(&engine, "sendFive");
+        assert_eq!(number_targets.len(), 2);
+        assert!(number_targets.iter().any(|(target, evidence)| {
+            target.qualified_name == "handleFive" && evidence.confidence == 0.97
+        }));
+        assert!(number_targets.iter().any(|(target, _)| {
+            target.file == "first/entry/src/main/ets/listener.ets"
+                && target.name == "<emitter callback n:5>"
+        }));
+        assert!(number_targets
+            .iter()
+            .all(|(target, _)| target.qualified_name != "otherFive"));
+
+        let string_targets = emitter_targets(&engine, "sendStringFive");
+        assert_eq!(string_targets.len(), 1);
+        assert_eq!(string_targets[0].0.name, "<emitter callback s:5>");
+
+        let wrong = engine
+            .search("wrongImport", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.qualified_name == "wrongImport")
+            .unwrap()
+            .symbol;
+        assert!(engine
+            .callees(&wrong.id)
+            .unwrap()
+            .iter()
+            .all(|(_, evidence)| evidence.provenance != "framework/ohos-emitter"));
+
+        fs::remove_file(&listener).unwrap();
+        assert_eq!(engine.sync().unwrap().files_deleted, 1);
+        assert!(emitter_targets(&engine, "sendFive").is_empty());
+        assert!(emitter_targets(&engine, "sendStringFive").is_empty());
+    }
+
+    #[test]
     fn component_templates_ignore_script_strings_and_intrinsic_elements() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(

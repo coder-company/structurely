@@ -30,6 +30,7 @@ pub(crate) struct ProjectResolutionContext {
     base_url: PathBuf,
     aliases: Vec<AliasPattern>,
     workspace_packages: Vec<WorkspacePackage>,
+    harmony_app_roots: Vec<PathBuf>,
 }
 
 impl ProjectResolutionContext {
@@ -95,15 +96,23 @@ impl ProjectResolutionContext {
         workspace_packages.extend(load_cargo_packages(root));
         workspace_packages.extend(load_go_packages(root));
         workspace_packages.sort_by(|left, right| right.name.len().cmp(&left.name.len()));
+        let harmony_app_roots = load_harmony_app_roots(root);
         Self {
             root: root.to_owned(),
             base_url,
             aliases,
             workspace_packages,
+            harmony_app_roots,
         }
     }
 
     pub(crate) fn apply(&self, facts: &mut FileFacts) {
+        let emitter_scope = self.harmony_scope_for(&facts.path);
+        for event in &mut facts.dynamic_events {
+            if event.receiver == "ohos-emitter" {
+                event.receiver = format!("ohos-emitter@{emitter_scope}");
+            }
+        }
         for reference in &mut facts.unresolved_references {
             let Some(hint) = reference.target_file_hint.as_deref() else {
                 continue;
@@ -137,6 +146,22 @@ impl ProjectResolutionContext {
                     format!("{} through project import resolution", call.explanation);
             }
         }
+    }
+
+    fn harmony_scope_for(&self, file: &str) -> String {
+        let file = Path::new(file);
+        self.harmony_app_roots
+            .iter()
+            .filter(|root| root.as_os_str().is_empty() || file.starts_with(root))
+            .max_by_key(|root| root.components().count())
+            .map(|root| {
+                if root.as_os_str().is_empty() {
+                    ".".to_owned()
+                } else {
+                    root.to_string_lossy().replace('\\', "/")
+                }
+            })
+            .unwrap_or_else(|| ".".to_owned())
     }
 
     fn resolve_import_from(
@@ -235,6 +260,74 @@ impl ProjectResolutionContext {
         }
         None
     }
+}
+
+fn load_harmony_app_roots(root: &Path) -> Vec<PathBuf> {
+    const ENTRY_BUDGET: usize = 8_000;
+    let mut app_roots = HashSet::new();
+    let mut standalone_candidates = HashSet::new();
+    for entry in WalkBuilder::new(root)
+        .hidden(false)
+        .max_depth(Some(8))
+        .filter_entry(|entry| {
+            !matches!(
+                entry.file_name().to_str(),
+                Some(
+                    ".git"
+                        | ".structurely"
+                        | "node_modules"
+                        | "oh_modules"
+                        | "target"
+                        | "dist"
+                        | "build"
+                )
+            )
+        })
+        .build()
+        .flatten()
+        .take(ENTRY_BUDGET)
+    {
+        match entry.file_name().to_str() {
+            Some("app.json5")
+                if entry
+                    .path()
+                    .parent()
+                    .and_then(Path::file_name)
+                    .is_some_and(|name| name == "AppScope") =>
+            {
+                if let Some(application) = entry.path().parent().and_then(Path::parent) {
+                    if let Ok(relative) = application.strip_prefix(root) {
+                        app_roots.insert(relative.to_owned());
+                    }
+                }
+            }
+            Some("build-profile.json5") => {
+                if let Some(application) = entry.path().parent() {
+                    standalone_candidates.insert(application.to_owned());
+                }
+            }
+            _ => {}
+        }
+    }
+    for candidate in standalone_candidates {
+        if candidate.join("oh-package.json5").is_file() {
+            if let Ok(relative) = candidate.strip_prefix(root) {
+                app_roots.insert(relative.to_owned());
+            }
+        }
+    }
+    if app_roots.is_empty() {
+        app_roots.insert(PathBuf::new());
+    }
+    let mut roots = app_roots.into_iter().collect::<Vec<_>>();
+    roots.sort_by(|left, right| {
+        right
+            .components()
+            .count()
+            .cmp(&left.components().count())
+            .then_with(|| left.cmp(right))
+    });
+    roots
 }
 
 fn load_workspace_packages(root: &Path) -> Vec<WorkspacePackage> {

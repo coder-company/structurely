@@ -324,6 +324,23 @@
             "\"confidence\": 0.97",
             "\"line\": 71"
           ]
+        },
+        {
+          "command": "callees",
+          "query": "PageThreadModel.build",
+          "file": "code/DocsSample/ApplicationModels/StageProcessThread/entry/src/main/ets/pages/PageThreadModel.ets",
+          "contains": [
+            "\"qualified_name\": \"PageThreadModel.build.callback\"",
+            "\"provenance\": \"framework/ohos-emitter\"",
+            "\"confidence\": 0.97",
+            "\"line\": 121"
+          ],
+          "recordContains": [
+            "\"qualified_name\": \"PageThreadModel.build.callback\"",
+            "\"provenance\": \"framework/ohos-emitter\"",
+            "\"confidence\": 0.97",
+            "\"line\": 121"
+          ]
         }
       ]
     }
