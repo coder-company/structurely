@@ -1,0 +1,8 @@
+{
+  "name": "structurely-differential-fixture",
+  "private": true,
+  "dependencies": {
+    "express": "5.1.0",
+    "react-router-dom": "7.7.1"
+  }
+}

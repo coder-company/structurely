@@ -1,0 +1,113 @@
+{
+  "pinnedCodeGraph": {
+    "version": "1.5.0",
+    "commit": "572d22bfbe82602080e457bec655f72e3314f9ef"
+  },
+  "requests": [
+    {
+      "label": "initialize",
+      "method": "initialize",
+      "params": {
+        "protocolVersion": "2025-06-18",
+        "capabilities": {},
+        "clientInfo": { "name": "structurely-differential", "version": "1" }
+      }
+    },
+    { "label": "tools", "method": "tools/list", "params": {} },
+    {
+      "label": "search-exact",
+      "method": "tools/call",
+      "params": {
+        "name": "codegraph_search",
+        "arguments": { "query": "showUser", "limit": 10 }
+      }
+    },
+    {
+      "label": "search-ambiguous",
+      "method": "tools/call",
+      "params": {
+        "name": "codegraph_search",
+        "arguments": { "query": "duplicate", "limit": 10 }
+      }
+    },
+    {
+      "label": "callers",
+      "method": "tools/call",
+      "params": {
+        "name": "codegraph_callers",
+        "arguments": { "symbol": "showUser", "limit": 20 }
+      }
+    },
+    {
+      "label": "callees",
+      "method": "tools/call",
+      "params": {
+        "name": "codegraph_callees",
+        "arguments": { "symbol": "registerRoutes", "limit": 20 }
+      }
+    },
+    {
+      "label": "impact",
+      "method": "tools/call",
+      "params": {
+        "name": "codegraph_impact",
+        "arguments": { "symbol": "showUser", "depth": 3 }
+      }
+    },
+    {
+      "label": "node-window",
+      "method": "tools/call",
+      "params": {
+        "name": "codegraph_node",
+        "arguments": {
+          "file": "handlers.ts",
+          "includeCode": true,
+          "offset": 1,
+          "limit": 6
+        }
+      }
+    },
+    {
+      "label": "explore-flow",
+      "method": "tools/call",
+      "params": {
+        "name": "codegraph_explore",
+        "arguments": { "query": "registerRoutes showUser", "maxFiles": 5 }
+      }
+    },
+    {
+      "label": "status",
+      "method": "tools/call",
+      "params": { "name": "codegraph_status", "arguments": {} }
+    },
+    {
+      "label": "files",
+      "method": "tools/call",
+      "params": {
+        "name": "codegraph_files",
+        "arguments": { "pattern": "*.ts", "includeMetadata": true }
+      }
+    },
+    {
+      "label": "missing-required",
+      "method": "tools/call",
+      "params": { "name": "codegraph_search", "arguments": {} }
+    },
+    {
+      "label": "invalid-limit",
+      "method": "tools/call",
+      "params": {
+        "name": "codegraph_search",
+        "arguments": { "query": "showUser", "limit": 1000000 }
+      }
+    },
+    {
+      "label": "missing-symbol",
+      "method": "tools/call",
+      "params": {
+        "name": "codegraph_node",
+        "arguments": { "symbol": "definitelyMissing", "includeCode": true }
+      }
+    }
+  ]
+}
