@@ -2,17 +2,29 @@ use crate::model::{
     DynamicEventFact, EventAction, Evidence, FileFacts, Language, Relationship, RelationshipKind,
     SourceSpan, Symbol, SymbolKind, UnresolvedCall, UnresolvedReference,
 };
+use std::path::Path;
 use tree_sitter::Node;
 
 pub(crate) fn enrich_file_facts(root: Node<'_>, source: &[u8], facts: &mut FileFacts) {
     match facts.language {
-        Language::TypeScript | Language::Tsx | Language::JavaScript | Language::Jsx => {
+        Language::TypeScript
+        | Language::Tsx
+        | Language::JavaScript
+        | Language::Jsx
+        | Language::Vue
+        | Language::Svelte => {
             collect_javascript_registrations(root, source, facts);
             collect_javascript_function_references(root, source, facts);
             collect_nestjs_routes(root, source, facts);
-            if matches!(facts.language, Language::Tsx | Language::Jsx) {
+            if matches!(
+                facts.language,
+                Language::Tsx | Language::Jsx | Language::Vue | Language::Svelte
+            ) {
                 collect_react_router_jsx(root, source, facts);
                 collect_react_runtime_edges(root, source, facts);
+            }
+            if matches!(facts.language, Language::Vue | Language::Svelte) {
+                collect_component_template_edges(root, source, facts);
             }
         }
         Language::Python => {
@@ -21,6 +33,196 @@ pub(crate) fn enrich_file_facts(root: Node<'_>, source: &[u8], facts: &mut FileF
         }
         _ => {}
     }
+}
+
+fn collect_component_template_edges(root: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+    const TEMPLATE_CHILD_CAP: usize = 32;
+    let component_name = Path::new(&facts.path)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("Component");
+    let component = Symbol::new(
+        facts.language,
+        SymbolKind::Component,
+        component_name,
+        component_name,
+        &facts.path,
+        span(root),
+    );
+    let file_symbol = facts.symbols.first().expect("file symbol");
+    facts.relationships.push(Relationship {
+        source_id: file_symbol.id.clone(),
+        target_id: component.id.clone(),
+        kind: RelationshipKind::Contains,
+        evidence: Evidence::new(
+            "framework/component-file",
+            1.0,
+            format!("{} defines component {component_name}", facts.path),
+            &facts.path,
+            1,
+        ),
+    });
+
+    let template = template_only_source(source);
+    let provenance = match facts.language {
+        Language::Vue => "framework/vue-template",
+        Language::Svelte => "framework/svelte-template",
+        _ => unreachable!("component template language"),
+    };
+    let mut targets = template_event_handlers(&template, facts.language);
+    targets.extend(template_child_components(&template));
+    targets.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    targets.dedup_by(|left, right| left.0 == right.0);
+    for (target, offset) in targets.into_iter().take(TEMPLATE_CHILD_CAP) {
+        if target == component_name {
+            continue;
+        }
+        let target_file_hint = facts
+            .unresolved_references
+            .iter()
+            .find(|reference| {
+                reference.kind == RelationshipKind::Imports && reference.binding_name == target
+            })
+            .and_then(|reference| reference.target_file_hint.clone())
+            .or_else(|| Some(facts.path.clone()));
+        facts.unresolved_calls.push(UnresolvedCall {
+            caller_id: component.id.clone(),
+            callee_name: target.clone(),
+            receiver_type: None,
+            target_file_hint,
+            provenance: provenance.to_owned(),
+            confidence: 0.96,
+            explanation: format!("{component_name} template invokes or renders {target}"),
+            resolvable: true,
+            file: facts.path.clone(),
+            line: byte_line(source, offset),
+        });
+    }
+    facts.symbols.push(component);
+}
+
+fn template_only_source(source: &[u8]) -> String {
+    let source = String::from_utf8_lossy(source);
+    let lower = source.to_ascii_lowercase();
+    let mut template = source.as_bytes().to_vec();
+    for tag in ["script", "style"] {
+        let mut offset = 0;
+        let opening = format!("<{tag}");
+        let closing = format!("</{tag}");
+        while let Some(relative_open) = lower[offset..].find(&opening) {
+            let open = offset + relative_open;
+            let Some(relative_body) = lower[open..].find('>') else {
+                break;
+            };
+            let body = open + relative_body + 1;
+            let Some(relative_close) = lower[body..].find(&closing) else {
+                break;
+            };
+            let close = body + relative_close;
+            for byte in &mut template[open..close] {
+                if !matches!(*byte, b'\n' | b'\r') {
+                    *byte = b' ';
+                }
+            }
+            offset = close + closing.len();
+        }
+    }
+    String::from_utf8(template).expect("template masking preserves UTF-8")
+}
+
+fn template_event_handlers(template: &str, language: Language) -> Vec<(String, usize)> {
+    let bytes = template.as_bytes();
+    let mut handlers = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        let marker = match language {
+            Language::Svelte
+                if bytes.get(index) == Some(&b'=') && bytes.get(index + 1) == Some(&b'{') =>
+            {
+                Some((index + 2, b'}'))
+            }
+            Language::Vue
+                if bytes.get(index) == Some(&b'=')
+                    && matches!(bytes.get(index + 1), Some(b'"' | b'\'')) =>
+            {
+                Some((index + 2, bytes[index + 1]))
+            }
+            _ => None,
+        };
+        let Some((value_start, terminator)) = marker else {
+            index += 1;
+            continue;
+        };
+        let attribute_start = template[..index]
+            .rfind(|character: char| character.is_ascii_whitespace() || character == '<')
+            .map_or(0, |position| position + 1);
+        let attribute = &template[attribute_start..index];
+        let is_event = match language {
+            Language::Svelte => attribute.starts_with("on:") || attribute.starts_with("on"),
+            Language::Vue => attribute.starts_with('@') || attribute.starts_with("v-on:"),
+            _ => false,
+        };
+        let Some(relative_end) = bytes[value_start..]
+            .iter()
+            .position(|byte| *byte == terminator)
+        else {
+            break;
+        };
+        let value_end = value_start + relative_end;
+        let value = template[value_start..value_end].trim();
+        if is_event && is_identifier(value) {
+            handlers.push((value.to_owned(), value_start));
+        }
+        index = value_end + 1;
+    }
+    handlers
+}
+
+fn template_child_components(template: &str) -> Vec<(String, usize)> {
+    let bytes = template.as_bytes();
+    let mut components = Vec::new();
+    let mut index = 0;
+    while index < template.len() {
+        let Some(relative) = template[index..].find('<') else {
+            break;
+        };
+        let start = index + relative;
+        let name_start = start + 1;
+        if matches!(bytes.get(name_start), Some(b'/' | b'!' | b'?' | b':')) {
+            index = name_start + 1;
+            continue;
+        }
+        let mut end = name_start;
+        while bytes
+            .get(end)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'-' | b'.'))
+        {
+            end += 1;
+        }
+        let name = &template[name_start..end];
+        if name.starts_with(char::is_uppercase) && is_identifier(name) {
+            components.push((name.to_owned(), name_start));
+        }
+        index = end.max(name_start + 1).min(template.len());
+    }
+    components
+}
+
+fn is_identifier(value: &str) -> bool {
+    let mut characters = value.chars();
+    characters
+        .next()
+        .is_some_and(|character| character == '_' || character == '$' || character.is_alphabetic())
+        && characters
+            .all(|character| character == '_' || character == '$' || character.is_alphanumeric())
+}
+
+fn byte_line(source: &[u8], offset: usize) -> usize {
+    source[..offset.min(source.len())]
+        .iter()
+        .filter(|byte| **byte == b'\n')
+        .count()
+        + 1
 }
 
 fn collect_nestjs_routes(node: Node<'_>, source: &[u8], facts: &mut FileFacts) {

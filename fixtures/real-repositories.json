@@ -126,6 +126,61 @@
           ]
         }
       ]
+    },
+    {
+      "name": "vue",
+      "url": "https://github.com/vuejs/core",
+      "commit": "b5f8518379b77c3b62a7a9d2b52f6c76cda09bd5",
+      "minimumIndexedFiles": 530,
+      "assertions": [
+        {
+          "command": "search",
+          "query": "toggleProdMode",
+          "contains": [
+            "packages-private/sfc-playground/src/App.vue",
+            "\"language\": \"vue\"",
+            "\"start_line\": 88"
+          ]
+        },
+        {
+          "command": "callers",
+          "query": "toggleProdMode",
+          "file": "packages-private/sfc-playground/src/App.vue",
+          "contains": [
+            "\"kind\": \"component\"",
+            "\"name\": \"App\"",
+            "\"provenance\": \"framework/vue-template\"",
+            "\"line\": 154"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "svelte",
+      "url": "https://github.com/sveltejs/svelte",
+      "commit": "44a7813730579b94004e182e5a67aab27aa9d2a6",
+      "minimumIndexedFiles": 7900,
+      "assertions": [
+        {
+          "command": "search",
+          "query": "handleKeydown",
+          "contains": [
+            "packages/svelte/tests/print/samples/svelte-window/input.svelte",
+            "\"language\": \"svelte\"",
+            "\"start_line\": 2"
+          ]
+        },
+        {
+          "command": "callers",
+          "query": "handleKeydown",
+          "file": "packages/svelte/tests/print/samples/svelte-window/input.svelte",
+          "contains": [
+            "\"kind\": \"component\"",
+            "\"provenance\": \"framework/svelte-template\"",
+            "\"line\": 7"
+          ]
+        }
+      ]
     }
   ]
 }

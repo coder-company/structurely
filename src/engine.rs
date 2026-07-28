@@ -1199,9 +1199,42 @@ mod tests {
                     edge.source_id == source && edge.target_id == target && edge.kind == kind
                 })
                 .unwrap_or_else(|| panic!("missing {kind} relationship"));
-            assert!(relationship.evidence.provenance.starts_with("tree-sitter/"));
+            if kind == RelationshipKind::Imports {
+                assert_eq!(relationship.evidence.provenance, "project/relative-import");
+            } else {
+                assert!(relationship.evidence.provenance.starts_with("tree-sitter/"));
+            }
             assert!(relationship.evidence.confidence >= 0.9);
         }
+    }
+
+    #[test]
+    fn external_imports_do_not_fan_out_to_same_named_project_symbols() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("consumer.ts"),
+            "import { duplicate } from 'external-package';\n\
+             export function run() { duplicate(); }\n",
+        )
+        .unwrap();
+        for index in 0..12 {
+            fs::write(
+                temp.path().join(format!("duplicate-{index}.ts")),
+                "export function duplicate() {}\n",
+            )
+            .unwrap();
+        }
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let snapshot = engine.snapshot().unwrap();
+        let consumer = snapshot
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "consumer.ts")
+            .unwrap();
+        assert!(snapshot.relationships.iter().all(|relationship| {
+            relationship.source_id != consumer.id || relationship.kind != RelationshipKind::Imports
+        }));
     }
 
     #[test]
@@ -2220,6 +2253,82 @@ mod tests {
                 |(_, evidence)| evidence.provenance != "framework/react-render"
                     && evidence.provenance != "framework/jsx-render"
             ));
+    }
+
+    #[test]
+    fn vue_and_svelte_templates_link_events_and_child_components() {
+        for (extension, app_source, child_source, handler, provenance) in [
+            (
+                "vue",
+                "<script setup lang=\"ts\">\n\
+                 import Child from './Child.vue'\n\
+                 function save() {}\n\
+                 </script>\n\
+                 <template><Child @click=\"save\" /></template>\n",
+                "<script setup>export function childLogic() {}</script>\n\
+                 <template><span /></template>\n",
+                "save",
+                "framework/vue-template",
+            ),
+            (
+                "svelte",
+                "<script lang=\"ts\">\n\
+                 import Child from './Child.svelte';\n\
+                 function handleReady() {}\n\
+                 </script>\n\
+                 <Child on:ready={handleReady} />\n",
+                "<script>export function childLogic() {}</script>\n<span />\n",
+                "handleReady",
+                "framework/svelte-template",
+            ),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            fs::write(temp.path().join(format!("App.{extension}")), app_source).unwrap();
+            fs::write(temp.path().join(format!("Child.{extension}")), child_source).unwrap();
+
+            let (engine, _) = Engine::init(temp.path()).unwrap();
+            let app = engine
+                .snapshot()
+                .unwrap()
+                .symbols
+                .into_iter()
+                .find(|symbol| {
+                    symbol.kind == crate::model::SymbolKind::Component && symbol.name == "App"
+                })
+                .unwrap();
+            let callees = engine.callees(&app.id).unwrap();
+            assert!(callees.iter().any(|(symbol, evidence)| {
+                symbol.kind == crate::model::SymbolKind::Component
+                    && symbol.name == "Child"
+                    && evidence.provenance == provenance
+            }));
+            assert!(callees.iter().any(|(symbol, evidence)| {
+                symbol.name == handler && evidence.provenance == provenance
+            }));
+        }
+    }
+
+    #[test]
+    fn component_templates_ignore_script_strings_and_intrinsic_elements() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("Safe.svelte"),
+            "<script>\n\
+             function local() { return '<Fake on:click={local} />'; }\n\
+             </script>\n\
+             <button>safe</button>\n<",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let component = engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .into_iter()
+            .find(|symbol| symbol.kind == crate::model::SymbolKind::Component)
+            .unwrap();
+        assert!(engine.callees(&component.id).unwrap().is_empty());
     }
 
     #[test]

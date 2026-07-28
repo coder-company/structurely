@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path};
 
-pub const GRAPH_MODEL_VERSION: u32 = 22;
+pub const GRAPH_MODEL_VERSION: u32 = 25;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -12,6 +12,8 @@ pub enum Language {
     #[serde(rename = "javascript")]
     JavaScript,
     Jsx,
+    Vue,
+    Svelte,
     Python,
     Rust,
     Go,
@@ -37,6 +39,8 @@ impl Language {
             "tsx" => Some(Self::Tsx),
             "js" | "mjs" | "cjs" => Some(Self::JavaScript),
             "jsx" => Some(Self::Jsx),
+            "vue" => Some(Self::Vue),
+            "svelte" => Some(Self::Svelte),
             "py" | "pyi" => Some(Self::Python),
             "rs" => Some(Self::Rust),
             "go" => Some(Self::Go),
@@ -64,6 +68,8 @@ impl fmt::Display for Language {
             Self::Tsx => "tsx",
             Self::JavaScript => "javascript",
             Self::Jsx => "jsx",
+            Self::Vue => "vue",
+            Self::Svelte => "svelte",
             Self::Python => "python",
             Self::Rust => "rust",
             Self::Go => "go",

@@ -699,6 +699,7 @@ impl Store {
 
         type Candidate = (String, String, i64, String);
         let mut direct_candidates = HashMap::<(String, String), Vec<Candidate>>::new();
+        let mut local_candidates = HashMap::<(i64, String, String), Vec<Candidate>>::new();
         {
             let mut statement = tx.prepare(
                 "SELECT s.name,s.language,s.public_id,s.qualified_name,s.file_id,f.path
@@ -718,10 +719,15 @@ impl Store {
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?
             {
+                let value = (candidate.2, candidate.3, candidate.4, candidate.5);
                 direct_candidates
-                    .entry((candidate.0, candidate.1))
+                    .entry((candidate.0.clone(), candidate.1.clone()))
                     .or_default()
-                    .push((candidate.2, candidate.3, candidate.4, candidate.5));
+                    .push(value.clone());
+                local_candidates
+                    .entry((value.2, candidate.0, candidate.1))
+                    .or_default()
+                    .push(value);
             }
         }
         let mut imported_candidates = HashMap::<(i64, String, String), Vec<Candidate>>::new();
@@ -784,61 +790,59 @@ impl Store {
                 target_file_hint.clone(),
             );
             if !candidate_cache.contains_key(&cache_key) {
-                let mut candidates = HashMap::<String, (String, i64, String, bool)>::new();
-                if let Some(direct) =
-                    direct_candidates.get(&(callee_name.clone(), language.clone()))
-                {
-                    for candidate in direct {
-                        candidates.insert(
-                            candidate.0.clone(),
-                            (candidate.1.clone(), candidate.2, candidate.3.clone(), false),
+                let direct = direct_candidates
+                    .get(&(callee_name.clone(), language.clone()))
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                let receiver_qualified = format!("{receiver_type}.{callee_name}");
+                let mut targets = direct
+                    .iter()
+                    .filter(|candidate| {
+                        (!target_file_hint.is_empty()
+                            && module_hint_matches(&target_file_hint, &candidate.3))
+                            || (!receiver_type.is_empty()
+                                && (candidate.1 == receiver_qualified
+                                    || candidate.1.ends_with(&format!(".{receiver_qualified}"))))
+                    })
+                    .map(|candidate| (candidate.0.clone(), candidate.1.clone(), 0))
+                    .collect::<Vec<_>>();
+                if targets.is_empty() {
+                    if let Some(local) =
+                        local_candidates.get(&(file_id, callee_name.clone(), language.clone()))
+                    {
+                        targets.extend(
+                            local
+                                .iter()
+                                .map(|candidate| (candidate.0.clone(), candidate.1.clone(), 1)),
                         );
                     }
                 }
-                if let Some(imported) =
-                    imported_candidates.get(&(file_id, callee_name.clone(), language.clone()))
-                {
-                    for candidate in imported {
-                        candidates
-                            .entry(candidate.0.clone())
-                            .and_modify(|value| value.3 = true)
-                            .or_insert((
-                                candidate.1.clone(),
-                                candidate.2,
-                                candidate.3.clone(),
-                                true,
-                            ));
+                if targets.is_empty() {
+                    if let Some(imported) =
+                        imported_candidates.get(&(file_id, callee_name.clone(), language.clone()))
+                    {
+                        targets.extend(
+                            imported
+                                .iter()
+                                .map(|candidate| (candidate.0.clone(), candidate.1.clone(), 2)),
+                        );
                     }
                 }
-                let mut targets = candidates
-                    .into_iter()
-                    .map(
-                        |(public_id, (qualified_name, target_file_id, target_file, imported))| {
-                            let module_match = !target_file_hint.is_empty()
-                                && module_hint_matches(&target_file_hint, &target_file);
-                            let receiver_match = !receiver_type.is_empty()
-                                && (qualified_name == format!("{receiver_type}.{callee_name}")
-                                    || qualified_name
-                                        .ends_with(&format!(".{receiver_type}.{callee_name}")));
-                            let rank = if module_match || receiver_match {
-                                0
-                            } else if target_file_id == file_id {
-                                1
-                            } else if imported {
-                                2
-                            } else {
-                                3
-                            };
-                            (public_id, qualified_name, rank)
-                        },
-                    )
-                    .collect::<Vec<_>>();
+                if targets.is_empty() {
+                    targets.extend(
+                        direct
+                            .iter()
+                            .take(CALL_FANOUT_CAP + 1)
+                            .map(|candidate| (candidate.0.clone(), candidate.1.clone(), 3)),
+                    );
+                }
                 targets.sort_by(|left, right| {
                     left.2
                         .cmp(&right.2)
                         .then_with(|| left.1.cmp(&right.1))
                         .then_with(|| left.0.cmp(&right.0))
                 });
+                targets.dedup_by(|left, right| left.0 == right.0);
                 candidate_cache.insert(cache_key.clone(), targets);
             }
             let targets = &candidate_cache[&cache_key];
@@ -1111,6 +1115,7 @@ impl Store {
     }
 
     fn resolve_structural_references(tx: &Transaction<'_>) -> Result<usize> {
+        const REFERENCE_FANOUT_CAP: usize = 8;
         tx.execute(
             "DELETE FROM relationships
              WHERE provenance IN (
@@ -1317,14 +1322,11 @@ impl Store {
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             if let Some(hint) = target_file_hint.as_deref() {
-                let hinted: Vec<_> = targets
+                targets = targets
                     .iter()
                     .filter(|target| module_hint_matches(hint, &target.2))
                     .cloned()
                     .collect();
-                if !hinted.is_empty() {
-                    targets = hinted;
-                }
             }
             if kind != "imports" && target_file_hint.is_none() {
                 let same_file = targets
@@ -1359,6 +1361,9 @@ impl Store {
                         targets.clear();
                     }
                 }
+            }
+            if targets.len() > REFERENCE_FANOUT_CAP {
+                targets.clear();
             }
             let confidence = if targets.len() == 1 {
                 base_confidence
@@ -1597,6 +1602,8 @@ fn parse_language(value: &str) -> Language {
         "tsx" => Language::Tsx,
         "javascript" => Language::JavaScript,
         "jsx" => Language::Jsx,
+        "vue" => Language::Vue,
+        "svelte" => Language::Svelte,
         "python" => Language::Python,
         "rust" => Language::Rust,
         "go" => Language::Go,

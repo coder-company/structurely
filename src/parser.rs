@@ -22,7 +22,10 @@ pub(crate) fn parse_file_as(
     source: &str,
     language: Language,
 ) -> Result<FileFacts> {
-    let tree = parse_tree(language, source)?;
+    let embedded_source = matches!(language, Language::Vue | Language::Svelte)
+        .then(|| embedded_script_source(source));
+    let syntax_source = embedded_source.as_deref().unwrap_or(source);
+    let tree = parse_tree(language, syntax_source)?;
     let content_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
     let source_bytes = source.as_bytes();
 
@@ -474,6 +477,7 @@ fn parse_tree(language: Language, source: &str) -> Result<Tree> {
         Language::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
         Language::Tsx => tree_sitter_typescript::LANGUAGE_TSX,
         Language::JavaScript | Language::Jsx => tree_sitter_javascript::LANGUAGE,
+        Language::Vue | Language::Svelte => tree_sitter_typescript::LANGUAGE_TSX,
         Language::Python => tree_sitter_python::LANGUAGE,
         Language::Rust => tree_sitter_rust::LANGUAGE,
         Language::Go => tree_sitter_go::LANGUAGE,
@@ -496,6 +500,39 @@ fn parse_tree(language: Language, source: &str) -> Result<Tree> {
     parser
         .parse(source, None)
         .ok_or_else(|| anyhow!("tree-sitter returned no syntax tree"))
+}
+
+fn embedded_script_source(source: &str) -> String {
+    let lower = source.to_ascii_lowercase();
+    let mut masked = source
+        .as_bytes()
+        .iter()
+        .map(|byte| {
+            if matches!(*byte, b'\n' | b'\r') {
+                *byte
+            } else {
+                b' '
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut offset = 0;
+    while let Some(relative_open) = lower[offset..].find("<script") {
+        let open = offset + relative_open;
+        let Some(relative_body) = lower[open..].find('>') else {
+            break;
+        };
+        let body = open + relative_body + 1;
+        let Some(relative_close) = lower[body..].find("</script") else {
+            break;
+        };
+        let close = body + relative_close;
+        masked[body..close].copy_from_slice(&source.as_bytes()[body..close]);
+        let Some(relative_end) = lower[close..].find('>') else {
+            break;
+        };
+        offset = close + relative_end + 1;
+    }
+    String::from_utf8(masked).expect("masking source preserves UTF-8")
 }
 
 fn collect_symbols(
@@ -1068,6 +1105,46 @@ mod tests {
         assert!(names.contains(&"Greeter.greet"));
         assert!(names.contains(&"helper"));
         assert_eq!(facts.unresolved_calls[0].callee_name, "helper");
+    }
+
+    #[test]
+    fn extracts_offset_preserved_vue_and_svelte_script_blocks() {
+        for (file, source, language, function_line) in [
+            (
+                "Panel.vue",
+                "<template><FakeCall>你好</FakeCall></template>\n\
+                 <script lang=\"ts\">\n\
+                 export function loadPanel() { helper(); }\n\
+                 function helper() {}\n\
+                 </script>\n",
+                Language::Vue,
+                3,
+            ),
+            (
+                "Panel.svelte",
+                "<h1>Привет</h1>\n\
+                 <script lang=\"ts\">\n\
+                 export function loadPanel() { helper(); }\n\
+                 function helper() {}\n\
+                 </script>\n",
+                Language::Svelte,
+                3,
+            ),
+        ] {
+            let facts = parse_file(file, source).unwrap();
+            assert_eq!(facts.language, language);
+            assert!(facts
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == "loadPanel" && symbol.start_line == function_line));
+            assert!(!facts.symbols.iter().any(|symbol| symbol.name == "FakeCall"));
+            let call = facts
+                .unresolved_calls
+                .iter()
+                .find(|call| call.callee_name == "helper")
+                .unwrap();
+            assert_eq!(call.line, function_line);
+        }
     }
 
     #[test]

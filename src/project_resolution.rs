@@ -98,13 +98,14 @@ impl ProjectResolutionContext {
             let Some(hint) = reference.target_file_hint.as_deref() else {
                 continue;
             };
-            if let Some((resolved, provenance)) = self.resolve_import(hint) {
+            if let Some((resolved, provenance)) = self.resolve_import_from(&facts.path, hint) {
                 reference.target_file_hint = Some(resolved);
                 reference.provenance = provenance.to_owned();
                 reference.explanation = format!(
                     "{} through {}",
                     reference.explanation,
                     match provenance {
+                        "project/relative-import" => "source-relative import resolution",
                         "tsconfig/path-alias" => "project path alias",
                         "cargo/workspace" => "Cargo workspace package",
                         _ => "JavaScript workspace package",
@@ -116,13 +117,31 @@ impl ProjectResolutionContext {
             let Some(hint) = call.target_file_hint.as_deref() else {
                 continue;
             };
-            if let Some((resolved, provenance)) = self.resolve_import(hint) {
+            if let Some((resolved, provenance)) = self.resolve_import_from(&facts.path, hint) {
                 call.target_file_hint = Some(resolved);
-                call.provenance = provenance.to_owned();
+                if call.provenance == "tree-sitter/name-resolution" {
+                    call.provenance = provenance.to_owned();
+                }
                 call.explanation =
-                    format!("{} through imported Go workspace package", call.explanation);
+                    format!("{} through project import resolution", call.explanation);
             }
         }
+    }
+
+    fn resolve_import_from(
+        &self,
+        source_file: &str,
+        import_path: &str,
+    ) -> Option<(String, &'static str)> {
+        if import_path.starts_with("./") || import_path.starts_with("../") {
+            let parent = Path::new(source_file)
+                .parent()
+                .unwrap_or_else(|| Path::new(""));
+            let relative = normalize_absolute(&parent.join(import_path));
+            return canonical_source_hint(&self.root, &relative)
+                .map(|path| (path, "project/relative-import"));
+        }
+        self.resolve_import(import_path)
     }
 
     fn resolve_import(&self, import_path: &str) -> Option<(String, &'static str)> {
@@ -501,7 +520,7 @@ fn normalize_absolute(path: &Path) -> PathBuf {
 
 fn canonical_source_hint(root: &Path, relative: &Path) -> Option<String> {
     const EXTENSIONS: &[&str] = &[
-        "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts", "json", "rs",
+        "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts", "vue", "svelte", "json", "rs",
     ];
     let direct = root.join(relative);
     if direct.is_file() {
@@ -629,6 +648,31 @@ mod tests {
             Some("src/fallback".to_owned())
         );
         assert_eq!(context.resolve_alias("@escape/secret"), None);
+    }
+
+    #[test]
+    fn relative_imports_are_canonicalized_from_the_importing_file() {
+        let root = tempdir().unwrap();
+        fs::create_dir_all(root.path().join("first/components")).unwrap();
+        fs::create_dir_all(root.path().join("second/components")).unwrap();
+        fs::write(root.path().join("first/components/main.svelte"), "").unwrap();
+        fs::write(root.path().join("second/components/main.svelte"), "").unwrap();
+        let context = ProjectResolutionContext::load(root.path());
+
+        assert_eq!(
+            context.resolve_import_from("first/App.svelte", "./components/main"),
+            Some((
+                "first/components/main".to_owned(),
+                "project/relative-import"
+            ))
+        );
+        assert_eq!(
+            context.resolve_import_from("second/App.svelte", "./components/main"),
+            Some((
+                "second/components/main".to_owned(),
+                "project/relative-import"
+            ))
+        );
     }
 
     #[test]
