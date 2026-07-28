@@ -494,6 +494,7 @@ impl Store {
 
     fn finish_epoch(tx: &Transaction<'_>, next_epoch: u64) -> Result<usize> {
         let mut relationships_resolved = Self::resolve_calls(tx)?;
+        relationships_resolved += Self::resolve_interface_dispatch(tx)?;
         relationships_resolved += Self::resolve_dynamic_events(tx)?;
         tx.execute(
             "UPDATE metadata SET value = ?1 WHERE key = 'graph_epoch'",
@@ -890,6 +891,138 @@ impl Store {
                             },
                             &file,
                             line,
+                        ),
+                    },
+                )?;
+                resolved += 1;
+            }
+        }
+        Ok(resolved)
+    }
+
+    fn resolve_interface_dispatch(tx: &Transaction<'_>) -> Result<usize> {
+        const IMPLEMENTATION_FANOUT_CAP: usize = 8;
+        tx.execute(
+            "DELETE FROM relationships
+             WHERE provenance='dynamic/interface-implementation'",
+            [],
+        )?;
+
+        #[derive(Clone)]
+        struct Method {
+            id: String,
+            name: String,
+            owner: String,
+            file_id: i64,
+            file: String,
+            line: usize,
+        }
+
+        let mut methods_statement = tx.prepare(
+            "SELECT s.public_id,s.name,s.qualified_name,s.file_id,f.path,s.start_line
+             FROM symbols s JOIN files f ON f.id=s.file_id
+             WHERE s.kind='method'
+             ORDER BY s.file_id,s.qualified_name,s.public_id",
+        )?;
+        let methods = methods_statement
+            .query_map([], |row| {
+                let qualified_name = row.get::<_, String>(2)?;
+                Ok(Method {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    owner: qualified_name
+                        .rsplit_once('.')
+                        .map_or(String::new(), |(owner, _)| owner.to_owned()),
+                    file_id: row.get(3)?,
+                    file: row.get(4)?,
+                    line: row.get::<_, i64>(5)? as usize,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(methods_statement);
+
+        let mut methods_by_owner = HashMap::<(i64, String), Vec<Method>>::new();
+        let mut methods_by_signature = HashMap::<(i64, String, String), Method>::new();
+        for method in methods {
+            methods_by_owner
+                .entry((method.file_id, method.owner.clone()))
+                .or_default()
+                .push(method.clone());
+            methods_by_signature.insert(
+                (method.file_id, method.owner.clone(), method.name.clone()),
+                method,
+            );
+        }
+
+        let mut heritage_statement = tx.prepare(
+            "SELECT implementation.qualified_name,implementation.file_id,
+                    interface.qualified_name,interface.file_id,interface.public_id
+             FROM relationships relationship
+             JOIN symbols implementation
+               ON implementation.public_id=relationship.source_public_id
+             JOIN symbols interface
+               ON interface.public_id=relationship.target_public_id
+             WHERE relationship.kind='implements'
+             ORDER BY interface.public_id,implementation.public_id",
+        )?;
+        let implementations = heritage_statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(heritage_statement);
+
+        let mut candidates = HashMap::<String, Vec<Method>>::new();
+        for (implementation, implementation_file, interface, interface_file, _) in implementations {
+            let Some(interface_methods) =
+                methods_by_owner.get(&(interface_file, interface.clone()))
+            else {
+                continue;
+            };
+            for interface_method in interface_methods {
+                let Some(implementation_method) = methods_by_signature.get(&(
+                    implementation_file,
+                    implementation.clone(),
+                    interface_method.name.clone(),
+                )) else {
+                    continue;
+                };
+                candidates
+                    .entry(interface_method.id.clone())
+                    .or_default()
+                    .push(implementation_method.clone());
+            }
+        }
+
+        let mut resolved = 0;
+        for (interface_method, mut implementation_methods) in candidates {
+            implementation_methods.sort_by(|left, right| left.id.cmp(&right.id));
+            implementation_methods.dedup_by(|left, right| left.id == right.id);
+            if implementation_methods.len() > IMPLEMENTATION_FANOUT_CAP {
+                continue;
+            }
+            for implementation in implementation_methods {
+                Self::insert_relationship(
+                    tx,
+                    &Relationship {
+                        source_id: interface_method.clone(),
+                        target_id: implementation.id,
+                        kind: RelationshipKind::Calls,
+                        evidence: Evidence::new(
+                            "dynamic/interface-implementation",
+                            0.94,
+                            format!(
+                                "interface dispatch may invoke {}.{}",
+                                implementation.owner, implementation.name
+                            ),
+                            implementation.file,
+                            implementation.line,
                         ),
                     },
                 )?;

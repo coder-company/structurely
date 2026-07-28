@@ -1205,6 +1205,70 @@ mod tests {
     }
 
     #[test]
+    fn interface_dispatch_bridges_contract_methods_to_concrete_implementations() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("notifier.ts"),
+            "interface Notifier { notify(message: string): void; }\n\
+             class EmailNotifier implements Notifier {\n\
+               notify(message: string) { return message; }\n\
+             }\n\
+             function deliver(notifier: Notifier) { notifier.notify('ready'); }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let contract = engine
+            .search("Notifier.notify", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.qualified_name == "Notifier.notify")
+            .unwrap()
+            .symbol;
+        let implementations = engine.callees(&contract.id).unwrap();
+        assert!(implementations.iter().any(|(symbol, evidence)| {
+            symbol.qualified_name == "EmailNotifier.notify"
+                && evidence.provenance == "dynamic/interface-implementation"
+                && evidence.confidence == 0.94
+        }));
+
+        let deliver = engine
+            .search("deliver", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.name == "deliver")
+            .unwrap()
+            .symbol;
+        assert!(engine
+            .callees(&deliver.id)
+            .unwrap()
+            .iter()
+            .any(|(symbol, _)| symbol.qualified_name == "Notifier.notify"));
+    }
+
+    #[test]
+    fn interface_dispatch_refuses_unbounded_implementation_fanout() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut source = "interface Handler { handle(): void; }\n".to_owned();
+        for index in 0..9 {
+            source.push_str(&format!(
+                "class Handler{index} implements Handler {{ handle() {{}} }}\n"
+            ));
+        }
+        fs::write(temp.path().join("handlers.ts"), source).unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let contract = engine
+            .search("Handler.handle", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.qualified_name == "Handler.handle")
+            .unwrap()
+            .symbol;
+        assert!(engine.callees(&contract.id).unwrap().is_empty());
+    }
+
+    #[test]
     fn lexical_scope_beats_same_named_global_candidates() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(

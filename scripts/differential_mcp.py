@@ -85,6 +85,10 @@ def predicates(capture: dict[str, Any]) -> dict[str, bool]:
         "react-rerender": "render"
         in result_text(capture["react-rerender"]).lower(),
         "jsx-child-render": "Child" in result_text(capture["jsx-child-render"]),
+        "interface-dispatch": all(
+            value in result_text(capture["interface-dispatch"])
+            for value in ("handle", "contracts.ts")
+        ),
         "impact": "showUser" in result_text(capture["impact"]),
         "node-window": "showUser" in result_text(capture["node-window"]),
         "explore-flow": all(

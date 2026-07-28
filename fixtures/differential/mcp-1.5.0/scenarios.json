@@ -96,6 +96,18 @@
       }
     },
     {
+      "label": "interface-dispatch",
+      "method": "tools/call",
+      "params": {
+        "name": "codegraph_callees",
+        "arguments": {
+          "symbol": "Handler.handle",
+          "file": "contracts.ts",
+          "limit": 20
+        }
+      }
+    },
+    {
       "label": "impact",
       "method": "tools/call",
       "params": {
