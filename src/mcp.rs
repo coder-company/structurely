@@ -1,8 +1,10 @@
-use crate::Engine;
+use crate::{daemon, Engine};
 use anyhow::{bail, ensure, Result};
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::path::Path;
+use std::thread;
+use std::time::{Duration, Instant};
 
 pub fn serve_stdio(root: &Path) -> Result<()> {
     let mut engine = Engine::open(root)?;
@@ -283,19 +285,26 @@ fn call_tool(engine: &mut Engine, params: &Value) -> Result<Value> {
 }
 
 fn dispatch_freshness_aware(engine: &mut Engine, name: &str, arguments: &Value) -> Result<Value> {
-    let sync_error = engine.sync().err();
+    let refresh = refresh_index(engine);
     let mut response = dispatch_tool(engine, name, arguments)?;
-    let freshness = match sync_error {
-        Some(ref error) => json!({
+    let freshness = match &refresh.error {
+        Some(error) => json!({
             "state": "stale",
+            "mode": refresh.mode,
+            "epoch": refresh.epoch,
             "warning": format!(
                 "Index catch-up failed; results use the last committed graph epoch: {error}"
             )
         }),
-        None => json!({ "state": "current" }),
+        None => json!({
+            "state": "current",
+            "mode": refresh.mode,
+            "epoch": refresh.epoch,
+            "daemonPid": refresh.daemon_pid
+        }),
     };
     response["_meta"] = json!({ "freshness": freshness });
-    if let Some(error) = sync_error {
+    if let Some(error) = refresh.error {
         let warning = format!(
             "⚠ **Stale index:** catch-up failed, so this result uses the last committed graph epoch. \
              Cause: {error}\n\n"
@@ -312,6 +321,72 @@ fn dispatch_freshness_aware(engine: &mut Engine, name: &str, arguments: &Value) 
         }
     }
     Ok(response)
+}
+
+struct RefreshOutcome {
+    mode: &'static str,
+    epoch: Option<u64>,
+    daemon_pid: Option<u32>,
+    error: Option<anyhow::Error>,
+}
+
+fn refresh_index(engine: &mut Engine) -> RefreshOutcome {
+    const DAEMON_CATCH_UP: Duration = Duration::from_millis(500);
+    match daemon::status(engine.root()) {
+        Ok(status) if status.running => {
+            let daemon_pid = status.state.as_ref().map(|state| state.pid);
+            let deadline = Instant::now() + DAEMON_CATCH_UP;
+            loop {
+                match engine.status() {
+                    Ok(project) if project.pending_files == 0 => {
+                        return RefreshOutcome {
+                            mode: "daemon",
+                            epoch: Some(project.epoch),
+                            daemon_pid,
+                            error: None,
+                        };
+                    }
+                    Ok(_) if Instant::now() < deadline => {
+                        thread::sleep(Duration::from_millis(25));
+                    }
+                    Ok(_) | Err(_) => break,
+                }
+            }
+            match engine.sync() {
+                Ok(report) => RefreshOutcome {
+                    mode: "foreground-fallback",
+                    epoch: Some(report.epoch),
+                    daemon_pid,
+                    error: None,
+                },
+                Err(error) => RefreshOutcome {
+                    mode: "foreground-fallback",
+                    epoch: engine.status().ok().map(|project| project.epoch),
+                    daemon_pid,
+                    error: Some(error),
+                },
+            }
+        }
+        Ok(_) => foreground_refresh(engine, "foreground"),
+        Err(_) => foreground_refresh(engine, "foreground-fallback"),
+    }
+}
+
+fn foreground_refresh(engine: &mut Engine, mode: &'static str) -> RefreshOutcome {
+    match engine.sync() {
+        Ok(report) => RefreshOutcome {
+            mode,
+            epoch: Some(report.epoch),
+            daemon_pid: None,
+            error: None,
+        },
+        Err(error) => RefreshOutcome {
+            mode,
+            epoch: engine.status().ok().map(|project| project.epoch),
+            daemon_pid: None,
+            error: Some(error),
+        },
+    }
 }
 
 fn dispatch_tool(engine: &Engine, name: &str, arguments: &Value) -> Result<Value> {
@@ -747,6 +822,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(current["_meta"]["freshness"]["state"], "current");
+        assert_eq!(current["_meta"]["freshness"]["mode"], "foreground");
         assert!(!current["content"][0]["text"]
             .as_str()
             .unwrap()

@@ -1,8 +1,9 @@
 use serde_json::Value;
 use std::{
     fs,
+    io::Write,
     path::Path,
-    process::Command,
+    process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -56,6 +57,28 @@ fn daemon_start_status_catch_up_and_stop_are_idempotent() {
         thread::sleep(Duration::from_millis(50));
     }
 
+    let mcp = run_mcp(
+        temp.path(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "codegraph_search",
+                "arguments": { "query": "afterDaemonSync" }
+            }
+        }),
+    );
+    assert_eq!(mcp["result"]["_meta"]["freshness"]["state"], "current");
+    assert_eq!(mcp["result"]["_meta"]["freshness"]["mode"], "daemon");
+    assert!(mcp["result"]["_meta"]["freshness"]["daemonPid"]
+        .as_u64()
+        .is_some());
+    assert_eq!(
+        mcp["result"]["structuredContent"][0]["symbol"]["name"],
+        "afterDaemonSync"
+    );
+
     let stopped = run_json(
         temp.path(),
         &["daemon", "stop", "--path", temp.path().to_str().unwrap()],
@@ -69,6 +92,73 @@ fn daemon_start_status_catch_up_and_stop_are_idempotent() {
         &["daemon", "stop", "--path", temp.path().to_str().unwrap()],
     );
     assert_eq!(duplicate_stop["stopped"], false);
+
+    let restarted = run_json(
+        temp.path(),
+        &[
+            "daemon",
+            "start",
+            "--path",
+            temp.path().to_str().unwrap(),
+            "--debounce-ms",
+            "25",
+        ],
+    );
+    assert_eq!(restarted["started"], true);
+    fs::write(temp.path().join("broken.ts"), [0xff, 0xfe, 0xfd]).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let status = run_json(
+            temp.path(),
+            &["daemon", "status", "--path", temp.path().to_str().unwrap()],
+        );
+        if !status["running"].as_bool().unwrap() {
+            assert_eq!(status["state"]["phase"], "stopped");
+            assert!(status["state"]["error"].as_str().is_some());
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon did not release its lock after an indexing failure"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    fs::remove_file(temp.path().join("broken.ts")).unwrap();
+    let recovered = run_json(
+        temp.path(),
+        &["daemon", "start", "--path", temp.path().to_str().unwrap()],
+    );
+    assert_eq!(recovered["started"], true);
+    let final_stop = run_json(
+        temp.path(),
+        &["daemon", "stop", "--path", temp.path().to_str().unwrap()],
+    );
+    assert_eq!(final_stop["stopped"], true);
+}
+
+fn run_mcp(current_dir: &Path, request: Value) -> Value {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_structurely"))
+        .args(["serve", "--mcp", "--path", current_dir.to_str().unwrap()])
+        .current_dir(current_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        serde_json::to_writer(&mut *stdin, &request).unwrap();
+        stdin.write_all(b"\n").unwrap();
+    }
+    drop(child.stdin.take());
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "MCP failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(output.stdout.split(|byte| *byte == b'\n').next().unwrap()).unwrap()
 }
 
 fn run_json(current_dir: &Path, arguments: &[&str]) -> Value {

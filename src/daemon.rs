@@ -72,7 +72,12 @@ pub fn start(project: impl AsRef<Path>, debounce: Duration) -> Result<DaemonStar
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let current = status(&project)?;
-        if current.running {
+        if current.running
+            && current
+                .state
+                .as_ref()
+                .is_some_and(|state| state.phase == "running")
+        {
             return Ok(DaemonStart {
                 started: true,
                 status: current,
