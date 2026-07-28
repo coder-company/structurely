@@ -51,7 +51,8 @@ Semantic extraction has a separate adapter seam after language parsing.
 Adapters consume the syntax tree and append ordinary symbols, relationships,
 and pending relationships to the same file-local Fact set. The current
 adapters cover named JavaScript callback registrations, Express routes,
-FastAPI decorators, and literal event registration/dispatch. This keeps
+FastAPI decorators, NestJS HTTP controllers, and literal event
+registration/dispatch. This keeps
 framework policy out of the storage Module while letting every adapter reuse
 import scope, alias resolution, evidence, atomic publication, and graph
 traversal.
