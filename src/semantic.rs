@@ -18,6 +18,7 @@ pub(crate) fn enrich_file_facts(root: Node<'_>, source: &[u8], facts: &mut FileF
             collect_javascript_function_references(root, source, facts);
             collect_nestjs_routes(root, source, facts);
             if facts.language == Language::ArkTs {
+                collect_arkui_routes(root, source, facts);
                 collect_arkui_semantics(root, source, facts);
                 remove_arkui_intrinsic_calls(facts);
             }
@@ -235,7 +236,6 @@ fn collect_arkui_runtime_calls(
             }
         }
     } else if node.kind() == "call_expression" {
-        collect_arkui_route_call(node, source, facts);
         if let Some(function) = node.child_by_field_name("function") {
             if function.kind() == "member_expression" {
                 let method = function
@@ -278,14 +278,50 @@ fn collect_arkui_runtime_calls(
     }
 }
 
-fn collect_arkui_route_call(node: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+fn collect_arkui_routes(root: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+    let bindings = arkui_router_bindings(root, source);
+    if bindings.is_empty() {
+        return;
+    }
+    collect_arkui_route_calls(root, source, &bindings, facts);
+}
+
+fn collect_arkui_route_calls(
+    node: Node<'_>,
+    source: &[u8],
+    bindings: &HashSet<String>,
+    facts: &mut FileFacts,
+) {
+    if node.kind() == "call_expression" {
+        collect_arkui_route_call(node, source, bindings, facts);
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_arkui_route_calls(child, source, bindings, facts);
+    }
+}
+
+fn collect_arkui_route_call(
+    node: Node<'_>,
+    source: &[u8],
+    bindings: &HashSet<String>,
+    facts: &mut FileFacts,
+) {
     let Some(function) = node.child_by_field_name("function") else {
         return;
     };
-    if function.kind() != "member_expression"
-        || function
-            .child_by_field_name("object")
-            .is_none_or(|object| text(object, source) != "router")
+    if function.kind() != "member_expression" {
+        return;
+    }
+    let Some(receiver) = function
+        .child_by_field_name("object")
+        .filter(|receiver| receiver.kind() == "identifier")
+        .map(|receiver| text(receiver, source))
+        .filter(|receiver| bindings.contains(receiver))
+    else {
+        return;
+    };
+    if arkui_router_binding_is_shadowed(node, &receiver, source)
         || function
             .child_by_field_name("property")
             .is_none_or(|property| {
@@ -346,23 +382,173 @@ fn collect_arkui_route_call(node: Node<'_>, source: &[u8], facts: &mut FileFacts
     });
 }
 
-fn arkui_route_target_hint(source_file: &str, url: &str) -> Option<String> {
-    let marker = "/src/main/ets/";
-    let module_end = source_file.rfind(marker)? + marker.len();
-    let route = url.trim().trim_start_matches('/').trim_end_matches(".ets");
-    let route_path = Path::new(route);
-    if route.is_empty()
-        || route_path.is_absolute()
-        || route_path.components().any(|component| {
-            !matches!(
-                component,
-                std::path::Component::Normal(_) | std::path::Component::CurDir
-            )
+fn arkui_router_bindings(node: Node<'_>, source: &[u8]) -> HashSet<String> {
+    let mut bindings = HashSet::new();
+    collect_arkui_router_bindings(node, source, &mut bindings);
+    bindings
+}
+
+fn collect_arkui_router_bindings(node: Node<'_>, source: &[u8], bindings: &mut HashSet<String>) {
+    if node.kind() == "import_statement" {
+        let module = node
+            .child_by_field_name("source")
+            .and_then(|source_node| string_literal(source_node, source));
+        if matches!(module.as_deref(), Some("@ohos.router" | "@kit.ArkUI")) {
+            let statement = text(node, source);
+            let clause = statement
+                .strip_prefix("import")
+                .and_then(|body| body.rsplit_once(" from ").map(|(clause, _)| clause.trim()));
+            if let Some(clause) = clause.filter(|clause| !clause.starts_with("type ")) {
+                if module.as_deref() == Some("@ohos.router") {
+                    if let Some(binding) = arkui_default_or_namespace_binding(clause) {
+                        bindings.insert(binding);
+                    }
+                } else {
+                    bindings.extend(arkui_named_router_bindings(clause));
+                }
+            }
+        }
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_arkui_router_bindings(child, source, bindings);
+    }
+}
+
+fn arkui_default_or_namespace_binding(clause: &str) -> Option<String> {
+    let candidate = clause
+        .strip_prefix("* as ")
+        .unwrap_or(clause)
+        .split([',', ' ', '\t', '\r', '\n'])
+        .find(|part| !part.is_empty())?;
+    is_javascript_identifier(candidate).then(|| candidate.to_owned())
+}
+
+fn arkui_named_router_bindings(clause: &str) -> Vec<String> {
+    let Some(body) = clause
+        .strip_prefix('{')
+        .and_then(|body| body.strip_suffix('}'))
+    else {
+        return Vec::new();
+    };
+    body.split(',')
+        .filter_map(|specifier| {
+            let mut words = specifier.split_whitespace();
+            (words.next()? == "router")
+                .then(|| match (words.next(), words.next()) {
+                    (Some("as"), Some(alias)) => alias,
+                    (None, None) => "router",
+                    _ => "",
+                })
+                .filter(|binding| is_javascript_identifier(binding))
+                .map(str::to_owned)
         })
+        .collect()
+}
+
+fn is_javascript_identifier(value: &str) -> bool {
+    let mut characters = value.chars();
+    characters
+        .next()
+        .is_some_and(|first| first == '_' || first == '$' || first.is_ascii_alphabetic())
+        && characters.all(|character| {
+            character == '_' || character == '$' || character.is_ascii_alphanumeric()
+        })
+}
+
+fn arkui_router_binding_is_shadowed(call: Node<'_>, binding: &str, source: &[u8]) -> bool {
+    let mut root = call;
+    while let Some(parent) = root.parent() {
+        root = parent;
+    }
+    if arkui_scope_declares_binding(root, call, binding, source) {
+        return true;
+    }
+    let mut ancestor = call.parent();
+    while let Some(scope) = ancestor {
+        if let Some(parameters) = scope.child_by_field_name("parameters") {
+            let mut identifiers = Vec::new();
+            collect_identifier_texts(parameters, source, &mut identifiers);
+            if identifiers.iter().any(|identifier| identifier == binding) {
+                return true;
+            }
+        }
+        ancestor = scope.parent();
+    }
+    false
+}
+
+fn arkui_scope_declares_binding(
+    node: Node<'_>,
+    call: Node<'_>,
+    binding: &str,
+    source: &[u8],
+) -> bool {
+    if matches!(
+        node.kind(),
+        "variable_declarator" | "function_declaration" | "class_declaration"
+    ) && node
+        .child_by_field_name("name")
+        .is_some_and(|name| text(name, source) == binding)
     {
+        return true;
+    }
+    let is_nested_callable = matches!(
+        node.kind(),
+        "function_declaration"
+            | "function_expression"
+            | "arrow_function"
+            | "method_definition"
+            | "generator_function_declaration"
+    );
+    if is_nested_callable
+        && !(node.start_byte() <= call.start_byte() && node.end_byte() >= call.end_byte())
+    {
+        return false;
+    }
+    let mut cursor = node.walk();
+    let declared = node
+        .named_children(&mut cursor)
+        .any(|child| arkui_scope_declares_binding(child, call, binding, source));
+    declared
+}
+
+fn collect_identifier_texts(node: Node<'_>, source: &[u8], output: &mut Vec<String>) {
+    if node.kind() == "identifier" {
+        output.push(text(node, source));
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_identifier_texts(child, source, output);
+    }
+}
+
+fn arkui_route_target_hint(_source_file: &str, url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.contains(['?', '#', '\\']) {
         return None;
     }
-    Some(format!("{}{}", &source_file[..module_end], route))
+    let route = trimmed
+        .strip_prefix('/')
+        .unwrap_or(trimmed)
+        .trim_end_matches(".ets");
+    let mut normalized = Vec::new();
+    for component in Path::new(route).components() {
+        match component {
+            std::path::Component::Normal(segment) => {
+                let segment = segment.to_str()?;
+                if segment.is_empty() {
+                    return None;
+                }
+                normalized.push(segment);
+            }
+            std::path::Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    (!normalized.is_empty()).then(|| format!("arkui-route:{}", normalized.join("/")))
 }
 
 fn arkui_target_is_project_defined(target: &str, facts: &FileFacts) -> bool {

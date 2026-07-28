@@ -114,6 +114,10 @@ def predicates(
                 "RouterDetail",
                 "harmony/entry/src/main/ets/pages/RouterDetail.ets",
             )
+        )
+        and (
+            not require_structurely_evidence
+            or "framework/arkui-route" in result_text(capture["arkui-route"])
         ),
         "impact": "showUser" in result_text(capture["impact"]),
         "node-window": "showUser" in result_text(capture["node-window"]),

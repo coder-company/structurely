@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::Serialize;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -761,7 +761,7 @@ impl Store {
                     .push((candidate.3, candidate.4, candidate.5, candidate.6));
             }
         }
-        let arkui_entry_candidates = {
+        let (arkui_entry_candidates, arkui_module_roots) = {
             let mut statement = tx.prepare(
                 "SELECT s.public_id,s.qualified_name,s.file_id,f.path
                  FROM unresolved_references u
@@ -781,7 +781,15 @@ impl Store {
                     ))
                 })?
                 .collect::<rusqlite::Result<Vec<Candidate>>>()?;
-            candidates
+            let mut by_route = HashMap::<String, Vec<Candidate>>::new();
+            let mut module_roots = HashSet::new();
+            for candidate in candidates {
+                if let Some((module, route)) = arkui_route_parts(&candidate.3) {
+                    module_roots.insert(module);
+                    by_route.entry(route).or_default().push(candidate);
+                }
+            }
+            (by_route, module_roots)
         };
         let mut candidate_cache = HashMap::<
             (String, String, i64, String, String, String),
@@ -815,19 +823,21 @@ impl Store {
                 target_file_hint.clone(),
                 provenance.clone(),
             );
+            let is_arkui_route = provenance == "framework/arkui-route";
             if !candidate_cache.contains_key(&cache_key) {
                 let direct = direct_candidates
                     .get(&(callee_name.clone(), language.clone()))
                     .map(Vec::as_slice)
                     .unwrap_or_default();
                 let receiver_qualified = format!("{receiver_type}.{callee_name}");
-                let is_arkui_route = provenance == "framework/arkui-route";
                 let mut targets = if is_arkui_route {
-                    arkui_entry_candidates
-                        .iter()
+                    target_file_hint
+                        .strip_prefix("arkui-route:")
+                        .and_then(|route| arkui_entry_candidates.get(route))
+                        .into_iter()
+                        .flatten()
                         .filter(|candidate| {
-                            !target_file_hint.is_empty()
-                                && module_hint_matches(&target_file_hint, &candidate.3)
+                            arkui_route_candidate_matches(&file, &candidate.3, &arkui_module_roots)
                         })
                         .map(|candidate| (candidate.0.clone(), candidate.1.clone(), 0))
                         .collect::<Vec<_>>()
@@ -888,6 +898,9 @@ impl Store {
                         .then_with(|| left.0.cmp(&right.0))
                 });
                 targets.dedup_by(|left, right| left.0 == right.0);
+                if is_arkui_route && targets.len() != 1 {
+                    targets.clear();
+                }
                 candidate_cache.insert(cache_key.clone(), targets);
             }
             let targets = &candidate_cache[&cache_key];
@@ -909,11 +922,12 @@ impl Store {
                 (3, 1) => 0.75,
                 _ => 0.35,
             };
-            let scope = match best_rank {
-                0 if !target_file_hint.is_empty() => "imported package",
-                0 => "receiver type",
-                1 => "same-file lexical scope",
-                2 => "explicit import scope",
+            let scope = match (is_arkui_route, best_rank) {
+                (true, 0) => "exact ArkUI entry page",
+                (false, 0) if !target_file_hint.is_empty() => "imported package",
+                (false, 0) => "receiver type",
+                (false, 1) => "same-file lexical scope",
+                (false, 2) => "explicit import scope",
                 _ => "language-wide fallback",
             };
             for (target_id, qualified_name, _) in
@@ -1177,6 +1191,7 @@ impl Store {
                     u.evidence_line,s.language,u.file_id
              FROM unresolved_references u
              JOIN symbols s ON s.public_id=u.source_public_id
+             WHERE u.provenance<>'framework/arkui-entry'
              ORDER BY CASE WHEN u.kind='imports' THEN 0 ELSE 1 END,
                       u.evidence_file,u.evidence_line,u.id",
         )?;
@@ -1728,6 +1743,49 @@ fn module_hint_matches(hint: &str, candidate: &str) -> bool {
         || candidate_without_extension.starts_with(&format!("{hint}/"))
         || candidate_without_extension.ends_with(&format!("/{hint}"))
         || candidate_without_extension.ends_with(&format!("/{hint}/index"))
+}
+
+fn arkui_route_parts(path: &str) -> Option<(String, String)> {
+    let normalized = path.replace('\\', "/");
+    let components = normalized.split('/').collect::<Vec<_>>();
+    let markers = components
+        .windows(3)
+        .enumerate()
+        .filter_map(|(index, window)| (window == ["src", "main", "ets"]).then_some(index))
+        .collect::<Vec<_>>();
+    let marker_start = *markers.first()?;
+    if markers.len() != 1 {
+        return None;
+    }
+    let module = components[..marker_start].join("/");
+    let route_with_extension = components[marker_start + 3..].join("/");
+    let route = route_with_extension
+        .strip_suffix(".ets")
+        .unwrap_or(&route_with_extension)
+        .to_owned();
+    (!route.is_empty()).then_some((module, route))
+}
+
+fn arkui_route_candidate_matches(
+    caller: &str,
+    candidate: &str,
+    module_roots: &HashSet<String>,
+) -> bool {
+    let Some((candidate_module, _)) = arkui_route_parts(candidate) else {
+        return false;
+    };
+    let normalized_caller = caller.replace('\\', "/");
+    let caller_module = module_roots
+        .iter()
+        .filter(|module| {
+            module.is_empty()
+                || normalized_caller == **module
+                || normalized_caller
+                    .strip_prefix(module.as_str())
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        })
+        .max_by_key(|module| module.len());
+    caller_module.is_some_and(|module| module == &candidate_module)
 }
 
 fn identifier_segments(value: &str) -> Vec<String> {

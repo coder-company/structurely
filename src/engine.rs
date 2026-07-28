@@ -2683,7 +2683,8 @@ mod tests {
         .unwrap();
         fs::write(
             temp.path().join("first/src/main/ets/pages/Home.ets"),
-            "@Entry\n\
+            "import router from '@ohos.router'\n\
+             @Entry\n\
              @Component\n\
              struct Home {\n\
                openDetail() { router.pushUrl({ url: 'pages/Detail' }) }\n\
@@ -2730,6 +2731,171 @@ mod tests {
                 .iter()
                 .all(|(_, evidence)| evidence.provenance != "framework/arkui-route"));
         }
+    }
+
+    #[test]
+    fn arkui_routes_cover_import_aliases_utilities_and_normalized_literals() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("entry/src/main/ets/pages")).unwrap();
+        fs::create_dir_all(temp.path().join("entry/src/main/ets/utils")).unwrap();
+        fs::write(
+            temp.path().join("entry/src/main/ets/pages/Detail.ets"),
+            "@Entry\n@Component\nstruct Detail { build() { Text('detail') } }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("entry/src/main/ets/utils/navigation.ets"),
+            "import nav from '@ohos.router'\n\
+             export function openDetail() { nav.pushUrl({ url: './pages/Detail.ets' }) }\n\
+             export function replaceDetail() { nav.replaceUrl({ url: '/pages/Detail' }) }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        for caller_name in ["openDetail", "replaceDetail"] {
+            let caller = engine
+                .search(caller_name, 10)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.qualified_name == caller_name)
+                .unwrap()
+                .symbol;
+            let routes = engine
+                .callees(&caller.id)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, evidence)| evidence.provenance == "framework/arkui-route")
+                .collect::<Vec<_>>();
+            assert_eq!(routes.len(), 1);
+            assert_eq!(routes[0].0.qualified_name, "Detail");
+            assert_eq!(routes[0].0.file, "entry/src/main/ets/pages/Detail.ets");
+            assert_eq!(routes[0].1.confidence, 0.97);
+            assert!(routes[0].1.explanation.contains("exact ArkUI entry page"));
+        }
+    }
+
+    #[test]
+    fn arkui_routes_require_verified_unshadowed_router_bindings() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("entry/src/main/ets/pages")).unwrap();
+        fs::write(
+            temp.path().join("entry/src/main/ets/pages/Detail.ets"),
+            "@Entry\n@Component\nstruct Detail { build() { Text('detail') } }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("entry/src/main/ets/pages/Safe.ets"),
+            "import nav from '@ohos.router'\n\
+             export function safe() { nav.pushUrl({ url: 'pages/Detail' }) }\n\
+             export function parameter(nav: LocalRouter) { nav.pushUrl({ url: 'pages/Detail' }) }\n\
+             export function local() { const nav = fakeRouter; nav.pushUrl({ url: 'pages/Detail' }) }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("entry/src/main/ets/pages/Lookalike.ets"),
+            "export function lookalike() { router.pushUrl({ url: 'pages/Detail' }) }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        for (caller_name, expected) in [
+            ("safe", 1),
+            ("parameter", 0),
+            ("local", 0),
+            ("lookalike", 0),
+        ] {
+            let caller = engine
+                .search(caller_name, 10)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.qualified_name == caller_name)
+                .unwrap()
+                .symbol;
+            assert_eq!(
+                engine
+                    .callees(&caller.id)
+                    .unwrap()
+                    .iter()
+                    .filter(|(_, evidence)| evidence.provenance == "framework/arkui-route")
+                    .count(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn arkui_routes_fail_closed_on_ambiguous_entries_and_clean_incrementally() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("entry/src/main/ets/pages")).unwrap();
+        let target = temp.path().join("entry/src/main/ets/pages/Detail.ets");
+        let caller_file = temp.path().join("entry/src/main/ets/pages/Home.ets");
+        fs::write(
+            &target,
+            "@Entry\n@Component\nstruct First { build() {} }\n\
+             @Entry\n@Component\nstruct Second { build() {} }\n",
+        )
+        .unwrap();
+        fs::write(
+            &caller_file,
+            "import router from '@ohos.router'\n\
+             export function openDetail() { router.pushUrl({ url: 'pages/Detail' }) }\n",
+        )
+        .unwrap();
+
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let route_count = |engine: &Engine| {
+            let caller = engine
+                .search("openDetail", 10)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.qualified_name == "openDetail")
+                .unwrap()
+                .symbol;
+            engine
+                .callees(&caller.id)
+                .unwrap()
+                .iter()
+                .filter(|(_, evidence)| evidence.provenance == "framework/arkui-route")
+                .count()
+        };
+        assert_eq!(route_count(&engine), 0);
+
+        fs::write(
+            &target,
+            "@Entry\n@Component\nstruct Detail { build() { Text('detail') } }\n",
+        )
+        .unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 1);
+        assert_eq!(route_count(&engine), 1);
+
+        fs::write(
+            &target,
+            "@Component\nstruct Detail { build() { Text('plain') } }\n",
+        )
+        .unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 1);
+        assert_eq!(route_count(&engine), 0);
+
+        fs::write(
+            &target,
+            "@Entry\n@Component\nstruct Detail { build() { Text('detail') } }\n",
+        )
+        .unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 1);
+        assert_eq!(route_count(&engine), 1);
+
+        fs::remove_file(&target).unwrap();
+        assert_eq!(engine.sync().unwrap().files_deleted, 1);
+        assert_eq!(route_count(&engine), 0);
+
+        fs::write(
+            &caller_file,
+            "import router from '@ohos.router'\n\
+             export function openDetail() { return 'closed' }\n",
+        )
+        .unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 1);
+        assert_eq!(route_count(&engine), 0);
     }
 
     #[test]
