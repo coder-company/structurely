@@ -357,6 +357,21 @@
             "\"confidence\": 0.97",
             "\"line\": 35"
           ]
+        },
+        {
+          "command": "callees",
+          "query": "ActionBarButton.build",
+          "file": "code/SystemFeature/FileManagement/Photos/entry/src/main/ets/components/ActionBarButton.ets",
+          "contains": [
+            "\"qualified_name\": \"ActionBarButton.PopupBuilder\"",
+            "\"provenance\": \"framework/arkui-builder-registration\""
+          ],
+          "recordContains": [
+            "\"qualified_name\": \"ActionBarButton.PopupBuilder\"",
+            "\"provenance\": \"framework/arkui-builder-registration\"",
+            "\"confidence\": 0.97",
+            "\"line\": 99"
+          ]
         }
       ]
     }

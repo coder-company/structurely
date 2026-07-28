@@ -914,6 +914,22 @@ fn receiver_type_hint(
     ) {
         return constructor_type(receiver, source);
     }
+    if receiver.kind() == "member_expression"
+        && receiver
+            .child_by_field_name("object")
+            .is_some_and(|object| node_text(object, source) == "this")
+    {
+        let field = receiver
+            .child_by_field_name("property")
+            .map(|property| format!("this.{}", node_text(property, source)))?;
+        return receiver_bindings.get(&field).and_then(|bindings| {
+            bindings
+                .iter()
+                .rev()
+                .find(|(position, _)| *position < call.start_byte())
+                .map(|(_, receiver_type)| receiver_type.clone())
+        });
+    }
     if !matches!(receiver.kind(), "identifier" | "simple_identifier" | "name") {
         return None;
     }
@@ -932,6 +948,23 @@ fn collect_receiver_bindings(
     source: &[u8],
     output: &mut HashMap<String, Vec<(usize, String)>>,
 ) {
+    if node.kind() == "public_field_definition" {
+        if let Some(name) = node.child_by_field_name("name") {
+            let receiver_type = node
+                .child_by_field_name("value")
+                .and_then(|value| constructor_type(value, source))
+                .or_else(|| {
+                    node.child_by_field_name("type")
+                        .map(|kind| node_text(kind, source))
+                });
+            if let Some(receiver_type) = receiver_type {
+                output
+                    .entry(format!("this.{}", node_text(name, source)))
+                    .or_default()
+                    .push((node.start_byte(), receiver_type));
+            }
+        }
+    }
     if matches!(
         node.kind(),
         "variable_declarator"

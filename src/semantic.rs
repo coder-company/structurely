@@ -27,6 +27,7 @@ pub(crate) fn enrich_file_facts(root: Node<'_>, source: &[u8], facts: &mut FileF
             if facts.language == Language::ArkTs {
                 collect_arkui_routes(root, source, facts);
                 collect_arkui_style_helper_calls(root, source, facts);
+                collect_arkui_builder_registrations(root, source, facts);
                 collect_ohos_emitter_semantics(root, source, facts);
                 collect_arkui_semantics(root, source, facts);
                 remove_arkui_intrinsic_calls(facts);
@@ -791,6 +792,198 @@ struct ArkuiStyleHelper {
     target: Symbol,
     owner: Option<String>,
     extended_intrinsic: Option<String>,
+}
+
+#[derive(Clone)]
+struct ArkuiBuilder {
+    target: Symbol,
+    owner: Option<String>,
+}
+
+fn collect_arkui_builder_registrations(root: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+    let mut builders = Vec::new();
+    collect_arkui_builders(root, source, facts, &mut builders);
+    if builders.is_empty() {
+        return;
+    }
+    let mut emitted = HashSet::new();
+    collect_arkui_builder_registration_calls(root, source, facts, &builders, &mut emitted);
+}
+
+fn collect_arkui_builders(
+    node: Node<'_>,
+    source: &[u8],
+    facts: &FileFacts,
+    output: &mut Vec<ArkuiBuilder>,
+) {
+    if matches!(node.kind(), "function_declaration" | "method_definition")
+        && has_decorator(node, "Builder", source)
+    {
+        let name = node
+            .child_by_field_name("name")
+            .map(|name| text(name, source));
+        let owner = enclosing_arkui_struct_name(node, source);
+        let candidates = facts
+            .symbols
+            .iter()
+            .filter(|symbol| {
+                name.as_deref() == Some(symbol.name.as_str())
+                    && matches!(symbol.kind, SymbolKind::Function | SymbolKind::Method)
+                    && owner.as_deref().map_or_else(
+                        || symbol.qualified_name == symbol.name,
+                        |owner| symbol.qualified_name == format!("{owner}.{}", symbol.name),
+                    )
+            })
+            .collect::<Vec<_>>();
+        if candidates.len() == 1 {
+            let target = candidates[0];
+            output.push(ArkuiBuilder {
+                target: target.clone(),
+                owner: target
+                    .qualified_name
+                    .rsplit_once('.')
+                    .map(|(owner, _)| owner.to_owned()),
+            });
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_arkui_builders(child, source, facts, output);
+    }
+}
+
+fn enclosing_arkui_struct_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut ancestor = node.parent();
+    while let Some(candidate) = ancestor {
+        if candidate.kind() == "struct_declaration" {
+            return candidate
+                .child_by_field_name("name")
+                .map(|name| text(name, source));
+        }
+        ancestor = candidate.parent();
+    }
+    None
+}
+
+fn collect_arkui_builder_registration_calls(
+    node: Node<'_>,
+    source: &[u8],
+    facts: &mut FileFacts,
+    builders: &[ArkuiBuilder],
+    emitted: &mut HashSet<(String, String, usize)>,
+) {
+    if matches!(
+        node.kind(),
+        "call_expression" | "arkui_component_expression"
+    ) {
+        enrich_arkui_builder_registration(node, source, facts, builders, emitted);
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_arkui_builder_registration_calls(child, source, facts, builders, emitted);
+    }
+}
+
+fn enrich_arkui_builder_registration(
+    call: Node<'_>,
+    source: &[u8],
+    facts: &mut FileFacts,
+    builders: &[ArkuiBuilder],
+    emitted: &mut HashSet<(String, String, usize)>,
+) {
+    let method = if call.kind() == "arkui_component_expression" {
+        call.child_by_field_name("property")
+            .map(|property| text(property, source))
+    } else {
+        call.child_by_field_name("function")
+            .filter(|function| function.kind() == "member_expression")
+            .and_then(|function| function.child_by_field_name("property"))
+            .map(|property| text(property, source))
+    };
+    if method.as_deref() != Some("bindPopup") {
+        return;
+    }
+    let arguments = if call.kind() == "arkui_component_expression" {
+        let mut cursor = call.walk();
+        call.children_by_field_name("arguments", &mut cursor).last()
+    } else {
+        call.child_by_field_name("arguments")
+    };
+    let Some(arguments) = arguments else {
+        return;
+    };
+    let caller = owning_callable_symbol(call, &facts.symbols)
+        .or_else(|| facts.symbols.first())
+        .cloned()
+        .expect("file symbol");
+    let caller_owner = caller
+        .qualified_name
+        .rsplit_once('.')
+        .map(|(owner, _)| owner);
+    let mut argument_cursor = arguments.walk();
+    for object in arguments
+        .named_children(&mut argument_cursor)
+        .filter(|argument| argument.kind() == "object")
+    {
+        let mut pair_cursor = object.walk();
+        for pair in object
+            .named_children(&mut pair_cursor)
+            .filter(|child| child.kind() == "pair")
+        {
+            let Some(key) = pair.child_by_field_name("key") else {
+                continue;
+            };
+            if text(key, source).trim_matches(['\'', '"']) != "builder" {
+                continue;
+            }
+            let Some(value) = pair
+                .child_by_field_name("value")
+                .filter(|value| value.kind() == "member_expression")
+            else {
+                continue;
+            };
+            if value
+                .child_by_field_name("object")
+                .is_none_or(|object| text(object, source) != "this")
+            {
+                continue;
+            }
+            let Some(name) = value
+                .child_by_field_name("property")
+                .map(|property| text(property, source))
+            else {
+                continue;
+            };
+            let candidates = builders
+                .iter()
+                .filter(|builder| {
+                    builder.target.name == name && builder.owner.as_deref() == caller_owner
+                })
+                .collect::<Vec<_>>();
+            if candidates.len() != 1 {
+                continue;
+            }
+            let target = &candidates[0].target;
+            if !emitted.insert((caller.id.clone(), target.id.clone(), pair.start_byte())) {
+                continue;
+            }
+            facts.relationships.push(Relationship {
+                source_id: caller.id.clone(),
+                target_id: target.id.clone(),
+                kind: RelationshipKind::Calls,
+                evidence: Evidence::new(
+                    "framework/arkui-builder-registration",
+                    0.97,
+                    format!(
+                        "{} registers decorated ArkUI builder {} with bindPopup",
+                        caller.qualified_name, target.qualified_name
+                    ),
+                    &facts.path,
+                    pair.start_position().row + 1,
+                ),
+            });
+        }
+    }
 }
 
 fn collect_arkui_style_helper_calls(root: Node<'_>, source: &[u8], facts: &mut FileFacts) {

@@ -1380,6 +1380,35 @@ mod tests {
     }
 
     #[test]
+    fn arkts_typed_fields_disambiguate_this_member_calls() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("Page.ets"),
+            "class UserService { save() {} }\n\
+             class AuditService { save() {} }\n\
+             @Component\n\
+             struct Page {\n\
+               private service: UserService = new UserService()\n\
+               persist() { this.service.save() }\n\
+               build() { Button('save').onClick(() => this.persist()) }\n\
+             }\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let persist = engine
+            .search("Page.persist", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.qualified_name == "Page.persist")
+            .unwrap()
+            .symbol;
+        let callees = engine.callees(&persist.id).unwrap();
+        assert_eq!(callees.len(), 1);
+        assert_eq!(callees[0].0.qualified_name, "UserService.save");
+        assert_eq!(callees[0].1.confidence, 0.995);
+    }
+
+    #[test]
     fn receiver_resolution_is_precise_across_java_python_and_rust() {
         for (file, source, caller, expected) in [
             (
@@ -3065,6 +3094,68 @@ mod tests {
         assert_eq!(engine.sync().unwrap().files_deleted, 1);
         assert!(emitter_targets(&engine, "sendFive").is_empty());
         assert!(emitter_targets(&engine, "sendStringFive").is_empty());
+    }
+
+    #[test]
+    fn arkui_popup_builder_registrations_require_same_owner_decorated_targets() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("Popup.ets");
+        fs::write(
+            &source,
+            "@Component\n\
+             struct PopupCard {\n\
+               @State open: boolean = false\n\
+               @Builder PopupBuilder() { Text('popup') }\n\
+               PlainBuilder() { Text('plain') }\n\
+               build() {\n\
+                 Row().bindPopup(this.open, { builder: this.PopupBuilder })\n\
+                 Row().bindPopup(this.open, { builder: this.PlainBuilder })\n\
+                 customApi({ builder: this.PopupBuilder })\n\
+               }\n\
+             }\n\
+             @Component\n\
+             struct OtherCard {\n\
+               @Builder PopupBuilder() { Text('other') }\n\
+               build() { Row() }\n\
+             }\n",
+        )
+        .unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let targets = |engine: &Engine| {
+            let build = engine
+                .search("PopupCard.build", 10)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.qualified_name == "PopupCard.build")
+                .unwrap()
+                .symbol;
+            engine
+                .callees(&build.id)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, evidence)| {
+                    evidence.provenance == "framework/arkui-builder-registration"
+                })
+                .collect::<Vec<_>>()
+        };
+        let registered = targets(&engine);
+        assert_eq!(registered.len(), 1);
+        assert_eq!(registered[0].0.qualified_name, "PopupCard.PopupBuilder");
+        assert_eq!(registered[0].1.confidence, 0.97);
+        assert_eq!(registered[0].1.line, 7);
+
+        fs::write(
+            &source,
+            "@Component\n\
+             struct PopupCard {\n\
+               @State open: boolean = false\n\
+               @Builder PopupBuilder() { Text('popup') }\n\
+               build() { Row() }\n\
+             }\n",
+        )
+        .unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 1);
+        assert!(targets(&engine).is_empty());
     }
 
     #[test]
