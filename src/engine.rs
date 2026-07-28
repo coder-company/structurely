@@ -2449,9 +2449,11 @@ mod tests {
                change() { this.value++ }\n\
                deferred() { const later = () => { this.value++ } }\n\
                shadowed() { let value = 0; value++ }\n\
+               fieldHandler: () => void = () => {}\n\
                handle() {}\n\
                build() {\n\
                  Button('ok').onClick(this.handle)\n\
+                 Button('field').onClick(this.fieldHandler)\n\
                  Button('no').onward(this.handle)\n\
                }\n\
              }\n\
@@ -2496,6 +2498,11 @@ mod tests {
                 .count(),
             1
         );
+        assert!(build_edges.iter().any(|(target, evidence)| {
+            target.qualified_name == "Modern.fieldHandler"
+                && evidence.provenance == "framework/arkui-event"
+                && evidence.confidence == 0.97
+        }));
         assert!(engine
             .callees(&symbol("callProjectText").id)
             .unwrap()

@@ -185,10 +185,10 @@ fn collect_arkui_runtime_calls(
             let handler = arguments
                 .named_children(&mut cursor)
                 .next()
-                .and_then(|argument| referenced_callable_name(argument, source));
-            if let Some(handler) =
-                handler.filter(|name| arkui_component_has_method(component_name, name, facts))
-            {
+                .and_then(|argument| {
+                    arkui_component_handler_name(argument, component_name, source, facts)
+                });
+            if let Some(handler) = handler {
                 append_arkui_call(
                     property,
                     handler,
@@ -209,13 +209,19 @@ fn collect_arkui_runtime_calls(
                 if is_arkui_event_property(&method) {
                     if let Some(arguments) = node.child_by_field_name("arguments") {
                         let mut cursor = arguments.walk();
-                        let handler = arguments
-                            .named_children(&mut cursor)
-                            .next()
-                            .and_then(|argument| referenced_callable_name(argument, source));
-                        if let Some(handler) = handler
-                            .filter(|name| arkui_component_has_method(component_name, name, facts))
-                        {
+                        let handler =
+                            arguments
+                                .named_children(&mut cursor)
+                                .next()
+                                .and_then(|argument| {
+                                    arkui_component_handler_name(
+                                        argument,
+                                        component_name,
+                                        source,
+                                        facts,
+                                    )
+                                });
+                        if let Some(handler) = handler {
                             append_arkui_call(
                                 node,
                                 handler,
@@ -244,11 +250,31 @@ fn arkui_target_is_project_defined(target: &str, facts: &FileFacts) -> bool {
     })
 }
 
-fn arkui_component_has_method(component_name: &str, method_name: &str, facts: &FileFacts) -> bool {
-    facts.symbols.iter().any(|symbol| {
-        symbol.kind == SymbolKind::Method
-            && symbol.qualified_name == format!("{component_name}.{method_name}")
-    })
+fn arkui_component_handler_name(
+    argument: Node<'_>,
+    component_name: &str,
+    source: &[u8],
+    facts: &FileFacts,
+) -> Option<String> {
+    if argument.kind() != "member_expression"
+        || argument
+            .child_by_field_name("object")
+            .is_none_or(|object| text(object, source) != "this")
+    {
+        return None;
+    }
+    let name = argument
+        .child_by_field_name("property")
+        .map(|property| text(property, source))
+        .filter(|name| !name.is_empty())?;
+    facts
+        .symbols
+        .iter()
+        .any(|symbol| {
+            matches!(symbol.kind, SymbolKind::Method | SymbolKind::Variable)
+                && symbol.qualified_name == format!("{component_name}.{name}")
+        })
+        .then_some(name)
 }
 
 fn is_arkui_event_property(name: &str) -> bool {
@@ -385,7 +411,7 @@ fn append_arkui_call(
         caller_id: owner.id.clone(),
         callee_name: target.clone(),
         receiver_type: (provenance == "framework/arkui-event").then(|| component_name.to_owned()),
-        target_file_hint: None,
+        target_file_hint: (provenance == "framework/arkui-event").then(|| facts.path.clone()),
         provenance: provenance.to_owned(),
         confidence,
         explanation: format!("{component_name} ArkUI flow invokes {target}"),
