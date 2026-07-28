@@ -2078,6 +2078,87 @@ mod tests {
     }
 
     #[test]
+    fn react_runtime_bridges_set_state_to_render_and_render_to_jsx_child() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("child.tsx"),
+            "export function Child() { return <span>ready</span>; }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("app.tsx"),
+            "import React from 'react';\n\
+             import { Child } from './child';\n\
+             export class App extends React.Component {\n\
+               update() { this.setState({ ready: true }); }\n\
+               render() { return <Child />; }\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let update = engine
+            .search("App.update", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.qualified_name == "App.update")
+            .unwrap()
+            .symbol;
+        let update_callees = engine.callees(&update.id).unwrap();
+        assert!(update_callees.iter().any(|(symbol, evidence)| {
+            symbol.qualified_name == "App.render"
+                && evidence.provenance == "framework/react-render"
+                && evidence.confidence == 0.98
+        }));
+
+        let render = engine
+            .search("App.render", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.qualified_name == "App.render")
+            .unwrap()
+            .symbol;
+        let render_callees = engine.callees(&render.id).unwrap();
+        assert!(render_callees.iter().any(|(symbol, evidence)| {
+            symbol.name == "Child"
+                && symbol.file == "child.tsx"
+                && evidence.provenance == "framework/jsx-render"
+                && evidence.confidence == 0.96
+        }));
+    }
+
+    #[test]
+    fn react_runtime_rejects_non_react_set_state_and_intrinsic_jsx() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("store.tsx"),
+            "class Store {\n\
+               setState(value: object) {}\n\
+               update() { this.setState({ ready: true }); }\n\
+               render() { return <section />; }\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let update = engine
+            .search("Store.update", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.qualified_name == "Store.update")
+            .unwrap()
+            .symbol;
+        assert!(engine
+            .callees(&update.id)
+            .unwrap()
+            .iter()
+            .all(
+                |(_, evidence)| evidence.provenance != "framework/react-render"
+                    && evidence.provenance != "framework/jsx-render"
+            ));
+    }
+
+    #[test]
     fn react_router_object_routes_support_component_and_element_forms() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(

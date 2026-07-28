@@ -82,6 +82,9 @@ def predicates(capture: dict[str, Any]) -> dict[str, bool]:
         >= 2,
         "callers": "showUser" in result_text(capture["callers"]),
         "callees": not capture["callees"]["result"].get("isError", False),
+        "react-rerender": "render"
+        in result_text(capture["react-rerender"]).lower(),
+        "jsx-child-render": "Child" in result_text(capture["jsx-child-render"]),
         "impact": "showUser" in result_text(capture["impact"]),
         "node-window": "showUser" in result_text(capture["node-window"]),
         "explore-flow": all(

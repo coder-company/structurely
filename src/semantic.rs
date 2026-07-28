@@ -12,6 +12,7 @@ pub(crate) fn enrich_file_facts(root: Node<'_>, source: &[u8], facts: &mut FileF
             collect_nestjs_routes(root, source, facts);
             if matches!(facts.language, Language::Tsx | Language::Jsx) {
                 collect_react_router_jsx(root, source, facts);
+                collect_react_runtime_edges(root, source, facts);
             }
         }
         Language::Python => {
@@ -675,6 +676,174 @@ fn collect_react_router_jsx(node: Node<'_>, source: &[u8], facts: &mut FileFacts
     for child in node.named_children(&mut cursor) {
         collect_react_router_jsx(child, source, facts);
     }
+}
+
+fn collect_react_runtime_edges(root: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+    collect_react_class_rerenders(root, source, facts);
+    collect_jsx_child_renders(root, source, facts);
+}
+
+fn collect_react_class_rerenders(node: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+    if node.kind() == "class_declaration" && is_react_component_class(node, source) {
+        let class_name = node
+            .child_by_field_name("name")
+            .map(|name| text(name, source))
+            .unwrap_or_default();
+        let methods = direct_children_of_kind(
+            node.child_by_field_name("body").unwrap_or(node),
+            "method_definition",
+        );
+        let render = methods.iter().copied().find(|method| {
+            method
+                .child_by_field_name("name")
+                .is_some_and(|name| text(name, source) == "render")
+        });
+        if let Some(render) = render {
+            for method in methods {
+                if method.id() == render.id() || !contains_this_set_state(method, source) {
+                    continue;
+                }
+                let Some(owner) = owning_callable_symbol(method, &facts.symbols) else {
+                    continue;
+                };
+                facts.unresolved_calls.push(UnresolvedCall {
+                    caller_id: owner.id.clone(),
+                    callee_name: "render".to_owned(),
+                    receiver_type: Some(class_name.clone()),
+                    target_file_hint: Some(facts.path.clone()),
+                    provenance: "framework/react-render".to_owned(),
+                    confidence: 0.98,
+                    explanation: format!(
+                        "{} calls this.setState, which schedules {}.render",
+                        owner.qualified_name, class_name
+                    ),
+                    resolvable: true,
+                    file: facts.path.clone(),
+                    line: method.start_position().row + 1,
+                });
+            }
+        }
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_react_class_rerenders(child, source, facts);
+    }
+}
+
+fn is_react_component_class(class: Node<'_>, source: &[u8]) -> bool {
+    let Some(heritage) = direct_children_of_kind(class, "class_heritage")
+        .into_iter()
+        .next()
+    else {
+        return false;
+    };
+    text(heritage, source)
+        .split(|character: char| !(character.is_ascii_alphanumeric() || character == '.'))
+        .any(|token| {
+            matches!(
+                token,
+                "Component" | "PureComponent" | "React.Component" | "React.PureComponent"
+            )
+        })
+}
+
+fn contains_this_set_state(node: Node<'_>, source: &[u8]) -> bool {
+    if node.kind() == "call_expression" {
+        if let Some(function) = node.child_by_field_name("function") {
+            if function.kind() == "member_expression"
+                && function
+                    .child_by_field_name("object")
+                    .is_some_and(|object| text(object, source) == "this")
+                && function
+                    .child_by_field_name("property")
+                    .is_some_and(|property| text(property, source) == "setState")
+            {
+                return true;
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    let found = node
+        .named_children(&mut cursor)
+        .any(|child| contains_this_set_state(child, source));
+    found
+}
+
+fn collect_jsx_child_renders(node: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+    if matches!(
+        node.kind(),
+        "jsx_self_closing_element" | "jsx_opening_element"
+    ) {
+        append_jsx_child_render(node, source, facts);
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_jsx_child_renders(child, source, facts);
+    }
+}
+
+fn append_jsx_child_render(element: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+    let Some(name_node) = element.child_by_field_name("name") else {
+        return;
+    };
+    let child = text(name_node, source);
+    if name_node.kind() != "identifier"
+        || !child.starts_with(char::is_uppercase)
+        || matches!(child.as_str(), "Route" | "Routes" | "Fragment")
+    {
+        return;
+    }
+    let Some(owner) = owning_callable_symbol(element, &facts.symbols) else {
+        return;
+    };
+    if owner.name == child
+        || facts.unresolved_calls.iter().any(|pending| {
+            pending.caller_id == owner.id
+                && pending.callee_name == child
+                && pending.provenance == "framework/jsx-render"
+        })
+    {
+        return;
+    }
+    let target_file_hint = facts
+        .unresolved_references
+        .iter()
+        .find(|reference| {
+            reference.kind == RelationshipKind::Imports && reference.binding_name == child
+        })
+        .and_then(|reference| reference.target_file_hint.clone());
+    facts.unresolved_calls.push(UnresolvedCall {
+        caller_id: owner.id.clone(),
+        callee_name: child.clone(),
+        receiver_type: None,
+        target_file_hint,
+        provenance: "framework/jsx-render".to_owned(),
+        confidence: 0.96,
+        explanation: format!("{} renders JSX child {child}", owner.qualified_name),
+        resolvable: true,
+        file: facts.path.clone(),
+        line: element.start_position().row + 1,
+    });
+}
+
+fn owning_callable_symbol<'facts>(
+    node: Node<'_>,
+    symbols: &'facts [Symbol],
+) -> Option<&'facts Symbol> {
+    owning_symbol(node, symbols).filter(|symbol| {
+        matches!(
+            symbol.kind,
+            SymbolKind::Function | SymbolKind::Method | SymbolKind::Component
+        )
+    })
+}
+
+fn direct_children_of_kind<'tree>(node: Node<'tree>, kind: &str) -> Vec<Node<'tree>> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .filter(|child| child.kind() == kind)
+        .collect()
 }
 
 fn enrich_react_route_element(element: Node<'_>, source: &[u8], facts: &mut FileFacts) {

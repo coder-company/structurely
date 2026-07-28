@@ -72,6 +72,30 @@
       }
     },
     {
+      "label": "react-rerender",
+      "method": "tools/call",
+      "params": {
+        "name": "codegraph_callees",
+        "arguments": {
+          "symbol": "update",
+          "file": "react.tsx",
+          "limit": 20
+        }
+      }
+    },
+    {
+      "label": "jsx-child-render",
+      "method": "tools/call",
+      "params": {
+        "name": "codegraph_callees",
+        "arguments": {
+          "symbol": "render",
+          "file": "react.tsx",
+          "limit": 20
+        }
+      }
+    },
+    {
       "label": "impact",
       "method": "tools/call",
       "params": {
