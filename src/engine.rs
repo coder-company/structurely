@@ -1630,6 +1630,98 @@ mod tests {
     }
 
     #[test]
+    fn react_router_jsx_routes_resolve_v5_and_v6_imported_components() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("dashboard.tsx"),
+            "export function Dashboard() { return <main />; }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("decoy.tsx"),
+            "export function Dashboard() { return <aside />; }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("routes.tsx"),
+            "import { Dashboard as Page } from './dashboard';\n\
+             export function AppRoutes() {\n\
+             \x20 return <Routes>\n\
+             \x20   <Route element={<Page />} path=\"/dashboard\" />\n\
+             \x20   <Route component={Page} path=\"/legacy\" />\n\
+             \x20 </Routes>;\n\
+             }\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        for route_name in ["ROUTE /dashboard", "ROUTE /legacy"] {
+            let route = engine
+                .search(route_name, 10)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.kind == crate::model::SymbolKind::Route)
+                .unwrap()
+                .symbol;
+            let callees = engine.callees(&route.id).unwrap();
+            assert_eq!(callees.len(), 1, "{route_name}");
+            assert_eq!(callees[0].0.name, "Dashboard");
+            assert_eq!(callees[0].0.file, "dashboard.tsx");
+            assert_eq!(callees[0].1.provenance, "framework/react-router");
+            assert_eq!(callees[0].1.confidence, 0.97);
+        }
+    }
+
+    #[test]
+    fn react_router_object_routes_support_component_and_element_forms() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("routes.tsx"),
+            "function Home() { return <main />; }\n\
+             function Settings() { return <section />; }\n\
+             const router = createBrowserRouter([\n\
+             \x20 { path: '/', Component: Home },\n\
+             \x20 { path: '/settings', element: <Settings /> },\n\
+             ]);\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        for (route_name, component) in [("ROUTE /", "Home"), ("ROUTE /settings", "Settings")] {
+            let route = engine
+                .search(route_name, 10)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.kind == crate::model::SymbolKind::Route)
+                .unwrap()
+                .symbol;
+            let callees = engine.callees(&route.id).unwrap();
+            assert_eq!(callees.len(), 1);
+            assert_eq!(callees[0].0.name, component);
+            assert_eq!(callees[0].1.provenance, "framework/react-router");
+        }
+    }
+
+    #[test]
+    fn react_router_adapter_rejects_routes_container_and_dynamic_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("routes.tsx"),
+            "function Page() { return <main />; }\n\
+             const dynamicPath = '/dynamic';\n\
+             export const routes = <Routes path=\"/not-a-route\">\n\
+             \x20 <Route path={dynamicPath} element={<Page />} />\n\
+             </Routes>;\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        assert!(engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .iter()
+            .all(|symbol| symbol.kind != crate::model::SymbolKind::Route));
+    }
+
+    #[test]
     fn watcher_makes_saved_symbols_query_visible() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("main.ts"), "function before() {}\n").unwrap();

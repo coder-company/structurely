@@ -654,6 +654,7 @@ impl Store {
                 'tree-sitter/callback-registration',
                 'framework/express-route',
                 'framework/fastapi-route',
+                'framework/react-router',
                 'dynamic/event-registration'
              )",
             [],

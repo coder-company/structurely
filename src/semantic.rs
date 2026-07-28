@@ -8,6 +8,9 @@ pub(crate) fn enrich_file_facts(root: Node<'_>, source: &[u8], facts: &mut FileF
     match facts.language {
         Language::TypeScript | Language::Tsx | Language::JavaScript | Language::Jsx => {
             collect_javascript_registrations(root, source, facts);
+            if matches!(facts.language, Language::Tsx | Language::Jsx) {
+                collect_react_router_jsx(root, source, facts);
+            }
         }
         Language::Python => collect_fastapi_routes(root, source, facts),
         _ => {}
@@ -157,6 +160,7 @@ fn enrich_javascript_call(call: Node<'_>, source: &[u8], facts: &mut FileFacts) 
     if arguments.is_empty() {
         return;
     }
+    collect_react_router_objects(call, method.as_str(), &arguments, source, facts);
     collect_dynamic_event(
         call,
         receiver.as_deref(),
@@ -241,6 +245,213 @@ fn enrich_javascript_call(call: Node<'_>, source: &[u8], facts: &mut FileFacts) 
         file: facts.path.clone(),
         line: call.start_position().row + 1,
     });
+}
+
+fn collect_react_router_jsx(node: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+    if matches!(
+        node.kind(),
+        "jsx_self_closing_element" | "jsx_opening_element"
+    ) {
+        enrich_react_route_element(node, source, facts);
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_react_router_jsx(child, source, facts);
+    }
+}
+
+fn enrich_react_route_element(element: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+    let Some(name) = element.child_by_field_name("name") else {
+        return;
+    };
+    if text(name, source) != "Route" {
+        return;
+    }
+    let Some(path) = jsx_attribute(element, "path", source).and_then(|value| {
+        string_literal(value, source).or_else(|| first_string_descendant(value, source))
+    }) else {
+        return;
+    };
+    let component = jsx_attribute(element, "component", source)
+        .and_then(|value| first_identifier_descendant(value, source))
+        .or_else(|| {
+            jsx_attribute(element, "element", source)
+                .and_then(|value| first_jsx_element_name(value, source))
+        });
+    let Some(component) = component else {
+        return;
+    };
+    append_react_route(element, path, component, facts);
+}
+
+fn collect_react_router_objects(
+    call: Node<'_>,
+    function_name: &str,
+    arguments: &[Node<'_>],
+    source: &[u8],
+    facts: &mut FileFacts,
+) {
+    if !matches!(
+        function_name,
+        "createBrowserRouter"
+            | "createHashRouter"
+            | "createMemoryRouter"
+            | "createRoutesFromElements"
+    ) {
+        return;
+    }
+    let Some(configuration) = arguments.first() else {
+        return;
+    };
+    collect_route_objects(*configuration, source, facts);
+    facts.unresolved_calls.retain(|pending| {
+        !(pending.provenance == "tree-sitter/name-resolution"
+            && pending.callee_name == function_name
+            && pending.line == call.start_position().row + 1)
+    });
+}
+
+fn collect_route_objects(node: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+    if node.kind() == "object" {
+        let mut path = None;
+        let mut component = None;
+        let mut cursor = node.walk();
+        for pair in node
+            .named_children(&mut cursor)
+            .filter(|child| child.kind() == "pair")
+        {
+            let Some(key) = pair.child_by_field_name("key") else {
+                continue;
+            };
+            let Some(value) = pair.child_by_field_name("value") else {
+                continue;
+            };
+            match text(key, source).trim_matches(['\'', '"']) {
+                "path" => {
+                    path = string_literal(value, source)
+                        .or_else(|| first_string_descendant(value, source));
+                }
+                "Component" | "component" => {
+                    component = first_identifier_descendant(value, source);
+                }
+                "element" => component = first_jsx_element_name(value, source),
+                _ => {}
+            }
+        }
+        if let (Some(path), Some(component)) = (path, component) {
+            append_react_route(node, path, component, facts);
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_route_objects(child, source, facts);
+    }
+}
+
+fn append_react_route(
+    registration: Node<'_>,
+    path: String,
+    component: String,
+    facts: &mut FileFacts,
+) {
+    let name = format!("ROUTE {path}");
+    let route = Symbol::new_disambiguated(
+        facts.language,
+        SymbolKind::Route,
+        &name,
+        &name,
+        &facts.path,
+        span(registration),
+        &format!("react-router|{path}|{component}"),
+    );
+    let file_symbol = facts.symbols.first().expect("file symbol");
+    facts.relationships.push(Relationship {
+        source_id: file_symbol.id.clone(),
+        target_id: route.id.clone(),
+        kind: RelationshipKind::Contains,
+        evidence: Evidence::new(
+            "framework/react-router",
+            1.0,
+            format!("{name} is registered in {}", facts.path),
+            &facts.path,
+            registration.start_position().row + 1,
+        ),
+    });
+    facts.unresolved_calls.push(UnresolvedCall {
+        caller_id: route.id.clone(),
+        callee_name: component.clone(),
+        receiver_type: None,
+        provenance: "framework/react-router".to_owned(),
+        confidence: 0.98,
+        explanation: format!("React Router path {path} renders component {component}"),
+        resolvable: true,
+        file: facts.path.clone(),
+        line: registration.start_position().row + 1,
+    });
+    facts.symbols.push(route);
+}
+
+fn jsx_attribute<'tree>(
+    element: Node<'tree>,
+    expected: &str,
+    source: &[u8],
+) -> Option<Node<'tree>> {
+    let mut cursor = element.walk();
+    let found = element
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() == "jsx_attribute")
+        .find_map(|attribute| {
+            let name = attribute
+                .child_by_field_name("name")
+                .or_else(|| attribute.named_child(0))?;
+            (text(name, source) == expected)
+                .then(|| {
+                    attribute
+                        .child_by_field_name("value")
+                        .or_else(|| attribute.named_child(1))
+                })
+                .flatten()
+        });
+    found
+}
+
+fn first_string_descendant(node: Node<'_>, source: &[u8]) -> Option<String> {
+    if let Some(value) = string_literal(node, source) {
+        return Some(value);
+    }
+    let mut cursor = node.walk();
+    let found = node
+        .named_children(&mut cursor)
+        .find_map(|child| first_string_descendant(child, source));
+    found
+}
+
+fn first_identifier_descendant(node: Node<'_>, source: &[u8]) -> Option<String> {
+    if matches!(node.kind(), "identifier" | "property_identifier") {
+        return Some(text(node, source));
+    }
+    let mut cursor = node.walk();
+    let found = node
+        .named_children(&mut cursor)
+        .find_map(|child| first_identifier_descendant(child, source));
+    found
+}
+
+fn first_jsx_element_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    if matches!(
+        node.kind(),
+        "jsx_self_closing_element" | "jsx_opening_element"
+    ) {
+        return node
+            .child_by_field_name("name")
+            .map(|name| text(name, source))
+            .filter(|name| name != "Route" && name != "Routes");
+    }
+    let mut cursor = node.walk();
+    let found = node
+        .named_children(&mut cursor)
+        .find_map(|child| first_jsx_element_name(child, source));
+    found
 }
 
 fn collect_dynamic_event(
