@@ -341,6 +341,22 @@
             "\"confidence\": 0.97",
             "\"line\": 121"
           ]
+        },
+        {
+          "command": "callees",
+          "query": "sendProcessMessage",
+          "file": "code/BasicFeature/Security/KeyManager/entry/src/main/ets/utils/Utils.ets",
+          "contains": [
+            "\"qualified_name\": \"KeyManager.aboutToAppear.<emitter callback",
+            "\"provenance\": \"framework/ohos-emitter\""
+          ],
+          "recordContains": [
+            "\"qualified_name\": \"KeyManager.aboutToAppear.<emitter callback",
+            "code/BasicFeature/Security/KeyManager/entry/src/main/ets/pages/KeyManager.ets",
+            "\"provenance\": \"framework/ohos-emitter\"",
+            "\"confidence\": 0.97",
+            "\"line\": 35"
+          ]
         }
       ]
     }

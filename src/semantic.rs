@@ -15,7 +15,11 @@ pub(crate) fn enrich_file_facts(root: Node<'_>, source: &[u8], facts: &mut FileF
         | Language::Vue
         | Language::Svelte
         | Language::ArkTs => {
-            collect_exported_literal_bindings(root, source, facts);
+            if contains_bytes(source, b"export const ")
+                || contains_bytes(source, b"static readonly ")
+            {
+                collect_exported_literal_bindings(root, source, facts);
+            }
             collect_javascript_registrations(root, source, facts);
             collect_javascript_function_references(root, source, facts);
             collect_nestjs_routes(root, source, facts);
@@ -43,6 +47,10 @@ pub(crate) fn enrich_file_facts(root: Node<'_>, source: &[u8], facts: &mut FileF
         }
         _ => {}
     }
+}
+
+fn contains_bytes(source: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty() && source.windows(needle.len()).any(|window| window == needle)
 }
 
 fn collect_ohos_emitter_semantics(root: Node<'_>, source: &[u8], facts: &mut FileFacts) {
@@ -84,18 +92,21 @@ fn collect_exported_literal_bindings(node: Node<'_>, source: &[u8], facts: &mut 
             }
         }
     }
-    let declaration_text = text(node, source);
-    let declaration_prefix = declaration_text
-        .split_once('=')
-        .map(|(prefix, _)| prefix)
-        .unwrap_or_default();
-    if declaration_prefix
-        .split_whitespace()
-        .any(|word| word == "static")
-        && declaration_prefix
+    if node.kind() == "public_field_definition" {
+        let declaration_text = text(node, source);
+        let declaration_prefix = declaration_text
+            .split_once('=')
+            .map(|(prefix, _)| prefix)
+            .unwrap_or_default();
+        let is_static_readonly = declaration_prefix
             .split_whitespace()
-            .any(|word| word == "readonly")
-    {
+            .any(|word| word == "static")
+            && declaration_prefix
+                .split_whitespace()
+                .any(|word| word == "readonly");
+        if !is_static_readonly {
+            return collect_exported_literal_binding_children(node, source, facts);
+        }
         if let (Some(class_name), Some(member), Some(value)) = (
             enclosing_exported_class_name(node, source),
             node.child_by_field_name("name")
@@ -112,6 +123,10 @@ fn collect_exported_literal_bindings(node: Node<'_>, source: &[u8], facts: &mut 
             }
         }
     }
+    collect_exported_literal_binding_children(node, source, facts);
+}
+
+fn collect_exported_literal_binding_children(node: Node<'_>, source: &[u8], facts: &mut FileFacts) {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         collect_exported_literal_bindings(child, source, facts);

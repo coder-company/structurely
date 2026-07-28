@@ -1184,14 +1184,17 @@ impl Store {
                   AND b.member_path=COALESCE(e.channel_member_path,'')
               )
             )";
-        let mut dispatch_statement = tx.prepare(&format!(
-            "SELECT id,file_id,owner_public_id,receiver,{effective_channel},
-                    evidence_file,evidence_line
-             FROM dynamic_events e
-             WHERE action='dispatch' AND {effective_channel} IS NOT NULL
+        let mut event_statement = tx.prepare(&format!(
+            "SELECT id,file_id,owner_public_id,receiver,effective_channel,action,
+                    callback_name,evidence_file,evidence_line
+             FROM (
+               SELECT e.*,{effective_channel} AS effective_channel
+               FROM dynamic_events e
+             )
+             WHERE effective_channel IS NOT NULL
              ORDER BY evidence_file,evidence_line,id",
         ))?;
-        let dispatches = dispatch_statement
+        let events = event_statement
             .query_map([], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
@@ -1200,65 +1203,102 @@ impl Store {
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
-                    row.get::<_, i64>(6)? as usize,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, i64>(8)? as usize,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        drop(dispatch_statement);
+        drop(event_statement);
 
-        let mut registrations = tx.prepare(&format!(
-            "SELECT DISTINCT rel.target_public_id,r.evidence_file,r.evidence_line
-             FROM dynamic_events r
-             JOIN relationships rel
-               ON rel.source_public_id=r.owner_public_id
-              AND rel.provenance IN (
+        let mut callback_statement = tx.prepare(
+            "SELECT rel.source_public_id,target.name,rel.target_public_id
+             FROM relationships rel
+             JOIN symbols target ON target.public_id=rel.target_public_id
+             WHERE rel.provenance IN (
                 'tree-sitter/callback-registration',
                 'framework/ohos-emitter-registration',
                 'framework/ohos-emitter-inline-registration'
               )
-             JOIN symbols target
-               ON target.public_id=rel.target_public_id
-              AND target.name=r.callback_name
-             WHERE (r.file_id=?1 OR ?2 LIKE 'ohos-emitter@%')
-               AND r.receiver=?2 AND {effective_channel_registration}=?3
-               AND r.action='register'
-             ORDER BY r.evidence_file,r.evidence_line,rel.target_public_id",
-            effective_channel_registration = effective_channel
-                .replace("NULLIF(e.channel", "NULLIF(r.channel")
-                .replace("e.channel_target_file_hint", "r.channel_target_file_hint",)
-                .replace(
-                    "b.export_name=e.channel_export_name",
-                    "b.export_name=r.channel_export_name",
-                )
-                .replace(
-                    "COALESCE(e.channel_member_path",
-                    "COALESCE(r.channel_member_path",
-                ),
-        ))?;
+             ORDER BY rel.source_public_id,target.name,rel.target_public_id",
+        )?;
+        let mut callback_targets = HashMap::<(String, String), Vec<String>>::new();
+        for callback in callback_statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })? {
+            let (owner, name, target) = callback?;
+            callback_targets
+                .entry((owner, name))
+                .or_default()
+                .push(target);
+        }
+        drop(callback_statement);
+        for targets in callback_targets.values_mut() {
+            targets.sort();
+            targets.dedup();
+        }
+
+        type EventKey = (i64, String, String);
+        type RegisteredTarget = (String, String, usize);
+        let mut registrations = HashMap::<EventKey, Vec<RegisteredTarget>>::new();
+        for (_, file_id, owner, receiver, channel, action, callback, file, line) in &events {
+            if action != "register" {
+                continue;
+            }
+            let Some(callback) = callback else {
+                continue;
+            };
+            let Some(targets) = callback_targets.get(&(owner.clone(), callback.clone())) else {
+                continue;
+            };
+            let scope_file_id = if receiver.starts_with("ohos-emitter@") {
+                0
+            } else {
+                *file_id
+            };
+            let entry = registrations
+                .entry((scope_file_id, receiver.clone(), channel.clone()))
+                .or_default();
+            entry.extend(
+                targets
+                    .iter()
+                    .cloned()
+                    .map(|target| (target, file.clone(), *line)),
+            );
+        }
+        for targets in registrations.values_mut() {
+            targets.sort();
+            targets.dedup_by(|left, right| left.0 == right.0);
+        }
+
         let mut resolved = 0;
-        for (_, file_id, dispatcher_id, receiver, channel, file, line) in dispatches {
+        for (_, file_id, dispatcher_id, receiver, channel, action, _, file, line) in events {
+            if action != "dispatch" {
+                continue;
+            }
             let is_ohos_emitter = receiver.starts_with("ohos-emitter@");
-            let targets = registrations
-                .query_map(params![file_id, receiver, channel], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)? as usize,
-                    ))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            if targets.is_empty() || targets.len() > EVENT_FANOUT_CAP {
+            let scope_file_id = if is_ohos_emitter { 0 } else { file_id };
+            let Some(targets) =
+                registrations.get(&(scope_file_id, receiver.clone(), channel.clone()))
+            else {
+                continue;
+            };
+            if targets.len() > EVENT_FANOUT_CAP {
                 continue;
             }
             for (target_id, registration_file, registration_line) in targets {
-                if dispatcher_id == target_id {
+                if &dispatcher_id == target_id {
                     continue;
                 }
                 Self::insert_relationship(
                     tx,
                     &Relationship {
                         source_id: dispatcher_id.clone(),
-                        target_id,
+                        target_id: target_id.clone(),
                         kind: RelationshipKind::Calls,
                         evidence: Evidence::new(
                             if is_ohos_emitter {

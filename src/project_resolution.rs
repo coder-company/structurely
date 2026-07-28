@@ -107,10 +107,15 @@ impl ProjectResolutionContext {
     }
 
     pub(crate) fn apply(&self, facts: &mut FileFacts) {
-        let emitter_scope = self.harmony_scope_for(&facts.path);
+        let emitter_scope = facts
+            .dynamic_events
+            .iter()
+            .any(|event| event.receiver == "ohos-emitter")
+            .then(|| self.harmony_scope_for(&facts.path));
         for event in &mut facts.dynamic_events {
             if event.receiver == "ohos-emitter" {
-                event.receiver = format!("ohos-emitter@{emitter_scope}");
+                event.receiver =
+                    format!("ohos-emitter@{}", emitter_scope.as_deref().unwrap_or("."));
             }
             if let EventChannel::Imported {
                 target_file_hint, ..
@@ -161,14 +166,19 @@ impl ProjectResolutionContext {
         let file = Path::new(file);
         self.harmony_app_roots
             .iter()
-            .filter(|root| root.as_os_str().is_empty() || file.starts_with(root))
+            .filter(|root| !root.as_os_str().is_empty() && file.starts_with(root))
             .max_by_key(|root| root.components().count())
-            .map(|root| {
-                if root.as_os_str().is_empty() {
-                    ".".to_owned()
-                } else {
-                    root.to_string_lossy().replace('\\', "/")
-                }
+            .map(|root| root.to_string_lossy().replace('\\', "/"))
+            .or_else(|| {
+                file.ancestors()
+                    .skip(1)
+                    .find(|ancestor| {
+                        self.root
+                            .join(ancestor)
+                            .join("AppScope/app.json5")
+                            .is_file()
+                    })
+                    .map(normalize_path)
             })
             .unwrap_or_else(|| ".".to_owned())
     }
@@ -921,6 +931,23 @@ mod tests {
                 "second/components/main".to_owned(),
                 "project/relative-import"
             ))
+        );
+    }
+
+    #[test]
+    fn harmony_scope_falls_back_to_the_nearest_appscope_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("apps/chat/AppScope")).unwrap();
+        fs::create_dir_all(root.path().join("apps/chat/entry/src/main/ets/pages")).unwrap();
+        fs::write(root.path().join("apps/chat/AppScope/app.json5"), "{}").unwrap();
+        let context = ProjectResolutionContext {
+            root: root.path().to_owned(),
+            harmony_app_roots: vec![PathBuf::new()],
+            ..ProjectResolutionContext::default()
+        };
+        assert_eq!(
+            context.harmony_scope_for("apps/chat/entry/src/main/ets/pages/Index.ets"),
+            "apps/chat"
         );
     }
 
