@@ -155,3 +155,18 @@ The pinned
 [`OpenHarmony helper gate`](../benchmarks/openharmony-arkui-helper-2026-07-28/README.md)
 indexes all 6,995 ETS files and passes 6/6 assertions, including real global
 `@Extend` and component-owned `@Styles` call edges.
+
+After app-scoped Harmony emitter resolution, the
+[`post-emitter differential`](../benchmarks/differential-mcp-2026-07-28-post-ohos-emitter/README.md)
+keeps both engines at 22/22 shared compatibility predicates and 1.0000 context
+usefulness. Structurely separately passes a Structurely-only emitter predicate
+that pinned CodeGraph does not resolve.
+The enforced
+[`post-emitter performance run`](../benchmarks/codegraph-source-intersection-2026-07-28-post-ohos-emitter/README.md)
+is 3.63× faster to index and 9.17× faster for query p50 while using 90.5% less
+peak initialization memory.
+The pinned
+[`OpenHarmony emitter gate`](../benchmarks/openharmony-ohos-emitter-2026-07-28/README.md)
+indexes all 6,995 ETS files and passes 7/7 assertions, including an exact
+app-scoped `PageThreadModel.build → PageThreadModel.build.callback` dispatch
+edge with emitter provenance.

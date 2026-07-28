@@ -64,6 +64,12 @@ assertions across the same 6,995-file pin.
 The `benchmarks/openharmony-arkui-helper-2026-07-28/` gate adds exact global
 `@Extend` and component-owned `@Styles` helper edges and passes 6/6 correlated
 assertions on that pin.
+The `benchmarks/openharmony-ohos-emitter-2026-07-28/` gate adds an exact
+`@ohos.events.emitter` dispatch-to-callback relationship and passes 7/7
+correlated assertions on that pin. The matching differential and performance
+artifacts prove 22/22 shared compatibility, one separately scored
+Structurely-only emitter flow, and both enforced 2× speed thresholds at the
+same Structurely commit.
 
 The authoritative capability inventory is
 [`codegraph-parity.md`](codegraph-parity.md). A matching command name or schema
