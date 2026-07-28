@@ -446,8 +446,16 @@ pub fn format_explore_text(
         right_exact
             .cmp(&left_exact)
             .then_with(|| {
-                (right.callers.len() + right.callees.len())
-                    .cmp(&(left.callers.len() + left.callees.len()))
+                (right.callers.len()
+                    + right.callees.len()
+                    + right.referenced_by.len()
+                    + right.references.len())
+                .cmp(
+                    &(left.callers.len()
+                        + left.callees.len()
+                        + left.referenced_by.len()
+                        + left.references.len()),
+                )
             })
             .then_with(|| left.symbol.file.cmp(&right.symbol.file))
             .then_with(|| left.symbol.start_line.cmp(&right.symbol.start_line))
@@ -480,7 +488,11 @@ pub fn format_explore_text(
             hit.symbol.start_line,
             hit.symbol.end_line
         )?;
-        if !hit.callers.is_empty() || !hit.callees.is_empty() {
+        if !hit.callers.is_empty()
+            || !hit.callees.is_empty()
+            || !hit.referenced_by.is_empty()
+            || !hit.references.is_empty()
+        {
             let callers = hit
                 .callers
                 .iter()
@@ -511,6 +523,26 @@ pub fn format_explore_text(
             )?;
             if !callees.is_empty() {
                 writeln!(section, "- Callees: {callees}")?;
+            }
+            let referenced_by = hit
+                .referenced_by
+                .iter()
+                .take(8)
+                .map(|(symbol, _)| symbol.qualified_name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let references = hit
+                .references
+                .iter()
+                .take(8)
+                .map(|(symbol, _)| symbol.qualified_name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            if !referenced_by.is_empty() {
+                writeln!(section, "- Referenced by: {referenced_by}")?;
+            }
+            if !references.is_empty() {
+                writeln!(section, "- References: {references}")?;
             }
         }
         writeln!(section, "\n```{}", hit.symbol.language)?;

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path};
 
-pub const GRAPH_MODEL_VERSION: u32 = 14;
+pub const GRAPH_MODEL_VERSION: u32 = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -194,6 +194,7 @@ pub struct SourceSpan {
 pub enum RelationshipKind {
     Contains,
     Calls,
+    References,
     Imports,
     Extends,
     Implements,
@@ -204,6 +205,7 @@ impl fmt::Display for RelationshipKind {
         f.write_str(match self {
             Self::Contains => "contains",
             Self::Calls => "calls",
+            Self::References => "references",
             Self::Imports => "imports",
             Self::Extends => "extends",
             Self::Implements => "implements",

@@ -78,6 +78,8 @@ pub struct ExploreHit {
     pub source_truncated: bool,
     pub callers: Vec<(crate::model::Symbol, Evidence)>,
     pub callees: Vec<(crate::model::Symbol, Evidence)>,
+    pub referenced_by: Vec<(crate::model::Symbol, Evidence)>,
+    pub references: Vec<(crate::model::Symbol, Evidence)>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -547,6 +549,8 @@ impl Engine {
             output.push(ExploreHit {
                 callers: self.callers(&hit.symbol.id)?,
                 callees: self.callees(&hit.symbol.id)?,
+                referenced_by: self.referenced_by(&hit.symbol.id)?,
+                references: self.references(&hit.symbol.id)?,
                 symbol: hit.symbol,
                 source: snippet,
                 source_truncated,
@@ -562,6 +566,16 @@ impl Engine {
     pub fn callees(&self, symbol_id: &str) -> Result<Vec<(crate::model::Symbol, Evidence)>> {
         self.store
             .related(symbol_id, false, RelationshipKind::Calls)
+    }
+
+    pub fn referenced_by(&self, symbol_id: &str) -> Result<Vec<(crate::model::Symbol, Evidence)>> {
+        self.store
+            .related(symbol_id, true, RelationshipKind::References)
+    }
+
+    pub fn references(&self, symbol_id: &str) -> Result<Vec<(crate::model::Symbol, Evidence)>> {
+        self.store
+            .related(symbol_id, false, RelationshipKind::References)
     }
 
     pub fn callers_named(
@@ -1562,6 +1576,96 @@ mod tests {
             .unwrap()
             .symbol;
         assert!(engine.callees(&invoke.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn function_reference_roles_resolve_imports_and_surface_in_explore() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("target.ts"),
+            "export function transform() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("decoy.ts"),
+            "export function transform() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("main.ts"),
+            "import { transform as selected } from './target';\n\
+             function configure() {\n\
+             \x20 const alias = selected;\n\
+             \x20 const table = { callback: selected };\n\
+             \x20 const pipeline = [selected];\n\
+             \x20 holder.callback = selected;\n\
+             }\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let configure = engine
+            .search("configure", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.name == "configure")
+            .unwrap()
+            .symbol;
+        let references = engine.references(&configure.id).unwrap();
+        assert_eq!(references.len(), 4);
+        assert!(references
+            .iter()
+            .all(|(symbol, evidence)| symbol.file == "target.ts"
+                && symbol.name == "transform"
+                && evidence.provenance == "tree-sitter/function-reference"
+                && evidence.confidence == 0.95));
+
+        let explored = engine.explore("configure", 5).unwrap();
+        let configure_hit = explored
+            .iter()
+            .find(|hit| hit.symbol.name == "configure")
+            .unwrap();
+        assert_eq!(configure_hit.references.len(), 4);
+    }
+
+    #[test]
+    fn function_references_prefer_local_methods_and_refuse_global_ambiguity() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("local.ts"),
+            "class Runner {\n\
+             \x20 handle() {}\n\
+             \x20 configure() { const callback = this.handle; }\n\
+             }\n",
+        )
+        .unwrap();
+        fs::write(temp.path().join("a.ts"), "export function shared() {}\n").unwrap();
+        fs::write(temp.path().join("b.ts"), "export function shared() {}\n").unwrap();
+        fs::write(
+            temp.path().join("main.ts"),
+            "function configureGlobal() { const callback = shared; }\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+
+        let local = engine
+            .search("Runner.configure", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.qualified_name == "Runner.configure")
+            .unwrap()
+            .symbol;
+        let references = engine.references(&local.id).unwrap();
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].0.qualified_name, "Runner.handle");
+
+        let global = engine
+            .search("configureGlobal", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.name == "configureGlobal")
+            .unwrap()
+            .symbol;
+        assert!(engine.references(&global.id).unwrap().is_empty());
     }
 
     #[test]

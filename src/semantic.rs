@@ -1,6 +1,6 @@
 use crate::model::{
     DynamicEventFact, EventAction, Evidence, FileFacts, Language, Relationship, RelationshipKind,
-    SourceSpan, Symbol, SymbolKind, UnresolvedCall,
+    SourceSpan, Symbol, SymbolKind, UnresolvedCall, UnresolvedReference,
 };
 use tree_sitter::Node;
 
@@ -8,6 +8,7 @@ pub(crate) fn enrich_file_facts(root: Node<'_>, source: &[u8], facts: &mut FileF
     match facts.language {
         Language::TypeScript | Language::Tsx | Language::JavaScript | Language::Jsx => {
             collect_javascript_registrations(root, source, facts);
+            collect_javascript_function_references(root, source, facts);
             if matches!(facts.language, Language::Tsx | Language::Jsx) {
                 collect_react_router_jsx(root, source, facts);
             }
@@ -15,6 +16,64 @@ pub(crate) fn enrich_file_facts(root: Node<'_>, source: &[u8], facts: &mut FileF
         Language::Python => collect_fastapi_routes(root, source, facts),
         _ => {}
     }
+}
+
+fn collect_javascript_function_references(node: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+    match node.kind() {
+        "variable_declarator" => {
+            if let Some(value) = node.child_by_field_name("value") {
+                append_function_reference(node, value, source, "initializer", facts);
+            }
+        }
+        "assignment_expression" => {
+            if let Some(value) = node.child_by_field_name("right") {
+                append_function_reference(node, value, source, "assignment", facts);
+            }
+        }
+        "pair" => {
+            if let Some(value) = node.child_by_field_name("value") {
+                append_function_reference(node, value, source, "object property", facts);
+            }
+        }
+        "array" => {
+            let mut cursor = node.walk();
+            for value in node.named_children(&mut cursor) {
+                append_function_reference(node, value, source, "array element", facts);
+            }
+        }
+        _ => {}
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_javascript_function_references(child, source, facts);
+    }
+}
+
+fn append_function_reference(
+    observation: Node<'_>,
+    value: Node<'_>,
+    source: &[u8],
+    role: &str,
+    facts: &mut FileFacts,
+) {
+    let Some(target_name) = referenced_callable_name(value, source) else {
+        return;
+    };
+    let owner = owning_symbol(observation, &facts.symbols)
+        .or_else(|| facts.symbols.first())
+        .expect("file symbol");
+    facts.unresolved_references.push(UnresolvedReference {
+        source_id: owner.id.clone(),
+        target_name: target_name.clone(),
+        binding_name: target_name.clone(),
+        target_file_hint: None,
+        kind: RelationshipKind::References,
+        provenance: "tree-sitter/function-reference".to_owned(),
+        confidence: 0.95,
+        explanation: format!("{role} stores callable reference {target_name}"),
+        file: facts.path.clone(),
+        line: value.start_position().row + 1,
+    });
 }
 
 fn collect_javascript_registrations(node: Node<'_>, source: &[u8], facts: &mut FileFacts) {

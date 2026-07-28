@@ -917,7 +917,11 @@ impl Store {
     fn resolve_structural_references(tx: &Transaction<'_>) -> Result<usize> {
         tx.execute(
             "DELETE FROM relationships
-             WHERE provenance IN ('tree-sitter/import','tree-sitter/heritage')",
+             WHERE provenance IN (
+                'tree-sitter/import',
+                'tree-sitter/heritage',
+                'tree-sitter/function-reference'
+             )",
             [],
         )?;
         tx.execute("DELETE FROM import_bindings", [])?;
@@ -927,7 +931,8 @@ impl Store {
                     u.evidence_line,s.language,u.file_id
              FROM unresolved_references u
              JOIN symbols s ON s.public_id=u.source_public_id
-             ORDER BY u.evidence_file,u.evidence_line,u.id",
+             ORDER BY CASE WHEN u.kind='imports' THEN 0 ELSE 1 END,
+                      u.evidence_file,u.evidence_line,u.id",
         )?;
         let references = reference_statement
             .query_map([], |row| {
@@ -965,6 +970,71 @@ impl Store {
             file_id,
         ) in references
         {
+            if kind == "references" {
+                let mut candidate_statement = tx.prepare(
+                    "SELECT s.public_id,s.qualified_name,
+                            CASE
+                              WHEN s.file_id=?1 THEN 0
+                              WHEN EXISTS (
+                                SELECT 1 FROM import_bindings b
+                                WHERE b.file_id=?1
+                                  AND b.binding_name=?2
+                                  AND b.target_public_id=s.public_id
+                              ) THEN 1
+                              ELSE 2
+                            END AS rank
+                     FROM symbols s
+                     WHERE s.language=?3
+                       AND s.kind IN ('function','method','component')
+                       AND s.public_id<>?4
+                       AND (
+                         s.name=?2 OR EXISTS (
+                           SELECT 1 FROM import_bindings b
+                           WHERE b.file_id=?1
+                             AND b.binding_name=?2
+                             AND b.target_public_id=s.public_id
+                         )
+                       )
+                     ORDER BY rank,s.qualified_name,s.public_id",
+                )?;
+                let candidates = candidate_statement
+                    .query_map(params![file_id, target_name, language, source_id], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let Some(best_rank) = candidates.first().map(|candidate| candidate.2) else {
+                    continue;
+                };
+                let best = candidates
+                    .iter()
+                    .take_while(|candidate| candidate.2 == best_rank)
+                    .collect::<Vec<_>>();
+                if best.len() != 1 {
+                    continue;
+                }
+                let (target_id, qualified_name, _) = best[0];
+                Self::insert_relationship(
+                    tx,
+                    &Relationship {
+                        source_id,
+                        target_id: target_id.clone(),
+                        kind: RelationshipKind::References,
+                        evidence: Evidence::new(
+                            &provenance,
+                            base_confidence,
+                            format!("{explanation}; resolves uniquely to {qualified_name}"),
+                            &file,
+                            line,
+                        ),
+                    },
+                )?;
+                resolved += 1;
+                continue;
+            }
             let mut target_statement = tx.prepare(
                 "SELECT s.public_id,s.qualified_name,f.path
                  FROM symbols s JOIN files f ON f.id=s.file_id
@@ -1265,6 +1335,7 @@ fn parse_symbol_kind(value: &str) -> SymbolKind {
 fn parse_relationship_kind(value: &str) -> RelationshipKind {
     match value {
         "calls" => RelationshipKind::Calls,
+        "references" => RelationshipKind::References,
         "imports" => RelationshipKind::Imports,
         "extends" => RelationshipKind::Extends,
         "implements" => RelationshipKind::Implements,
