@@ -798,11 +798,12 @@ impl Store {
                 let mut targets = direct
                     .iter()
                     .filter(|candidate| {
-                        (!target_file_hint.is_empty()
-                            && module_hint_matches(&target_file_hint, &candidate.3))
-                            || (!receiver_type.is_empty()
-                                && (candidate.1 == receiver_qualified
-                                    || candidate.1.ends_with(&format!(".{receiver_qualified}"))))
+                        (!target_file_hint.is_empty() || !receiver_type.is_empty())
+                            && (target_file_hint.is_empty()
+                                || module_hint_matches(&target_file_hint, &candidate.3))
+                            && (receiver_type.is_empty()
+                                || candidate.1 == receiver_qualified
+                                || candidate.1.ends_with(&format!(".{receiver_qualified}")))
                     })
                     .map(|candidate| (candidate.0.clone(), candidate.1.clone(), 0))
                     .collect::<Vec<_>>();
@@ -1684,7 +1685,8 @@ fn module_hint_matches(hint: &str, candidate: &str) -> bool {
         .rsplit_once('.')
         .map(|(stem, _)| stem)
         .unwrap_or(&candidate);
-    candidate_without_extension == hint
+    candidate == hint
+        || candidate_without_extension == hint
         || candidate_without_extension.starts_with(&format!("{hint}/"))
         || candidate_without_extension.ends_with(&format!("/{hint}"))
         || candidate_without_extension.ends_with(&format!("/{hint}/index"))

@@ -2555,6 +2555,48 @@ mod tests {
     }
 
     #[test]
+    fn arkui_member_handlers_use_file_and_receiver_hints_together() {
+        let temp = tempfile::tempdir().unwrap();
+        for directory in ["first", "second"] {
+            fs::create_dir(temp.path().join(directory)).unwrap();
+            fs::write(
+                temp.path().join(directory).join("Panel.ets"),
+                "@Component\n\
+                 struct Panel {\n\
+                   handler: () => void = () => {}\n\
+                   build() { Button('go').onClick(this.handler) }\n\
+                 }\n",
+            )
+            .unwrap();
+        }
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let build = engine
+            .search("Panel.build", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.file == "first/Panel.ets")
+            .unwrap()
+            .symbol;
+        let edges = engine.callees(&build.id).unwrap();
+        assert_eq!(
+            edges
+                .iter()
+                .filter(|(target, evidence)| {
+                    target.qualified_name == "Panel.handler"
+                        && evidence.provenance == "framework/arkui-event"
+                })
+                .count(),
+            1
+        );
+        assert!(edges.iter().any(|(target, evidence)| {
+            target.file == "first/Panel.ets"
+                && target.qualified_name == "Panel.handler"
+                && evidence.confidence == 0.97
+        }));
+    }
+
+    #[test]
     fn component_templates_ignore_script_strings_and_intrinsic_elements() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(
