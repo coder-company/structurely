@@ -834,6 +834,53 @@ mod tests {
     }
 
     #[test]
+    fn linked_worktrees_require_and_support_a_worktree_local_index() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join(".git")).unwrap();
+        fs::write(root.path().join(".gitignore"), "worktree/\n").unwrap();
+        fs::write(
+            root.path().join("main.rs"),
+            "pub fn main_checkout_only() {}\n",
+        )
+        .unwrap();
+        fs::create_dir(root.path().join("worktree")).unwrap();
+        fs::write(
+            root.path().join("worktree/.git"),
+            "gitdir: ../.git/worktrees/feature\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("worktree/feature.rs"),
+            "pub fn feature_worktree_only() {}\n",
+        )
+        .unwrap();
+
+        let (parent, _) = Engine::init(root.path()).unwrap();
+        assert!(parent
+            .search("feature_worktree_only", 10)
+            .unwrap()
+            .into_iter()
+            .all(|hit| hit.symbol.name != "feature_worktree_only"));
+        assert!(Engine::open(root.path().join("worktree")).is_err());
+
+        let (worktree, _) = Engine::init(root.path().join("worktree")).unwrap();
+        assert_eq!(
+            worktree
+                .search("feature_worktree_only", 10)
+                .unwrap()
+                .into_iter()
+                .filter(|hit| hit.symbol.name == "feature_worktree_only")
+                .count(),
+            1
+        );
+        assert!(worktree
+            .search("main_checkout_only", 10)
+            .unwrap()
+            .into_iter()
+            .all(|hit| hit.symbol.name != "main_checkout_only"));
+    }
+
+    #[test]
     fn oversized_generated_sources_are_skipped_and_reported() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(

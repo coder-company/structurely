@@ -1,6 +1,9 @@
 {
   "passed": true,
-  "structurelyCommit": "b2d6a14a0039baba8ec795d158d8508bc6fa9a49",
+  "structurelyCommits": {
+    "expressLightRagGraphiti": "b2d6a14a0039baba8ec795d158d8508bc6fa9a49",
+    "django": "270abe4d20615ff745b5ee098d8f32cd3618f235"
+  },
   "repositories": [
     {
       "name": "express",

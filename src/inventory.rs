@@ -76,7 +76,9 @@ impl<'a> ProjectInventory<'a> {
             forced
                 .standard_filters(false)
                 .hidden(false)
-                .filter_entry(move |entry| !is_builtin_ignored(&root, entry.path()));
+                .filter_entry(move |entry| {
+                    !is_builtin_ignored(&root, entry.path()) && !is_linked_worktree(entry.path())
+                });
             for entry in forced.build() {
                 let entry = entry?;
                 if !entry.file_type().is_some_and(|kind| kind.is_file()) {
@@ -178,7 +180,35 @@ fn should_descend(root: &Path, config: &ProjectConfig, path: &Path) -> bool {
     let Ok(relative) = path.strip_prefix(root) else {
         return false;
     };
-    !is_builtin_ignored(root, path) && !config.excludes(relative, path.is_dir())
+    !is_builtin_ignored(root, path)
+        && !is_linked_worktree(path)
+        && !config.excludes(relative, path.is_dir())
+}
+
+fn is_linked_worktree(path: &Path) -> bool {
+    if !path.is_dir() {
+        return false;
+    }
+    let marker = path.join(".git");
+    if !marker.is_file() {
+        return false;
+    }
+    let Ok(contents) = fs::read_to_string(marker) else {
+        return false;
+    };
+    let Some(git_dir) = contents
+        .lines()
+        .next()
+        .and_then(|line| line.trim().strip_prefix("gitdir:"))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    let git_dir = Path::new(git_dir);
+    git_dir
+        .components()
+        .any(|component| component.as_os_str() == "worktrees")
 }
 
 const DEFAULT_IGNORED_DIRS: &[&str] = &[
@@ -311,5 +341,50 @@ mod tests {
             .collect::<Vec<_>>();
         paths.sort();
         assert_eq!(paths, vec!["Local/forced.ts", "repos/child/lib.rs"]);
+    }
+
+    #[test]
+    fn opted_submodules_are_indexed_but_linked_worktrees_are_not_duplicated() {
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join(".git")).unwrap();
+        fs::create_dir_all(root.path().join("nested/submodule")).unwrap();
+        fs::create_dir_all(root.path().join("nested/worktree")).unwrap();
+        fs::write(root.path().join(".gitignore"), "nested/\n").unwrap();
+        fs::write(
+            root.path().join("structurely.json"),
+            r#"{"includeIgnored":["nested/**"]}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("nested/submodule/.git"),
+            "gitdir: ../../.git/modules/submodule\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("nested/submodule/lib.rs"),
+            "pub fn from_submodule() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("nested/worktree/.git"),
+            "gitdir: ../../.git/worktrees/feature\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("nested/worktree/lib.rs"),
+            "pub fn duplicate_worktree_view() {}\n",
+        )
+        .unwrap();
+
+        let delta = ProjectInventory::new(root.path())
+            .unwrap()
+            .delta(&HashMap::new(), false)
+            .unwrap();
+        let paths = delta
+            .changed
+            .into_iter()
+            .map(|(path, _, _)| path)
+            .collect::<Vec<_>>();
+        assert_eq!(paths, ["nested/submodule/lib.rs"]);
     }
 }

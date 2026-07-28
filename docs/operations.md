@@ -53,6 +53,17 @@ MCP requests prefer the shared daemon. Each tool response reports
 `foreground-fallback`; if that also fails, it serves the last committed graph
 with an explicit stale warning.
 
+## Nested repositories and worktrees
+
+`includeIgnored` can opt a submodule or embedded repository into one unified
+project graph. Structurely distinguishes its `.git` pointer from a linked
+worktree pointer: genuine nested repositories are indexed, while linked
+worktrees are skipped so the same checkout is not duplicated.
+
+Indexes are root-local and are never silently borrowed from an initialized
+ancestor. Run `structurely init /path/to/worktree` when a linked worktree needs
+its own branch-specific graph.
+
 ## Coding-agent integrations
 
 Structurely can configure a project-local MCP entry for Codex, Claude Code, or
