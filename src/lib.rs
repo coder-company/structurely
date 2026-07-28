@@ -1,3 +1,4 @@
+pub mod daemon;
 pub mod engine;
 mod inventory;
 pub mod mcp;

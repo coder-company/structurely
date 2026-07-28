@@ -94,11 +94,40 @@ enum Command {
         #[arg(long, default_value_t = 250)]
         debounce_ms: u64,
     },
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommand,
+    },
     Serve {
         #[arg(long)]
         mcp: bool,
         #[arg(long, default_value = ".")]
         path: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum DaemonCommand {
+    Start {
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value_t = 250)]
+        debounce_ms: u64,
+    },
+    Status {
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+    },
+    Stop {
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+    },
+    #[command(hide = true)]
+    Run {
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value_t = 250)]
+        debounce_ms: u64,
     },
 }
 
@@ -221,6 +250,38 @@ fn main() -> Result<()> {
                     println!("{rendered}");
                 }
             })?;
+        }
+        Command::Daemon {
+            command: DaemonCommand::Start { path, debounce_ms },
+        } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&structurely::daemon::start(
+                    path,
+                    Duration::from_millis(debounce_ms.max(10))
+                )?)?
+            );
+        }
+        Command::Daemon {
+            command: DaemonCommand::Status { path },
+        } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&structurely::daemon::status(path)?)?
+            );
+        }
+        Command::Daemon {
+            command: DaemonCommand::Stop { path },
+        } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&structurely::daemon::stop(path)?)?
+            );
+        }
+        Command::Daemon {
+            command: DaemonCommand::Run { path, debounce_ms },
+        } => {
+            structurely::daemon::run(path, Duration::from_millis(debounce_ms.max(10)))?;
         }
         Command::Serve { mcp: true, path } => mcp::serve_stdio(&path)?,
         Command::Serve { mcp: false, .. } => {
