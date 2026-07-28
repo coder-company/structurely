@@ -717,12 +717,12 @@ mod tests {
     #[test]
     fn project_config_controls_custom_extensions_and_explicit_excludes() {
         let temp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(temp.path().join("vendor")).unwrap();
+        fs::create_dir_all(temp.path().join("third_party")).unwrap();
         fs::write(
             temp.path().join("structurely.json"),
             r#"{
                 "extensions": { ".view": "typescript" },
-                "exclude": ["vendor/**"]
+                "exclude": ["third_party/**"]
             }"#,
         )
         .unwrap();
@@ -732,7 +732,7 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            temp.path().join("vendor/ignored.ts"),
+            temp.path().join("third_party/ignored.ts"),
             "export function vendorOnly() {}\n",
         )
         .unwrap();

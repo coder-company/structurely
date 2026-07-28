@@ -9,6 +9,9 @@ const CONFIG_FILES: [&str; 2] = ["structurely.json", "codegraph.json"];
 pub(crate) struct ProjectConfig {
     extensions: HashMap<String, Language>,
     exclude: Gitignore,
+    include: Gitignore,
+    include_ignored: Gitignore,
+    has_forced_paths: bool,
 }
 
 impl ProjectConfig {
@@ -46,17 +49,16 @@ impl ProjectConfig {
             }
         }
 
-        let mut builder = GitignoreBuilder::new(root);
-        if let Some(patterns) = value.get("exclude").and_then(Value::as_array) {
-            for pattern in patterns.iter().filter_map(Value::as_str) {
-                if !pattern.trim().is_empty() {
-                    let _ = builder.add_line(file.clone(), pattern.trim());
-                }
-            }
-        }
+        let (exclude, _) = build_matcher(root, file.as_deref(), &value, "exclude")?;
+        let (include, has_include) = build_matcher(root, file.as_deref(), &value, "include")?;
+        let (include_ignored, has_include_ignored) =
+            build_matcher(root, file.as_deref(), &value, "includeIgnored")?;
         Ok(Self {
             extensions,
-            exclude: builder.build()?,
+            exclude,
+            include,
+            include_ignored,
+            has_forced_paths: has_include || has_include_ignored,
         })
     }
 
@@ -73,6 +75,44 @@ impl ProjectConfig {
             .matched_path_or_any_parents(relative, is_dir)
             .is_ignore()
     }
+
+    pub(crate) fn includes(&self, relative: &Path, is_dir: bool) -> bool {
+        self.include
+            .matched_path_or_any_parents(relative, is_dir)
+            .is_ignore()
+    }
+
+    pub(crate) fn includes_ignored_repo(&self, relative: &Path, is_dir: bool) -> bool {
+        self.include_ignored
+            .matched_path_or_any_parents(relative, is_dir)
+            .is_ignore()
+    }
+
+    pub(crate) fn has_forced_paths(&self) -> bool {
+        self.has_forced_paths
+    }
+}
+
+fn build_matcher(
+    root: &Path,
+    source: Option<&Path>,
+    value: &Value,
+    field: &str,
+) -> Result<(Gitignore, bool)> {
+    let mut builder = GitignoreBuilder::new(root);
+    let mut has_patterns = false;
+    if let Some(patterns) = value.get(field).and_then(Value::as_array) {
+        for pattern in patterns.iter().filter_map(Value::as_str) {
+            if !pattern.trim().is_empty()
+                && builder
+                    .add_line(source.map(Path::to_path_buf), pattern.trim())
+                    .is_ok()
+            {
+                has_patterns = true;
+            }
+        }
+    }
+    Ok((builder.build()?, has_patterns))
 }
 
 fn parse_language(value: &str) -> Option<Language> {
@@ -111,7 +151,9 @@ mod tests {
             root.path().join("structurely.json"),
             r#"{
                 "extensions": { ".view": "typescript", "bad": "unknown" },
-                "exclude": ["vendor/**"]
+                "exclude": ["vendor/**"],
+                "include": ["Local/**"],
+                "includeIgnored": ["repos/child/**"]
             }"#,
         )
         .unwrap();
@@ -122,6 +164,9 @@ mod tests {
         );
         assert!(config.excludes(Path::new("vendor/generated.ts"), false));
         assert!(!config.excludes(Path::new("src/generated.ts"), false));
+        assert!(config.includes(Path::new("Local/generated.ts"), false));
+        assert!(config.includes_ignored_repo(Path::new("repos/child/src/lib.rs"), false));
+        assert!(config.has_forced_paths());
     }
 
     #[test]
