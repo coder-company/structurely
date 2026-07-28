@@ -1238,6 +1238,46 @@ mod tests {
     }
 
     #[test]
+    fn workspace_package_imports_constrain_cross_package_calls() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("packages/core/src")).unwrap();
+        fs::write(
+            temp.path().join("package.json"),
+            r#"{"workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("packages/core/package.json"),
+            r#"{"name":"@acme/core","types":"src/index.ts"}"#,
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("packages/core/src/index.ts"),
+            "export function helper() { return 'workspace'; }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("other.ts"),
+            "export function helper() { return 'wrong'; }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("main.ts"),
+            "import { helper as chosen } from '@acme/core';\nfunction caller() { chosen(); }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let callees = engine.callees_named("caller", None, 10).unwrap();
+        assert_eq!(callees.len(), 1);
+        assert_eq!(callees[0].symbol.file, "packages/core/src/index.ts");
+        assert!(engine.snapshot().unwrap().relationships.iter().any(|edge| {
+            edge.kind == RelationshipKind::Imports
+                && edge.evidence.provenance == "workspace/package"
+        }));
+    }
+
+    #[test]
     fn watcher_makes_saved_symbols_query_visible() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("main.ts"), "function before() {}\n").unwrap();

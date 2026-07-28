@@ -1,8 +1,17 @@
 use crate::model::FileFacts;
+use globset::{Glob, GlobSetBuilder};
+use ignore::WalkBuilder;
 use std::{
     fs,
     path::{Component, Path, PathBuf},
 };
+
+#[derive(Debug, Clone)]
+struct WorkspacePackage {
+    name: String,
+    root: PathBuf,
+    entries: Vec<String>,
+}
 
 #[derive(Debug, Clone)]
 struct AliasPattern {
@@ -17,6 +26,7 @@ pub(crate) struct ProjectResolutionContext {
     root: PathBuf,
     base_url: PathBuf,
     aliases: Vec<AliasPattern>,
+    workspace_packages: Vec<WorkspacePackage>,
 }
 
 impl ProjectResolutionContext {
@@ -69,10 +79,12 @@ impl ProjectResolutionContext {
                 .cmp(&left.prefix.len())
                 .then_with(|| left.wildcard.cmp(&right.wildcard))
         });
+        let workspace_packages = load_workspace_packages(root);
         Self {
             root: root.to_owned(),
             base_url,
             aliases,
+            workspace_packages,
         }
     }
 
@@ -81,13 +93,29 @@ impl ProjectResolutionContext {
             let Some(hint) = reference.target_file_hint.as_deref() else {
                 continue;
             };
-            if let Some(resolved) = self.resolve_alias(hint) {
+            if let Some((resolved, provenance)) = self.resolve_import(hint) {
                 reference.target_file_hint = Some(resolved);
-                reference.provenance = "tsconfig/path-alias".to_owned();
-                reference.explanation =
-                    format!("{} through project path alias", reference.explanation);
+                reference.provenance = provenance.to_owned();
+                reference.explanation = format!(
+                    "{} through {}",
+                    reference.explanation,
+                    if provenance == "tsconfig/path-alias" {
+                        "project path alias"
+                    } else {
+                        "workspace package"
+                    }
+                );
             }
         }
+    }
+
+    fn resolve_import(&self, import_path: &str) -> Option<(String, &'static str)> {
+        self.resolve_alias(import_path)
+            .map(|path| (path, "tsconfig/path-alias"))
+            .or_else(|| {
+                self.resolve_workspace_package(import_path)
+                    .map(|path| (path, "workspace/package"))
+            })
     }
 
     fn resolve_alias(&self, import_path: &str) -> Option<String> {
@@ -124,6 +152,124 @@ impl ProjectResolutionContext {
         }
         None
     }
+
+    fn resolve_workspace_package(&self, import_path: &str) -> Option<String> {
+        for package in &self.workspace_packages {
+            let subpath = if import_path == package.name {
+                None
+            } else {
+                import_path
+                    .strip_prefix(&package.name)
+                    .and_then(|suffix| suffix.strip_prefix('/'))
+            };
+            if import_path != package.name && subpath.is_none() {
+                continue;
+            }
+            if let Some(subpath) = subpath {
+                let relative = package.root.join(subpath);
+                if let Some(hint) = canonical_source_hint(&self.root, &relative) {
+                    return Some(hint);
+                }
+                continue;
+            }
+            for entry in &package.entries {
+                if let Some(hint) = canonical_source_hint(&self.root, &package.root.join(entry)) {
+                    return Some(hint);
+                }
+            }
+            for fallback in ["src/index", "index"] {
+                if let Some(hint) = canonical_source_hint(&self.root, &package.root.join(fallback))
+                {
+                    return Some(hint);
+                }
+            }
+        }
+        None
+    }
+}
+
+fn load_workspace_packages(root: &Path) -> Vec<WorkspacePackage> {
+    let root_package = read_json(&root.join("package.json"));
+    let patterns = root_package
+        .as_ref()
+        .and_then(|value| value.get("workspaces"))
+        .map(|workspaces| {
+            workspaces.as_array().or_else(|| {
+                workspaces
+                    .get("packages")
+                    .and_then(serde_json::Value::as_array)
+            })
+        })
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<Vec<_>>();
+    if patterns.is_empty() {
+        return Vec::new();
+    }
+    let mut builder = GlobSetBuilder::new();
+    for pattern in patterns {
+        if let Ok(glob) = Glob::new(pattern.trim_end_matches('/')) {
+            builder.add(glob);
+        }
+    }
+    let Ok(workspaces) = builder.build() else {
+        return Vec::new();
+    };
+    let mut packages = Vec::new();
+    for entry in WalkBuilder::new(root)
+        .hidden(false)
+        .filter_entry(|entry| {
+            !matches!(
+                entry.file_name().to_str(),
+                Some(".git" | ".structurely" | "node_modules" | "target" | "dist" | "build")
+            )
+        })
+        .build()
+        .flatten()
+    {
+        if entry.file_name() != "package.json" || entry.path() == root.join("package.json") {
+            continue;
+        }
+        let Some(package_root) = entry.path().parent() else {
+            continue;
+        };
+        let Ok(relative_root) = package_root.strip_prefix(root) else {
+            continue;
+        };
+        if !workspaces.is_match(relative_root) {
+            continue;
+        }
+        let Some(value) = read_json(entry.path()) else {
+            continue;
+        };
+        let Some(name) = value
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        let entries = ["types", "module", "main", "source"]
+            .iter()
+            .filter_map(|field| value.get(field).and_then(serde_json::Value::as_str))
+            .map(str::to_owned)
+            .collect();
+        packages.push(WorkspacePackage {
+            name: name.to_owned(),
+            root: relative_root.to_owned(),
+            entries,
+        });
+    }
+    packages.sort_by(|left, right| right.name.len().cmp(&left.name.len()));
+    packages
+}
+
+fn read_json(path: &Path) -> Option<serde_json::Value> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|source| serde_json::from_str(&source).ok())
 }
 
 fn split_wildcard(pattern: &str) -> (String, String, bool) {
@@ -291,5 +437,42 @@ mod tests {
         );
         let value: serde_json::Value = serde_json::from_str(&stripped).unwrap();
         assert_eq!(value["url"], "https://example.test/a/*b*/");
+    }
+
+    #[test]
+    fn workspace_packages_resolve_scoped_entries_and_subpaths() {
+        let root = tempdir().unwrap();
+        fs::create_dir_all(root.path().join("packages/core/src")).unwrap();
+        fs::write(
+            root.path().join("package.json"),
+            r#"{"workspaces":{"packages":["packages/*"]}}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("packages/core/package.json"),
+            r#"{"name":"@acme/core","types":"src/index.ts"}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("packages/core/src/index.ts"),
+            "export function helper() {}",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("packages/core/testing.ts"),
+            "export function fixture() {}",
+        )
+        .unwrap();
+
+        let context = ProjectResolutionContext::load(root.path());
+        assert_eq!(
+            context.resolve_workspace_package("@acme/core"),
+            Some("packages/core/src/index".to_owned())
+        );
+        assert_eq!(
+            context.resolve_workspace_package("@acme/core/testing"),
+            Some("packages/core/testing".to_owned())
+        );
+        assert_eq!(context.resolve_workspace_package("@acme/missing"), None);
     }
 }
