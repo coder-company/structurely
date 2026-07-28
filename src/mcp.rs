@@ -277,11 +277,41 @@ fn call_tool(engine: &mut Engine, params: &Value) -> Result<Value> {
     ensure!(arguments.is_object(), "`arguments` must be an object");
     if let Some(project_path) = arguments.get("projectPath").and_then(Value::as_str) {
         let mut project_engine = Engine::open(project_path)?;
-        project_engine.sync()?;
-        return dispatch_tool(&project_engine, name, &arguments);
+        return dispatch_freshness_aware(&mut project_engine, name, &arguments);
     }
-    engine.sync()?;
-    dispatch_tool(engine, name, &arguments)
+    dispatch_freshness_aware(engine, name, &arguments)
+}
+
+fn dispatch_freshness_aware(engine: &mut Engine, name: &str, arguments: &Value) -> Result<Value> {
+    let sync_error = engine.sync().err();
+    let mut response = dispatch_tool(engine, name, arguments)?;
+    let freshness = match sync_error {
+        Some(ref error) => json!({
+            "state": "stale",
+            "warning": format!(
+                "Index catch-up failed; results use the last committed graph epoch: {error}"
+            )
+        }),
+        None => json!({ "state": "current" }),
+    };
+    response["_meta"] = json!({ "freshness": freshness });
+    if let Some(error) = sync_error {
+        let warning = format!(
+            "⚠ **Stale index:** catch-up failed, so this result uses the last committed graph epoch. \
+             Cause: {error}\n\n"
+        );
+        if let Some(text) = response
+            .get_mut("content")
+            .and_then(Value::as_array_mut)
+            .and_then(|content| content.first_mut())
+            .and_then(|item| item.get_mut("text"))
+            .and_then(|value| value.as_str())
+        {
+            let decorated = format!("{warning}{text}");
+            response["content"][0]["text"] = Value::String(decorated);
+        }
+    }
+    Ok(response)
 }
 
 fn dispatch_tool(engine: &Engine, name: &str, arguments: &Value) -> Result<Value> {
@@ -640,6 +670,55 @@ mod tests {
             cross_project["structuredContent"][0]["symbol"]["name"],
             "elsewhere"
         );
+    }
+
+    #[test]
+    fn tool_calls_disclose_stale_fallback_and_recover_after_sync_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("main.ts"),
+            "export function committedSymbol() {}\n",
+        )
+        .unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        fs::write(temp.path().join("broken.ts"), [0xff, 0xfe, 0xfd]).unwrap();
+
+        let stale = call_tool(
+            &mut engine,
+            &json!({
+                "name": "codegraph_search",
+                "arguments": { "query": "committedSymbol" }
+            }),
+        )
+        .unwrap();
+        assert_eq!(stale["_meta"]["freshness"]["state"], "stale");
+        assert!(stale["_meta"]["freshness"]["warning"]
+            .as_str()
+            .unwrap()
+            .contains("last committed graph epoch"));
+        assert!(stale["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("⚠ **Stale index:**"));
+        assert_eq!(
+            stale["structuredContent"][0]["symbol"]["name"],
+            "committedSymbol"
+        );
+
+        fs::remove_file(temp.path().join("broken.ts")).unwrap();
+        let current = call_tool(
+            &mut engine,
+            &json!({
+                "name": "codegraph_search",
+                "arguments": { "query": "committedSymbol" }
+            }),
+        )
+        .unwrap();
+        assert_eq!(current["_meta"]["freshness"]["state"], "current");
+        assert!(!current["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Stale index"));
     }
 
     #[test]
