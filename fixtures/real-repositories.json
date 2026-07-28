@@ -290,6 +290,40 @@
             "\"confidence\": 0.97",
             "\"line\": 148"
           ]
+        },
+        {
+          "command": "callees",
+          "query": "VerifyCodeComponentWithoutCursor.buildVerifyCodeComponent",
+          "file": "code/UI/VerifyCode/casesfeature/verifycode/src/main/ets/view/VerifyCodeView.ets",
+          "contains": [
+            "\"qualified_name\": \"verifyCodeUnitStyle\"",
+            "\"provenance\": \"framework/arkui-helper\"",
+            "\"confidence\": 0.97",
+            "\"line\": 149"
+          ],
+          "recordContains": [
+            "\"qualified_name\": \"verifyCodeUnitStyle\"",
+            "\"provenance\": \"framework/arkui-helper\"",
+            "\"confidence\": 0.97",
+            "\"line\": 149"
+          ]
+        },
+        {
+          "command": "callees",
+          "query": "NotificationPublish.view",
+          "file": "code/BasicFeature/Notification/CustomNotification/entry/src/main/ets/components/NotificationPublish.ets",
+          "contains": [
+            "\"qualified_name\": \"NotificationPublish.viewStyle\"",
+            "\"provenance\": \"framework/arkui-helper\"",
+            "\"confidence\": 0.97",
+            "\"line\": 71"
+          ],
+          "recordContains": [
+            "\"qualified_name\": \"NotificationPublish.viewStyle\"",
+            "\"provenance\": \"framework/arkui-helper\"",
+            "\"confidence\": 0.97",
+            "\"line\": 71"
+          ]
         }
       ]
     }

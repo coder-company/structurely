@@ -119,6 +119,11 @@ def predicates(
             not require_structurely_evidence
             or "framework/arkui-route" in result_text(capture["arkui-route"])
         ),
+        "arkui-helper": "highlighted" in result_text(capture["arkui-helper"])
+        and (
+            not require_structurely_evidence
+            or "framework/arkui-helper" in result_text(capture["arkui-helper"])
+        ),
         "impact": "showUser" in result_text(capture["impact"]),
         "node-window": "showUser" in result_text(capture["node-window"]),
         "explore-flow": all(

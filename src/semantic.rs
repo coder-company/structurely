@@ -19,6 +19,7 @@ pub(crate) fn enrich_file_facts(root: Node<'_>, source: &[u8], facts: &mut FileF
             collect_nestjs_routes(root, source, facts);
             if facts.language == Language::ArkTs {
                 collect_arkui_routes(root, source, facts);
+                collect_arkui_style_helper_calls(root, source, facts);
                 collect_arkui_semantics(root, source, facts);
                 remove_arkui_intrinsic_calls(facts);
             }
@@ -38,6 +39,226 @@ pub(crate) fn enrich_file_facts(root: Node<'_>, source: &[u8], facts: &mut FileF
             collect_django_routes(root, source, facts);
         }
         _ => {}
+    }
+}
+
+#[derive(Clone)]
+struct ArkuiStyleHelper {
+    target: Symbol,
+    owner: Option<String>,
+    extended_intrinsic: Option<String>,
+}
+
+fn collect_arkui_style_helper_calls(root: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+    let mut helpers = Vec::new();
+    collect_arkui_style_helpers(root, source, facts, &mut helpers);
+    if helpers.is_empty() {
+        return;
+    }
+    let mut emitted = HashSet::new();
+    collect_arkui_style_invocations(root, source, facts, &helpers, &mut emitted);
+}
+
+fn collect_arkui_style_helpers(
+    node: Node<'_>,
+    source: &[u8],
+    facts: &FileFacts,
+    output: &mut Vec<ArkuiStyleHelper>,
+) {
+    if matches!(node.kind(), "function_declaration" | "method_definition") {
+        let styles = has_decorator(node, "Styles", source);
+        let extended_intrinsic = arkui_extend_intrinsic(node, source);
+        if styles || extended_intrinsic.is_some() {
+            if let Some(target) = facts.symbols.iter().find(|symbol| {
+                symbol.start_byte == node.start_byte()
+                    && matches!(symbol.kind, SymbolKind::Function | SymbolKind::Method)
+            }) {
+                output.push(ArkuiStyleHelper {
+                    target: target.clone(),
+                    owner: (target.kind == SymbolKind::Method)
+                        .then(|| {
+                            target
+                                .qualified_name
+                                .rsplit_once('.')
+                                .map_or(String::new(), |(owner, _)| owner.to_owned())
+                        })
+                        .filter(|owner| !owner.is_empty()),
+                    extended_intrinsic,
+                });
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_arkui_style_helpers(child, source, facts, output);
+    }
+}
+
+fn arkui_extend_intrinsic(node: Node<'_>, source: &[u8]) -> Option<String> {
+    decorator_nodes(node)
+        .filter_map(|decorator| decorator_call(decorator, source))
+        .find_map(|(name, arguments)| {
+            (name == "Extend" && arguments.len() == 1)
+                .then(|| text(arguments[0], source))
+                .filter(|intrinsic| is_javascript_identifier(intrinsic))
+        })
+}
+
+fn decorator_nodes(node: Node<'_>) -> impl Iterator<Item = Node<'_>> {
+    let mut decorators = direct_decorators(node).collect::<Vec<_>>();
+    let mut sibling = node.prev_named_sibling();
+    while let Some(candidate) = sibling {
+        if candidate.kind() != "decorator" {
+            break;
+        }
+        decorators.push(candidate);
+        sibling = candidate.prev_named_sibling();
+    }
+    decorators.into_iter()
+}
+
+fn collect_arkui_style_invocations(
+    node: Node<'_>,
+    source: &[u8],
+    facts: &mut FileFacts,
+    helpers: &[ArkuiStyleHelper],
+    emitted: &mut HashSet<(String, String, usize)>,
+) {
+    if node.kind() == "call_expression" {
+        if let Some(function) = node.child_by_field_name("function") {
+            match function.kind() {
+                "member_expression" => {
+                    let helper_name = function
+                        .child_by_field_name("property")
+                        .map(|property| text(property, source));
+                    let chain_root = function
+                        .child_by_field_name("object")
+                        .and_then(|object| arkui_chain_root(object, source));
+                    if let Some(helper_name) = helper_name {
+                        append_arkui_style_helper_edge(
+                            node,
+                            &helper_name,
+                            chain_root.as_deref(),
+                            facts,
+                            helpers,
+                            emitted,
+                        );
+                    }
+                }
+                "identifier" => append_arkui_style_helper_edge(
+                    node,
+                    &text(function, source),
+                    None,
+                    facts,
+                    helpers,
+                    emitted,
+                ),
+                _ => {}
+            }
+        }
+    } else if node.kind() == "arkui_component_expression" {
+        let chain_root = node
+            .child_by_field_name("function")
+            .and_then(|function| call_name_text(function, source));
+        let mut cursor = node.walk();
+        for property in node.children_by_field_name("property", &mut cursor) {
+            append_arkui_style_helper_edge(
+                property,
+                &text(property, source),
+                chain_root.as_deref(),
+                facts,
+                helpers,
+                emitted,
+            );
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_arkui_style_invocations(child, source, facts, helpers, emitted);
+    }
+}
+
+fn append_arkui_style_helper_edge(
+    observation: Node<'_>,
+    helper_name: &str,
+    chain_root: Option<&str>,
+    facts: &mut FileFacts,
+    helpers: &[ArkuiStyleHelper],
+    emitted: &mut HashSet<(String, String, usize)>,
+) {
+    let Some(caller) = owning_callable_symbol(observation, &facts.symbols).cloned() else {
+        return;
+    };
+    let caller_owner = caller
+        .qualified_name
+        .rsplit_once('.')
+        .map(|(owner, _)| owner);
+    let mut candidates = helpers
+        .iter()
+        .filter(|helper| helper.target.name == helper_name)
+        .filter(|helper| {
+            helper
+                .owner
+                .as_deref()
+                .is_none_or(|owner| Some(owner) == caller_owner)
+                && helper
+                    .extended_intrinsic
+                    .as_deref()
+                    .is_none_or(|intrinsic| Some(intrinsic) == chain_root)
+        })
+        .collect::<Vec<_>>();
+    if candidates.iter().any(|helper| helper.owner.is_some()) {
+        candidates.retain(|helper| helper.owner.is_some());
+    }
+    if candidates.len() != 1 {
+        return;
+    }
+    let target = candidates[0].target.clone();
+    let key = (
+        caller.id.clone(),
+        target.id.clone(),
+        observation.start_position().row + 1,
+    );
+    if !emitted.insert(key) {
+        return;
+    }
+    facts.relationships.push(Relationship {
+        source_id: caller.id.clone(),
+        target_id: target.id.clone(),
+        kind: RelationshipKind::Calls,
+        evidence: Evidence::new(
+            "framework/arkui-helper",
+            0.97,
+            format!(
+                "{} applies decorated ArkUI style helper {}",
+                caller.qualified_name, target.qualified_name
+            ),
+            &facts.path,
+            observation.start_position().row + 1,
+        ),
+    });
+}
+
+fn arkui_chain_root(node: Node<'_>, source: &[u8]) -> Option<String> {
+    match node.kind() {
+        "arkui_component_expression" => node
+            .child_by_field_name("function")
+            .and_then(|function| call_name_text(function, source)),
+        "call_expression" => {
+            node.child_by_field_name("function")
+                .and_then(|function| match function.kind() {
+                    "identifier" => Some(text(function, source)),
+                    "member_expression" => function
+                        .child_by_field_name("object")
+                        .and_then(|object| arkui_chain_root(object, source)),
+                    _ => None,
+                })
+        }
+        "member_expression" => node
+            .child_by_field_name("object")
+            .and_then(|object| arkui_chain_root(object, source)),
+        "identifier" => Some(text(node, source)),
+        _ => None,
     }
 }
 

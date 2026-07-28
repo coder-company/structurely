@@ -2899,6 +2899,72 @@ mod tests {
     }
 
     #[test]
+    fn arkui_decorated_style_helpers_resolve_exact_chains_and_clean_incrementally() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("Styles.ets");
+        fs::write(
+            &source,
+            "@Extend(Text)\n\
+             function textStyle() { .fontSize(16) }\n\
+             @Extend(Button)\n\
+             function buttonOnly() { .width(100) }\n\
+             function undecorated() {}\n\
+             @Component\n\
+             struct Card {\n\
+               @Styles cardStyle() { .height(40) }\n\
+               @Styles wrongOwner() { .width(20) }\n\
+               build() {\n\
+                 Text('ok').textStyle()\n\
+                 Text('wrong').buttonOnly()\n\
+                 Text('plain').undecorated()\n\
+                 Column() { Text('card') }.cardStyle()\n\
+               }\n\
+             }\n\
+             @Component\n\
+             struct Other {\n\
+               build() { Column().wrongOwner() }\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let helper_names = |engine: &Engine, caller_name: &str| {
+            let caller = engine
+                .search(caller_name, 10)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.qualified_name == caller_name)
+                .unwrap()
+                .symbol;
+            engine
+                .callees(&caller.id)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, evidence)| evidence.provenance == "framework/arkui-helper")
+                .map(|(target, evidence)| {
+                    assert_eq!(evidence.confidence, 0.97);
+                    target.qualified_name
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut card_helpers = helper_names(&engine, "Card.build");
+        card_helpers.sort();
+        assert_eq!(card_helpers, ["Card.cardStyle", "textStyle"]);
+        assert!(helper_names(&engine, "Other.build").is_empty());
+
+        fs::write(
+            &source,
+            "@Extend(Text)\n\
+             function textStyle() { .fontSize(16) }\n\
+             @Component\n\
+             struct Card { build() { Text('plain') } }\n",
+        )
+        .unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 1);
+        assert!(helper_names(&engine, "Card.build").is_empty());
+    }
+
+    #[test]
     fn component_templates_ignore_script_strings_and_intrinsic_elements() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(

@@ -156,6 +156,18 @@
       }
     },
     {
+      "label": "arkui-helper",
+      "method": "tools/call",
+      "params": {
+        "name": "codegraph_callees",
+        "arguments": {
+          "symbol": "StyleHome.build",
+          "file": "harmony/entry/src/main/ets/pages/StyleHome.ets",
+          "limit": 20
+        }
+      }
+    },
+    {
       "label": "impact",
       "method": "tools/call",
       "params": {
