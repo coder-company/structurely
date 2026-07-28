@@ -75,6 +75,7 @@ pub struct ImpactHit {
 pub struct ExploreHit {
     pub symbol: crate::model::Symbol,
     pub source: String,
+    pub source_truncated: bool,
     pub callers: Vec<(crate::model::Symbol, Evidence)>,
     pub callees: Vec<(crate::model::Symbol, Evidence)>,
 }
@@ -492,13 +493,14 @@ impl Engine {
                 .with_context(|| format!("read source {}", path.display()))?;
             let snippet = source
                 .get(hit.symbol.start_byte..hit.symbol.end_byte)
-                .unwrap_or_default()
-                .to_owned();
+                .unwrap_or_default();
+            let (snippet, source_truncated) = bounded_source(snippet, 4_000);
             output.push(ExploreHit {
                 callers: self.callers(&hit.symbol.id)?,
                 callees: self.callees(&hit.symbol.id)?,
                 symbol: hit.symbol,
                 source: snippet,
+                source_truncated,
             });
         }
         Ok(output)
@@ -613,6 +615,17 @@ impl Engine {
             }
         }
         Ok(output)
+    }
+}
+
+fn bounded_source(source: &str, maximum_chars: usize) -> (String, bool) {
+    let boundary = source
+        .char_indices()
+        .nth(maximum_chars)
+        .map(|(index, _)| index);
+    match boundary {
+        Some(index) => (source[..index].to_owned(), true),
+        None => (source.to_owned(), false),
     }
 }
 

@@ -400,54 +400,114 @@ pub fn format_explore_text(
     query: &str,
     hits: &[crate::engine::ExploreHit],
 ) -> Result<String> {
-    use std::collections::BTreeMap;
     use std::fmt::Write as _;
 
-    let mut files = BTreeMap::<&str, Vec<&crate::engine::ExploreHit>>::new();
-    for hit in hits {
-        files.entry(&hit.symbol.file).or_default().push(hit);
-    }
+    let indexed_files = engine.files()?.len();
+    let maximum_chars = match indexed_files {
+        0..=499 => 48_000,
+        500..=4_999 => 32_000,
+        _ => 24_000,
+    };
+    let mut ranked = hits.iter().collect::<Vec<_>>();
+    let normalized_query = query.trim().to_ascii_lowercase();
+    ranked.sort_by(|left, right| {
+        let left_exact = left.symbol.name.to_ascii_lowercase() == normalized_query;
+        let right_exact = right.symbol.name.to_ascii_lowercase() == normalized_query;
+        right_exact
+            .cmp(&left_exact)
+            .then_with(|| {
+                (right.callers.len() + right.callees.len())
+                    .cmp(&(left.callers.len() + left.callees.len()))
+            })
+            .then_with(|| left.symbol.file.cmp(&right.symbol.file))
+            .then_with(|| left.symbol.start_line.cmp(&right.symbol.start_line))
+    });
+    let total_files = hits
+        .iter()
+        .map(|hit| hit.symbol.file.as_str())
+        .collect::<std::collections::HashSet<_>>()
+        .len();
     let mut output = format!(
         "**Exploration: {query}**\n\nFound {} symbols across {} files.\n",
         hits.len(),
-        files.len()
+        total_files
     );
-    if !hits.is_empty() {
-        output.push_str("\n**Blast radius — what depends on these**\n\n");
-        for hit in hits.iter().filter(|hit| !hit.callers.is_empty()) {
-            writeln!(
-                output,
-                "- `{}` ({}:{}) — {} caller{}",
-                hit.symbol.qualified_name,
-                hit.symbol.file,
-                hit.symbol.start_line,
-                hit.callers.len(),
-                if hit.callers.len() == 1 { "" } else { "s" }
-            )?;
-        }
-    }
     output.push_str(
         "\n**Source Code**\n\n\
-         > Verbatim, current on-disk source, line-numbered for direct use.\n",
+         > Ranked current-source excerpts, line-numbered and globally budgeted.\n",
     );
-    for (file, file_hits) in files {
-        let node = engine.node(None, Some(file), true, None, None, false)?;
-        let source = node
-            .files
-            .first()
-            .and_then(|entry| entry.source.as_deref())
-            .unwrap_or_default();
-        let symbols = file_hits
-            .iter()
-            .map(|hit| format!("{}({})", hit.symbol.name, hit.symbol.kind))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let language = file_hits[0].symbol.language.to_string();
-        write!(
-            output,
-            "\n**`{file}`** — {symbols}\n\n```{language}\n{source}\n```\n"
+    let mut rendered_symbols = 0;
+    let mut rendered_files = std::collections::HashSet::new();
+    const FOOTER_RESERVE: usize = 600;
+    for hit in ranked {
+        let mut section = String::new();
+        writeln!(
+            section,
+            "\n**`{}` — `{}` ({}, lines {}–{})**\n",
+            hit.symbol.file,
+            hit.symbol.qualified_name,
+            hit.symbol.kind,
+            hit.symbol.start_line,
+            hit.symbol.end_line
         )?;
+        if !hit.callers.is_empty() || !hit.callees.is_empty() {
+            let callers = hit
+                .callers
+                .iter()
+                .take(8)
+                .map(|(symbol, _)| symbol.qualified_name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let callees = hit
+                .callees
+                .iter()
+                .take(8)
+                .map(|(symbol, _)| symbol.qualified_name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(
+                section,
+                "- Flow: {} caller{}, {} callee{}{}{}",
+                hit.callers.len(),
+                if hit.callers.len() == 1 { "" } else { "s" },
+                hit.callees.len(),
+                if hit.callees.len() == 1 { "" } else { "s" },
+                if callers.is_empty() {
+                    ""
+                } else {
+                    " — callers: "
+                },
+                callers
+            )?;
+            if !callees.is_empty() {
+                writeln!(section, "- Callees: {callees}")?;
+            }
+        }
+        writeln!(section, "\n```{}", hit.symbol.language)?;
+        for (offset, line) in hit.source.lines().enumerate() {
+            writeln!(section, "{}\t{}", hit.symbol.start_line + offset, line)?;
+        }
+        if hit.source_truncated {
+            writeln!(section, "… source excerpt truncated at 4,000 characters")?;
+        }
+        section.push_str("```\n");
+        if output.chars().count() + section.chars().count() + FOOTER_RESERVE > maximum_chars {
+            continue;
+        }
+        rendered_files.insert(hit.symbol.file.as_str());
+        rendered_symbols += 1;
+        output.push_str(&section);
     }
+    let omitted_symbols = hits.len().saturating_sub(rendered_symbols);
+    writeln!(
+        output,
+        "\n**Coverage:** rendered {rendered_symbols}/{} symbols across {}/{} files; \
+         omitted {omitted_symbols} symbol{} under the {maximum_chars}-character global budget.",
+        hits.len(),
+        rendered_files.len(),
+        total_files,
+        if omitted_symbols == 1 { "" } else { "s" }
+    )?;
     Ok(output)
 }
 
@@ -540,7 +600,8 @@ mod tests {
         let text = explored["content"][0]["text"].as_str().unwrap();
         assert!(text.starts_with("**Exploration: callee**"));
         assert!(text.contains("**Source Code**"));
-        assert!(text.contains("1\tfunction caller()"));
+        assert!(text.contains("2\tfunction callee()"));
+        assert!(text.contains("**Coverage:**"));
     }
 
     #[test]
@@ -750,5 +811,45 @@ mod tests {
                 .collect::<Vec<_>>(),
             *contract["defaultTools"].as_array().unwrap()
         );
+    }
+
+    #[test]
+    fn explore_enforces_global_and_per_symbol_budgets_with_disclosure() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = (0..24)
+            .map(|index| {
+                format!(
+                    "function handler{index}() {{ return \"{}\"; }}\n",
+                    "x".repeat(5_000)
+                )
+            })
+            .collect::<String>();
+        fs::write(temp.path().join("handlers.ts"), source).unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let hits = engine.explore("handler", 12).unwrap();
+        assert!(hits.iter().any(|hit| hit.source_truncated));
+
+        let text = format_explore_text(&engine, "handler", &hits).unwrap();
+        assert!(text.chars().count() <= 48_000);
+        assert!(text.contains("source excerpt truncated at 4,000 characters"));
+        assert!(!text.contains("omitted 0 symbols"));
+        assert!(text.contains("character global budget"));
+    }
+
+    #[test]
+    fn explore_ranks_exact_symbols_before_loose_matches() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("orders.ts"),
+            "function processOrderLegacy() {}\nfunction processOrder() {}\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let hits = engine.explore("processOrder", 12).unwrap();
+        let text = format_explore_text(&engine, "processOrder", &hits).unwrap();
+        assert!(text
+            .find("`processOrder`")
+            .unwrap()
+            .lt(&text.find("`processOrderLegacy`").unwrap()));
     }
 }
