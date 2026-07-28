@@ -1,12 +1,12 @@
 {
-  "structurelyCommit": "7ab4657",
+  "structurelyCommit": "fcbb5cf",
   "codeGraph": {
     "version": "1.5.0",
     "commit": "572d22bfbe82602080e457bec655f72e3314f9ef"
   },
   "compatibility": {
-    "passed": 14,
-    "total": 14,
+    "passed": 16,
+    "total": 16,
     "score": 1.0
   },
   "contextUsefulness": {

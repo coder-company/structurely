@@ -90,5 +90,5 @@ TypeScript, JavaScript, Python, and Rust fixture on every change.
 and pinned CodeGraph, then scores required facts, relevant-file recall, file
 precision, flow-spine coverage, line-numbered source, and output budget. The
 checked-in [`differential-mcp-2026-07-28`](../benchmarks/differential-mcp-2026-07-28/README.md)
-run passes all 14 compatibility scenarios and scores Structurely 1.0000 versus
+run passes all 16 compatibility scenarios and scores Structurely 1.0000 versus
 CodeGraph 0.9583 on its flow fixture.
