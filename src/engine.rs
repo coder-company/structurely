@@ -1392,6 +1392,54 @@ mod tests {
     }
 
     #[test]
+    fn cargo_workspace_imports_constrain_cross_crate_calls() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("crates/core-lib/src")).unwrap();
+        fs::create_dir_all(temp.path().join("crates/app/src")).unwrap();
+        fs::write(
+            temp.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("crates/core-lib/Cargo.toml"),
+            "[package]\nname = \"core-lib\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("crates/app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("crates/core-lib/src/lib.rs"),
+            "pub fn helper() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("crates/app/src/decoy.rs"),
+            "pub fn helper() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("crates/app/src/main.rs"),
+            "use core_lib::helper;\nfn caller() { helper(); }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let callees = engine.callees_named("caller", None, 10).unwrap();
+        assert_eq!(callees.len(), 1);
+        assert_eq!(callees[0].symbol.file, "crates/core-lib/src/lib.rs");
+        assert_eq!(callees[0].evidence.confidence, 0.97);
+        assert!(engine.snapshot().unwrap().relationships.iter().any(|edge| {
+            edge.kind == RelationshipKind::Imports
+                && edge.evidence.provenance == "cargo/workspace"
+                && edge.target_id == callees[0].symbol.id
+        }));
+    }
+
+    #[test]
     fn named_callback_registrations_create_evidence_bearing_call_edges() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(

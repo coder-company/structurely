@@ -187,20 +187,17 @@ fn collect_structural_references(
         }
         "use_declaration" => {
             if let Some(file_symbol) = symbols.first() {
-                let mut names = Vec::new();
-                collect_identifier_nodes(node, source, &mut names);
-                if let Some((name, _, _)) = names.last() {
-                    push_reference(
+                if let Some((target_name, binding_name, target_file_hint)) =
+                    rust_use_reference(node, source)
+                {
+                    push_import_reference(
                         output,
                         file_symbol,
-                        name.clone(),
-                        RelationshipKind::Imports,
-                        ReferenceEvidence {
-                            provenance: "tree-sitter/import",
-                            confidence: 0.85,
-                            file,
-                            line: node.start_position().row + 1,
-                        },
+                        target_name,
+                        binding_name,
+                        target_file_hint,
+                        file,
+                        node.start_position().row + 1,
                     );
                 }
             }
@@ -219,6 +216,41 @@ fn collect_structural_references(
     for child in node.named_children(&mut cursor) {
         collect_structural_references(child, source, file, symbols, output);
     }
+}
+
+fn rust_use_reference(
+    declaration: Node<'_>,
+    source: &[u8],
+) -> Option<(String, String, Option<String>)> {
+    let declaration = node_text(declaration, source);
+    let body = declaration
+        .trim()
+        .strip_prefix("use ")?
+        .trim_end_matches(';')
+        .trim();
+    if body
+        .chars()
+        .any(|character| matches!(character, '{' | '}' | '*'))
+    {
+        return None;
+    }
+    let (path, alias) = body
+        .rsplit_once(" as ")
+        .map_or((body, None), |(path, alias)| {
+            (path.trim(), Some(alias.trim()))
+        });
+    let segments = path
+        .split("::")
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    let target_name = segments.last()?.to_string();
+    let binding_name = alias.unwrap_or(&target_name).to_owned();
+    let target_file_hint = segments
+        .first()
+        .filter(|segment| !matches!(**segment, "crate" | "self" | "super"))
+        .map(|segment| (*segment).to_owned());
+    Some((target_name, binding_name, target_file_hint))
 }
 
 fn collect_heritage(

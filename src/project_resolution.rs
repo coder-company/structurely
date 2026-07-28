@@ -11,6 +11,7 @@ struct WorkspacePackage {
     name: String,
     root: PathBuf,
     entries: Vec<String>,
+    provenance: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -79,7 +80,9 @@ impl ProjectResolutionContext {
                 .cmp(&left.prefix.len())
                 .then_with(|| left.wildcard.cmp(&right.wildcard))
         });
-        let workspace_packages = load_workspace_packages(root);
+        let mut workspace_packages = load_workspace_packages(root);
+        workspace_packages.extend(load_cargo_packages(root));
+        workspace_packages.sort_by(|left, right| right.name.len().cmp(&left.name.len()));
         Self {
             root: root.to_owned(),
             base_url,
@@ -99,10 +102,10 @@ impl ProjectResolutionContext {
                 reference.explanation = format!(
                     "{} through {}",
                     reference.explanation,
-                    if provenance == "tsconfig/path-alias" {
-                        "project path alias"
-                    } else {
-                        "workspace package"
+                    match provenance {
+                        "tsconfig/path-alias" => "project path alias",
+                        "cargo/workspace" => "Cargo workspace package",
+                        _ => "JavaScript workspace package",
                     }
                 );
             }
@@ -112,10 +115,7 @@ impl ProjectResolutionContext {
     fn resolve_import(&self, import_path: &str) -> Option<(String, &'static str)> {
         self.resolve_alias(import_path)
             .map(|path| (path, "tsconfig/path-alias"))
-            .or_else(|| {
-                self.resolve_workspace_package(import_path)
-                    .map(|path| (path, "workspace/package"))
-            })
+            .or_else(|| self.resolve_workspace_package(import_path))
     }
 
     fn resolve_alias(&self, import_path: &str) -> Option<String> {
@@ -153,7 +153,7 @@ impl ProjectResolutionContext {
         None
     }
 
-    fn resolve_workspace_package(&self, import_path: &str) -> Option<String> {
+    fn resolve_workspace_package(&self, import_path: &str) -> Option<(String, &'static str)> {
         for package in &self.workspace_packages {
             let subpath = if import_path == package.name {
                 None
@@ -168,19 +168,19 @@ impl ProjectResolutionContext {
             if let Some(subpath) = subpath {
                 let relative = package.root.join(subpath);
                 if let Some(hint) = canonical_source_hint(&self.root, &relative) {
-                    return Some(hint);
+                    return Some((hint, package.provenance));
                 }
                 continue;
             }
             for entry in &package.entries {
                 if let Some(hint) = canonical_source_hint(&self.root, &package.root.join(entry)) {
-                    return Some(hint);
+                    return Some((hint, package.provenance));
                 }
             }
             for fallback in ["src/index", "index"] {
                 if let Some(hint) = canonical_source_hint(&self.root, &package.root.join(fallback))
                 {
-                    return Some(hint);
+                    return Some((hint, package.provenance));
                 }
             }
         }
@@ -190,7 +190,7 @@ impl ProjectResolutionContext {
 
 fn load_workspace_packages(root: &Path) -> Vec<WorkspacePackage> {
     let root_package = read_json(&root.join("package.json"));
-    let patterns = root_package
+    let mut patterns = root_package
         .as_ref()
         .and_then(|value| value.get("workspaces"))
         .map(|workspaces| {
@@ -204,12 +204,14 @@ fn load_workspace_packages(root: &Path) -> Vec<WorkspacePackage> {
         .flatten()
         .flatten()
         .filter_map(serde_json::Value::as_str)
+        .map(str::to_owned)
         .collect::<Vec<_>>();
+    patterns.extend(load_pnpm_patterns(root));
     if patterns.is_empty() {
         return Vec::new();
     }
     let mut builder = GlobSetBuilder::new();
-    for pattern in patterns {
+    for pattern in &patterns {
         if let Ok(glob) = Glob::new(pattern.trim_end_matches('/')) {
             builder.add(glob);
         }
@@ -260,9 +262,119 @@ fn load_workspace_packages(root: &Path) -> Vec<WorkspacePackage> {
             name: name.to_owned(),
             root: relative_root.to_owned(),
             entries,
+            provenance: "workspace/package",
         });
     }
-    packages.sort_by(|left, right| right.name.len().cmp(&left.name.len()));
+    packages
+}
+
+fn load_pnpm_patterns(root: &Path) -> Vec<String> {
+    let Ok(source) = fs::read_to_string(root.join("pnpm-workspace.yaml")) else {
+        return Vec::new();
+    };
+    let mut in_packages = false;
+    let mut patterns = Vec::new();
+    for raw_line in source.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if !raw_line.chars().next().is_some_and(char::is_whitespace) {
+            in_packages = line == "packages:";
+            continue;
+        }
+        if !in_packages {
+            continue;
+        }
+        let Some(value) = line.strip_prefix('-') else {
+            continue;
+        };
+        let value = value.trim().trim_matches(['\'', '"']).trim_end_matches('/');
+        if !value.is_empty() && !value.starts_with('!') {
+            patterns.push(value.to_owned());
+        }
+    }
+    patterns
+}
+
+fn load_cargo_packages(root: &Path) -> Vec<WorkspacePackage> {
+    let Ok(source) = fs::read_to_string(root.join("Cargo.toml")) else {
+        return Vec::new();
+    };
+    let Ok(document) = source.parse::<toml_edit::DocumentMut>() else {
+        return Vec::new();
+    };
+    let patterns = document
+        .get("workspace")
+        .and_then(toml_edit::Item::as_table)
+        .and_then(|workspace| workspace.get("members"))
+        .and_then(toml_edit::Item::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(toml_edit::Value::as_str)
+        .collect::<Vec<_>>();
+    if patterns.is_empty() {
+        return Vec::new();
+    }
+    let mut builder = GlobSetBuilder::new();
+    for pattern in patterns {
+        if let Ok(glob) = Glob::new(pattern.trim_end_matches('/')) {
+            builder.add(glob);
+        }
+    }
+    let Ok(members) = builder.build() else {
+        return Vec::new();
+    };
+    let mut packages = Vec::new();
+    for entry in WalkBuilder::new(root)
+        .hidden(false)
+        .filter_entry(|entry| {
+            !matches!(
+                entry.file_name().to_str(),
+                Some(".git" | ".structurely" | "node_modules" | "target" | "dist" | "build")
+            )
+        })
+        .build()
+        .flatten()
+    {
+        if entry.file_name() != "Cargo.toml" || entry.path() == root.join("Cargo.toml") {
+            continue;
+        }
+        let Some(package_root) = entry.path().parent() else {
+            continue;
+        };
+        let Ok(relative_root) = package_root.strip_prefix(root) else {
+            continue;
+        };
+        if !members.is_match(relative_root) {
+            continue;
+        }
+        let Ok(member_source) = fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let Ok(member) = member_source.parse::<toml_edit::DocumentMut>() else {
+            continue;
+        };
+        let Some(name) = member
+            .get("package")
+            .and_then(toml_edit::Item::as_table)
+            .and_then(|package| package.get("name"))
+            .and_then(toml_edit::Item::as_str)
+        else {
+            continue;
+        };
+        let entries = ["src/lib", "src/main"]
+            .into_iter()
+            .filter(|entry| canonical_source_hint(root, &relative_root.join(entry)).is_some())
+            .map(str::to_owned)
+            .collect();
+        packages.push(WorkspacePackage {
+            name: name.replace('-', "_"),
+            root: relative_root.to_owned(),
+            entries,
+            provenance: "cargo/workspace",
+        });
+    }
     packages
 }
 
@@ -300,7 +412,9 @@ fn normalize_absolute(path: &Path) -> PathBuf {
 }
 
 fn canonical_source_hint(root: &Path, relative: &Path) -> Option<String> {
-    const EXTENSIONS: &[&str] = &["ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts", "json"];
+    const EXTENSIONS: &[&str] = &[
+        "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts", "json", "rs",
+    ];
     let direct = root.join(relative);
     if direct.is_file() {
         return Some(normalize_source_hint(relative));
@@ -467,12 +581,67 @@ mod tests {
         let context = ProjectResolutionContext::load(root.path());
         assert_eq!(
             context.resolve_workspace_package("@acme/core"),
-            Some("packages/core/src/index".to_owned())
+            Some(("packages/core/src/index".to_owned(), "workspace/package"))
         );
         assert_eq!(
             context.resolve_workspace_package("@acme/core/testing"),
-            Some("packages/core/testing".to_owned())
+            Some(("packages/core/testing".to_owned(), "workspace/package"))
         );
         assert_eq!(context.resolve_workspace_package("@acme/missing"), None);
+    }
+
+    #[test]
+    fn pnpm_workspace_patterns_discover_packages_without_root_package_workspaces() {
+        let root = tempdir().unwrap();
+        fs::create_dir_all(root.path().join("packages/core/src")).unwrap();
+        fs::write(
+            root.path().join("pnpm-workspace.yaml"),
+            "packages:\n  - 'packages/*'\n  - '!**/fixtures/**'\n",
+        )
+        .unwrap();
+        fs::write(root.path().join("package.json"), r#"{"private":true}"#).unwrap();
+        fs::write(
+            root.path().join("packages/core/package.json"),
+            r#"{"name":"@acme/core","source":"src/index.ts"}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("packages/core/src/index.ts"),
+            "export function helper() {}",
+        )
+        .unwrap();
+
+        let context = ProjectResolutionContext::load(root.path());
+        assert_eq!(
+            context.resolve_workspace_package("@acme/core"),
+            Some(("packages/core/src/index".to_owned(), "workspace/package"))
+        );
+    }
+
+    #[test]
+    fn cargo_workspace_crate_names_resolve_to_library_entries() {
+        let root = tempdir().unwrap();
+        fs::create_dir_all(root.path().join("crates/core-lib/src")).unwrap();
+        fs::write(
+            root.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("crates/core-lib/Cargo.toml"),
+            "[package]\nname = \"core-lib\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("crates/core-lib/src/lib.rs"),
+            "pub fn helper() {}",
+        )
+        .unwrap();
+
+        let context = ProjectResolutionContext::load(root.path());
+        assert_eq!(
+            context.resolve_workspace_package("core_lib"),
+            Some(("crates/core-lib/src/lib".to_owned(), "cargo/workspace"))
+        );
     }
 }
