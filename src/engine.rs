@@ -1524,7 +1524,7 @@ mod tests {
     }
 
     #[test]
-    fn express_routes_are_symbols_wired_to_the_last_named_handler() {
+    fn express_routes_are_symbols_wired_to_every_named_middleware_and_handler() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(
             temp.path().join("handlers.ts"),
@@ -1548,11 +1548,53 @@ mod tests {
             .symbol;
         assert_eq!(route.name, "GET /users/:id");
         let callees = engine.callees(&route.id).unwrap();
-        assert_eq!(callees.len(), 1);
-        assert_eq!(callees[0].0.name, "showUser");
-        assert_eq!(callees[0].0.file, "handlers.ts");
-        assert_eq!(callees[0].1.provenance, "framework/express-route");
-        assert_eq!(callees[0].1.confidence, 0.97);
+        assert_eq!(callees.len(), 2);
+        assert_eq!(
+            callees
+                .iter()
+                .map(|(symbol, _)| symbol.name.as_str())
+                .collect::<Vec<_>>(),
+            ["authorize", "showUser"]
+        );
+        assert!(callees.iter().all(|(symbol, evidence)| {
+            symbol.file == "handlers.ts"
+                && evidence.provenance == "framework/express-route"
+                && evidence.confidence == 0.97
+        }));
+    }
+
+    #[test]
+    fn duplicate_express_routes_get_unique_stable_semantic_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("routes.js"),
+            "function first() {}\n\
+             function second() {}\n\
+             app.get('/same', first);\n\
+             app.get('/same', second);\n",
+        )
+        .unwrap();
+
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let initial = engine
+            .search("GET /same", 10)
+            .unwrap()
+            .into_iter()
+            .filter(|hit| hit.symbol.kind == crate::model::SymbolKind::Route)
+            .map(|hit| hit.symbol.id)
+            .collect::<Vec<_>>();
+        assert_eq!(initial.len(), 2);
+        assert_ne!(initial[0], initial[1]);
+
+        engine.sync().unwrap();
+        let unchanged = engine
+            .search("GET /same", 10)
+            .unwrap()
+            .into_iter()
+            .filter(|hit| hit.symbol.kind == crate::model::SymbolKind::Route)
+            .map(|hit| hit.symbol.id)
+            .collect::<Vec<_>>();
+        assert_eq!(initial, unchanged);
     }
 
     #[test]

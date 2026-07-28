@@ -238,6 +238,12 @@ fn enrich_javascript_call(call: Node<'_>, source: &[u8], facts: &mut FileFacts) 
                     && pending.line == call.start_position().row + 1)
             });
             let name = format!("{verb} {path}");
+            let occurrence = facts
+                .symbols
+                .iter()
+                .filter(|symbol| symbol.kind == SymbolKind::Route && symbol.name == name)
+                .count()
+                + 1;
             let symbol = Symbol::new_disambiguated(
                 facts.language,
                 SymbolKind::Route,
@@ -245,7 +251,7 @@ fn enrich_javascript_call(call: Node<'_>, source: &[u8], facts: &mut FileFacts) 
                 &name,
                 &facts.path,
                 span(call),
-                &format!("express|{verb}|{path}"),
+                &format!("express|{verb}|{path}|occurrence:{occurrence}"),
             );
             let file_symbol = facts.symbols.first().expect("file symbol");
             facts.relationships.push(Relationship {
@@ -265,47 +271,52 @@ fn enrich_javascript_call(call: Node<'_>, source: &[u8], facts: &mut FileFacts) 
         },
     );
 
-    let callback_index =
-        callback_argument_index(method.as_str(), &arguments, source, route.is_some());
-    let Some(callback) = callback_index.and_then(|index| arguments.get(index).copied()) else {
-        return;
-    };
-    let Some(target_name) = referenced_callable_name(callback, source) else {
-        return;
-    };
-    let (caller_id, provenance, confidence, explanation) = if let Some(route) = route {
-        (
-            route.id,
-            "framework/express-route",
-            0.98,
-            format!(
-                "Express route {} registers handler {target_name}",
-                route.name
-            ),
-        )
+    let callbacks = if route.is_some() {
+        arguments.iter().skip(1).copied().collect::<Vec<_>>()
     } else {
-        let owner = owning_symbol(call, &facts.symbols)
-            .or_else(|| facts.symbols.first())
-            .expect("file symbol");
-        (
-            owner.id.clone(),
-            "tree-sitter/callback-registration",
-            0.95,
-            format!("{method} registers callback {target_name}"),
-        )
+        callback_argument_index(method.as_str(), &arguments, source, false)
+            .and_then(|index| arguments.get(index).copied())
+            .into_iter()
+            .collect()
     };
-    facts.unresolved_calls.push(UnresolvedCall {
-        caller_id,
-        callee_name: target_name,
-        receiver_type: None,
-        target_file_hint: None,
-        provenance: provenance.to_owned(),
-        confidence,
-        explanation,
-        resolvable: true,
-        file: facts.path.clone(),
-        line: call.start_position().row + 1,
-    });
+    for callback in callbacks {
+        let Some(target_name) = referenced_callable_name(callback, source) else {
+            continue;
+        };
+        let (caller_id, provenance, confidence, explanation) = if let Some(route) = &route {
+            (
+                route.id.clone(),
+                "framework/express-route",
+                0.98,
+                format!(
+                    "Express route {} registers handler {target_name}",
+                    route.name
+                ),
+            )
+        } else {
+            let owner = owning_symbol(call, &facts.symbols)
+                .or_else(|| facts.symbols.first())
+                .expect("file symbol");
+            (
+                owner.id.clone(),
+                "tree-sitter/callback-registration",
+                0.95,
+                format!("{method} registers callback {target_name}"),
+            )
+        };
+        facts.unresolved_calls.push(UnresolvedCall {
+            caller_id,
+            callee_name: target_name,
+            receiver_type: None,
+            target_file_hint: None,
+            provenance: provenance.to_owned(),
+            confidence,
+            explanation,
+            resolvable: true,
+            file: facts.path.clone(),
+            line: call.start_position().row + 1,
+        });
+    }
 }
 
 fn collect_react_router_jsx(node: Node<'_>, source: &[u8], facts: &mut FileFacts) {
