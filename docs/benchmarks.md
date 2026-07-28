@@ -61,6 +61,13 @@ from the pinned CodeGraph source tree across five fresh trials. Structurely's
 median end-to-end indexing is 3.96× faster, query p50 is 37.66× faster, and
 peak initialization RSS is 91.1% lower on that host.
 
+The
+[`codegraph-source-intersection-2026-07-28-post-semantics`](../benchmarks/codegraph-source-intersection-2026-07-28-post-semantics/README.md)
+rerun covers the expanded semantic model. Structurely remains 3.64× faster to
+index and 8.76× faster for query-process p50 while using 89.2% less peak
+memory. Pass `--minimum-index-speedup 2 --minimum-query-speedup 2` to make the
+benchmark command fail when either required advantage regresses.
+
 ## Semantic quality
 
 Quality manifests list expected caller/callee edges by language. Evaluate a

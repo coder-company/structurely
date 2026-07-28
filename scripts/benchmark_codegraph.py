@@ -55,6 +55,8 @@ def main() -> None:
     parser.add_argument("--query", default="CodeGraph")
     parser.add_argument("--trials", type=int, default=5)
     parser.add_argument("--queries", type=int, default=20)
+    parser.add_argument("--minimum-index-speedup", type=float)
+    parser.add_argument("--minimum-query-speedup", type=float)
     args = parser.parse_args()
 
     args.output.mkdir(parents=True, exist_ok=True)
@@ -143,6 +145,12 @@ def main() -> None:
             root / "codegraph-rss",
         )
 
+    index_speedup = (
+        statistics.median(codegraph_wall) / statistics.median(structurely_wall)
+    )
+    query_speedup = (
+        statistics.median(codegraph_queries) / statistics.median(structurely_queries)
+    )
     report = {
         "protocol": {
             "trials": args.trials,
@@ -178,11 +186,29 @@ def main() -> None:
             "edges": codegraph_status["edgeCount"],
             "max_rss_kb": codegraph_rss,
         },
+        "acceptance": {
+            "index_speedup": index_speedup,
+            "query_speedup": query_speedup,
+            "minimum_index_speedup": args.minimum_index_speedup,
+            "minimum_query_speedup": args.minimum_query_speedup,
+            "passed": (
+                (
+                    args.minimum_index_speedup is None
+                    or index_speedup >= args.minimum_index_speedup
+                )
+                and (
+                    args.minimum_query_speedup is None
+                    or query_speedup >= args.minimum_query_speedup
+                )
+            ),
+        },
     }
     (args.output / "results.json").write_text(
         json.dumps(report, indent=2) + "\n", encoding="utf-8"
     )
     print(json.dumps(report, indent=2))
+    if not report["acceptance"]["passed"]:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
