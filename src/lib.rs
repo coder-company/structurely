@@ -4,6 +4,7 @@ pub mod mcp;
 pub mod model;
 pub mod parser;
 mod project_config;
+mod project_resolution;
 pub mod quality;
 pub mod store;
 

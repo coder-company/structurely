@@ -2,6 +2,7 @@ use crate::{
     inventory::ProjectInventory,
     model::{Evidence, RelationshipKind},
     parser::parse_file_as,
+    project_resolution::ProjectResolutionContext,
     store::{FileSummary, SearchHit, StorageMetrics, Store},
 };
 use anyhow::{anyhow, bail, Context, Result};
@@ -146,6 +147,7 @@ impl Engine {
         let files_scanned = delta.files_scanned;
         let files_skipped = delta.files_skipped;
         let files_changed = changed.len();
+        let resolution_context = Arc::new(ProjectResolutionContext::load(&self.root));
         let available_workers = thread::available_parallelism()
             .map(|parallelism| parallelism.get())
             .unwrap_or(1);
@@ -161,7 +163,9 @@ impl Engine {
                 let facts = changed.iter().map(|(relative, path, language)| {
                     let source = fs::read_to_string(path)
                         .with_context(|| format!("read source {}", path.display()))?;
-                    parse_file_as(relative, &source, *language)
+                    let mut facts = parse_file_as(relative, &source, *language)?;
+                    resolution_context.apply(&mut facts);
+                    Ok(facts)
                 });
                 self.store.publish(facts, &deleted)?
             } else {
@@ -176,6 +180,7 @@ impl Engine {
                     for _ in 0..parse_workers {
                         let work_receiver = Arc::clone(&work_receiver);
                         let result_sender = result_sender.clone();
+                        let resolution_context = Arc::clone(&resolution_context);
                         scope.spawn(move || loop {
                             let work = match work_receiver.lock() {
                                 Ok(receiver) => receiver.recv(),
@@ -186,7 +191,11 @@ impl Engine {
                             };
                             let facts = fs::read_to_string(&path)
                                 .with_context(|| format!("read source {}", path.display()))
-                                .and_then(|source| parse_file_as(&relative, &source, language));
+                                .and_then(|source| {
+                                    let mut facts = parse_file_as(&relative, &source, language)?;
+                                    resolution_context.apply(&mut facts);
+                                    Ok(facts)
+                                });
                             if result_sender.send(facts).is_err() {
                                 return;
                             }
@@ -1184,6 +1193,48 @@ mod tests {
         assert_eq!(callees[0].symbol.file, "defs.ts");
         assert_eq!(callees[0].symbol.name, "helper");
         assert_eq!(callees[0].evidence.confidence, 0.97);
+    }
+
+    #[test]
+    fn tsconfig_path_aliases_resolve_imports_and_calls_to_canonical_files() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join("src")).unwrap();
+        fs::write(
+            temp.path().join("tsconfig.json"),
+            r#"{
+              // JSONC comments and trailing commas are ordinary in tsconfig.
+              "compilerOptions": {
+                "baseUrl": ".",
+                "paths": { "@/*": ["missing/*", "src/*"], },
+              },
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("src/defs.ts"),
+            "export function helper() { return 'aliased'; }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("other.ts"),
+            "export function helper() { return 'wrong'; }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("main.ts"),
+            "import { helper as chosen } from '@/defs';\nfunction caller() { chosen(); }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let callees = engine.callees_named("caller", None, 10).unwrap();
+        assert_eq!(callees.len(), 1);
+        assert_eq!(callees[0].symbol.file, "src/defs.ts");
+        assert_eq!(callees[0].evidence.confidence, 0.97);
+        assert!(engine.snapshot().unwrap().relationships.iter().any(|edge| {
+            edge.kind == RelationshipKind::Imports
+                && edge.evidence.provenance == "tsconfig/path-alias"
+        }));
     }
 
     #[test]
