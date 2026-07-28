@@ -695,20 +695,63 @@ impl Store {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(calls_statement);
 
-        let mut direct_statement = tx.prepare(
-            "SELECT s.public_id,s.qualified_name,s.file_id,f.path
-             FROM symbols s JOIN files f ON f.id=s.file_id
-             WHERE s.name=?1 AND s.language=?2
-             ORDER BY s.qualified_name,s.public_id",
-        )?;
-        let mut import_statement = tx.prepare(
-            "SELECT s.public_id,s.qualified_name,s.file_id,f.path
-             FROM import_bindings b
-             JOIN symbols s ON s.public_id=b.target_public_id
-             JOIN files f ON f.id=s.file_id
-             WHERE b.file_id=?1 AND b.binding_name=?2 AND s.language=?3
-             ORDER BY s.qualified_name,s.public_id",
-        )?;
+        type Candidate = (String, String, i64, String);
+        let mut direct_candidates = HashMap::<(String, String), Vec<Candidate>>::new();
+        {
+            let mut statement = tx.prepare(
+                "SELECT s.name,s.language,s.public_id,s.qualified_name,s.file_id,f.path
+                 FROM symbols s JOIN files f ON f.id=s.file_id
+                 ORDER BY s.name,s.language,s.qualified_name,s.public_id",
+            )?;
+            for candidate in statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+            {
+                direct_candidates
+                    .entry((candidate.0, candidate.1))
+                    .or_default()
+                    .push((candidate.2, candidate.3, candidate.4, candidate.5));
+            }
+        }
+        let mut imported_candidates = HashMap::<(i64, String, String), Vec<Candidate>>::new();
+        {
+            let mut statement = tx.prepare(
+                "SELECT b.file_id,b.binding_name,s.language,s.public_id,s.qualified_name,
+                        s.file_id,f.path
+                 FROM import_bindings b
+                 JOIN symbols s ON s.public_id=b.target_public_id
+                 JOIN files f ON f.id=s.file_id
+                 ORDER BY b.file_id,b.binding_name,s.language,s.qualified_name,s.public_id",
+            )?;
+            for candidate in statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+            {
+                imported_candidates
+                    .entry((candidate.0, candidate.1, candidate.2))
+                    .or_default()
+                    .push((candidate.3, candidate.4, candidate.5, candidate.6));
+            }
+        }
         let mut candidate_cache =
             HashMap::<(String, String, i64, String, String), Vec<(String, String, i64)>>::new();
         for (
@@ -740,34 +783,30 @@ impl Store {
             );
             if !candidate_cache.contains_key(&cache_key) {
                 let mut candidates = HashMap::<String, (String, i64, String, bool)>::new();
-                for candidate in direct_statement
-                    .query_map(params![callee_name, language], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, i64>(2)?,
-                            row.get::<_, String>(3)?,
-                        ))
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?
+                if let Some(direct) =
+                    direct_candidates.get(&(callee_name.clone(), language.clone()))
                 {
-                    candidates.insert(candidate.0, (candidate.1, candidate.2, candidate.3, false));
+                    for candidate in direct {
+                        candidates.insert(
+                            candidate.0.clone(),
+                            (candidate.1.clone(), candidate.2, candidate.3.clone(), false),
+                        );
+                    }
                 }
-                for candidate in import_statement
-                    .query_map(params![file_id, callee_name, language], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, i64>(2)?,
-                            row.get::<_, String>(3)?,
-                        ))
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?
+                if let Some(imported) =
+                    imported_candidates.get(&(file_id, callee_name.clone(), language.clone()))
                 {
-                    candidates
-                        .entry(candidate.0)
-                        .and_modify(|value| value.3 = true)
-                        .or_insert((candidate.1, candidate.2, candidate.3, true));
+                    for candidate in imported {
+                        candidates
+                            .entry(candidate.0.clone())
+                            .and_modify(|value| value.3 = true)
+                            .or_insert((
+                                candidate.1.clone(),
+                                candidate.2,
+                                candidate.3.clone(),
+                                true,
+                            ));
+                    }
                 }
                 let mut targets = candidates
                     .into_iter()
@@ -975,6 +1014,11 @@ impl Store {
         drop(reference_statement);
 
         let mut resolved = 0;
+        type ReferenceCandidate = (String, String, i64);
+        let mut reference_candidates: Option<HashMap<(String, String), Vec<ReferenceCandidate>>> =
+            None;
+        let mut reference_imports: Option<HashMap<(i64, String, String), Vec<ReferenceCandidate>>> =
+            None;
         for (
             source_id,
             target_name,
@@ -991,41 +1035,105 @@ impl Store {
         ) in references
         {
             if kind == "references" {
-                let mut candidate_statement = tx.prepare(
-                    "SELECT s.public_id,s.qualified_name,
-                            CASE
-                              WHEN s.file_id=?1 THEN 0
-                              WHEN EXISTS (
-                                SELECT 1 FROM import_bindings b
-                                WHERE b.file_id=?1
-                                  AND b.binding_name=?2
-                                  AND b.target_public_id=s.public_id
-                              ) THEN 1
-                              ELSE 2
-                            END AS rank
-                     FROM symbols s
-                     WHERE s.language=?3
-                       AND s.kind IN ('function','method','component')
-                       AND s.public_id<>?4
-                       AND (
-                         s.name=?2 OR EXISTS (
-                           SELECT 1 FROM import_bindings b
-                           WHERE b.file_id=?1
-                             AND b.binding_name=?2
-                             AND b.target_public_id=s.public_id
-                         )
-                       )
-                     ORDER BY rank,s.qualified_name,s.public_id",
-                )?;
-                let candidates = candidate_statement
-                    .query_map(params![file_id, target_name, language, source_id], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, i64>(2)?,
-                        ))
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                if reference_candidates.is_none() {
+                    let mut direct = HashMap::<(String, String), Vec<ReferenceCandidate>>::new();
+                    let mut statement = tx.prepare(
+                        "SELECT name,language,public_id,qualified_name,file_id
+                         FROM symbols
+                         WHERE kind IN ('function','method','component')
+                         ORDER BY name,language,qualified_name,public_id",
+                    )?;
+                    for candidate in statement
+                        .query_map([], |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                                row.get::<_, String>(3)?,
+                                row.get::<_, i64>(4)?,
+                            ))
+                        })?
+                        .collect::<rusqlite::Result<Vec<_>>>()?
+                    {
+                        direct.entry((candidate.0, candidate.1)).or_default().push((
+                            candidate.2,
+                            candidate.3,
+                            candidate.4,
+                        ));
+                    }
+                    reference_candidates = Some(direct);
+
+                    let mut imported =
+                        HashMap::<(i64, String, String), Vec<ReferenceCandidate>>::new();
+                    let mut statement = tx.prepare(
+                        "SELECT b.file_id,b.binding_name,s.language,s.public_id,
+                                s.qualified_name,s.file_id
+                         FROM import_bindings b
+                         JOIN symbols s ON s.public_id=b.target_public_id
+                         WHERE s.kind IN ('function','method','component')
+                         ORDER BY b.file_id,b.binding_name,s.language,s.qualified_name,s.public_id",
+                    )?;
+                    for candidate in statement
+                        .query_map([], |row| {
+                            Ok((
+                                row.get::<_, i64>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                                row.get::<_, String>(3)?,
+                                row.get::<_, String>(4)?,
+                                row.get::<_, i64>(5)?,
+                            ))
+                        })?
+                        .collect::<rusqlite::Result<Vec<_>>>()?
+                    {
+                        imported
+                            .entry((candidate.0, candidate.1, candidate.2))
+                            .or_default()
+                            .push((candidate.3, candidate.4, candidate.5));
+                    }
+                    reference_imports = Some(imported);
+                }
+                let mut ranked = HashMap::<String, (String, i64)>::new();
+                if let Some(direct) = reference_candidates
+                    .as_ref()
+                    .and_then(|candidates| candidates.get(&(target_name.clone(), language.clone())))
+                {
+                    for (candidate_id, qualified_name, candidate_file_id) in direct {
+                        if candidate_id != &source_id {
+                            ranked.insert(
+                                candidate_id.clone(),
+                                (
+                                    qualified_name.clone(),
+                                    if *candidate_file_id == file_id { 0 } else { 2 },
+                                ),
+                            );
+                        }
+                    }
+                }
+                if let Some(imported) = reference_imports.as_ref().and_then(|candidates| {
+                    candidates.get(&(file_id, binding_name.clone(), language.clone()))
+                }) {
+                    for (candidate_id, qualified_name, _) in imported {
+                        if candidate_id != &source_id {
+                            ranked
+                                .entry(candidate_id.clone())
+                                .and_modify(|candidate| candidate.1 = candidate.1.min(1))
+                                .or_insert((qualified_name.clone(), 1));
+                        }
+                    }
+                }
+                let mut candidates = ranked
+                    .into_iter()
+                    .map(|(candidate_id, (qualified_name, rank))| {
+                        (candidate_id, qualified_name, rank)
+                    })
+                    .collect::<Vec<_>>();
+                candidates.sort_by(|left, right| {
+                    left.2
+                        .cmp(&right.2)
+                        .then_with(|| left.1.cmp(&right.1))
+                        .then_with(|| left.0.cmp(&right.0))
+                });
                 let Some(best_rank) = candidates.first().map(|candidate| candidate.2) else {
                     continue;
                 };

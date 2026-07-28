@@ -1,0 +1,45 @@
+{
+  "passed": true,
+  "structurelyCommit": "b2d6a14a0039baba8ec795d158d8508bc6fa9a49",
+  "repositories": [
+    {
+      "name": "express",
+      "commit": "a3714473feb3d2908add734d340e7755fd85e0a3",
+      "freshIndexWallMs": 255.61,
+      "indexedFiles": 141,
+      "symbols": 564,
+      "relationships": 620,
+      "databaseBytes": 2457600,
+      "assertions": [
+        "GET /middleware resolves in examples/view-locals/index.js",
+        "route callees include count and users with framework/express-route evidence"
+      ]
+    },
+    {
+      "name": "lightrag",
+      "commit": "44db36fe080645ba97ded719d44b42c7dee1f54a",
+      "freshIndexWallMs": 4517.198,
+      "indexedFiles": 514,
+      "symbols": 8174,
+      "relationships": 116929,
+      "databaseBytes": 84402176,
+      "assertions": [
+        "GET /graph/label/list resolves to graph_routes.py",
+        "LoginPage callers include ROUTE /login with framework/react-router evidence"
+      ]
+    },
+    {
+      "name": "graphiti",
+      "commit": "526dcad7a300f3c5c506ff96a68bcdc7ca9f97ed",
+      "freshIndexWallMs": 637.366,
+      "indexedFiles": 255,
+      "symbols": 2804,
+      "relationships": 20156,
+      "databaseBytes": 17215488,
+      "assertions": [
+        "POST /search resolves to retrieve.py",
+        "search callers include POST /search with framework/fastapi-route evidence"
+      ]
+    }
+  ]
+}

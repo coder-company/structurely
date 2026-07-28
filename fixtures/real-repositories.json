@@ -1,0 +1,79 @@
+{
+  "repositories": [
+    {
+      "name": "express",
+      "url": "https://github.com/expressjs/express",
+      "commit": "a3714473feb3d2908add734d340e7755fd85e0a3",
+      "minimumIndexedFiles": 140,
+      "assertions": [
+        {
+          "command": "search",
+          "query": "GET /middleware",
+          "contains": [
+            "examples/view-locals/index.js",
+            "GET /middleware"
+          ]
+        },
+        {
+          "command": "callees",
+          "query": "GET /middleware",
+          "file": "examples/view-locals/index.js",
+          "contains": [
+            "\"name\": \"count\"",
+            "\"name\": \"users\"",
+            "\"provenance\": \"framework/express-route\""
+          ]
+        }
+      ]
+    },
+    {
+      "name": "lightrag",
+      "url": "https://github.com/HKUDS/LightRAG",
+      "commit": "44db36fe080645ba97ded719d44b42c7dee1f54a",
+      "minimumIndexedFiles": 500,
+      "assertions": [
+        {
+          "command": "search",
+          "query": "GET /graph/label/list",
+          "contains": [
+            "lightrag/api/routers/graph_routes.py",
+            "GET /graph/label/list"
+          ]
+        },
+        {
+          "command": "callers",
+          "query": "LoginPage",
+          "contains": [
+            "ROUTE /login",
+            "\"provenance\": \"framework/react-router\""
+          ]
+        }
+      ]
+    },
+    {
+      "name": "graphiti",
+      "url": "https://github.com/getzep/graphiti",
+      "commit": "526dcad7a300f3c5c506ff96a68bcdc7ca9f97ed",
+      "minimumIndexedFiles": 250,
+      "assertions": [
+        {
+          "command": "search",
+          "query": "POST /search",
+          "contains": [
+            "server/graph_service/routers/retrieve.py",
+            "POST /search"
+          ]
+        },
+        {
+          "command": "callers",
+          "query": "search",
+          "file": "server/graph_service/routers/retrieve.py",
+          "contains": [
+            "POST /search",
+            "\"provenance\": \"framework/fastapi-route\""
+          ]
+        }
+      ]
+    }
+  ]
+}

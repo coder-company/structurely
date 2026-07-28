@@ -45,6 +45,12 @@ Structurely is complete only when all gates are evidenced on pinned fixtures.
   documented.
 - Release artifacts have checksums and build provenance.
 
+Run the pinned representative-repository assertions with
+`scripts/acceptance_repositories.py`. The manifest records exact upstream
+commits and semantic expectations; the runner uses detached temporary clones
+so it cannot accept a dirty or drifting source tree. Current evidence is
+checked in under `benchmarks/real-repositories-2026-07-28/`.
+
 The authoritative capability inventory is
 [`codegraph-parity.md`](codegraph-parity.md). A matching command name or schema
 does not by itself satisfy behavioral parity.

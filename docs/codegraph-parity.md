@@ -8,17 +8,22 @@ behavioral evidence; matching a command or tool name is not enough.
 |---|---|---|---|
 | Stable graph epochs and rollback | Superior | deterministic snapshots and injected rollback tests | preserve while expanding every resolver |
 | Index/query performance | Superior | pinned 441-file benchmark | rerun after each major semantic layer |
-| Core CLI/MCP names and schemas | Partial | eight handlers and pinned contract fixture | differential output, error, ambiguity, and pagination suites |
+| Core CLI/MCP names and schemas | Compatible (core) | eight handlers, pinned contract fixture, persistent-stdio binary test, and 14-scenario live differential run against pinned CodeGraph | pagination and cross-platform suites |
 | Explore context usefulness | Partial | global/per-symbol budgets, exact/corroborated ranking, line-numbered excerpts, omission and stale-index disclosure | differential usefulness fixture, flow spine, large-repo evaluation |
 | Project config and custom extensions | Compatible (core) | `structurely.json`/`codegraph.json`; extension, exclude, include, includeIgnored, precedence and malformed-config tests | differential configuration fixture |
 | TS/JS path aliases | Compatible (core) | JSONC baseUrl/paths, wildcard specificity, target fallback, index/extension canonicalization and escape tests | representative real-repo evidence |
-| Workspace/package resolution | Partial | npm/yarn array/object workspaces, scoped packages, entrypoints and subpaths | pnpm/bun, Cargo and Go workspace fixtures |
+| Workspace/package resolution | Compatible (core) | npm/yarn/pnpm workspaces, scoped packages, entrypoints/subpaths, Cargo crates, and Go workspaces | Bun workspace fixture and representative monorepo gates |
 | Nested repositories and worktrees | Partial | embedded repo opt-in and built-in dependency/build safety tests | submodule, worktree and mismatch suites |
-| Framework resolvers | Partial | Express, FastAPI, and React Router JSX/object route symbols; imported handlers/components; adversarial dynamic-path fixtures | prioritized remaining adapters and two real repositories per adapter |
+| Framework resolvers | Partial | Express, FastAPI, and React Router JSX/object route symbols; complete named Express middleware chains; adversarial fixtures; pinned Express, LightRAG, and Graphiti acceptance runs | Django and prioritized remaining adapters; second real repository for Express and React Router |
 | Callbacks and dynamic dispatch | Partial | named callbacks; initializer/object/array/assignment references; strict import/local resolution; literal events, fanout cap, incremental cleanup, provenance and shadowing tests | broader member/type dispatch and differential fixtures |
 | Language/dialect breadth | Behind | 18 language dialects | prioritized missing grammars and kernel-parity fixtures |
 | Daemon and shared live index | Compatible (core) | spawned-process start/status/catch-up/stop test; exclusive project lock; failure release/restart; MCP daemon/foreground fallback metadata | cross-platform CI evidence and sustained fault-injection soak |
 | Installers and agent integrations | Compatible (core) | idempotent project-scoped Codex, Claude Code and Cursor install/status/uninstall tests preserve unrelated TOML/JSON | executable client discovery smoke tests on release artifacts |
+
+The live agent-seam differential gate is `scripts/differential_mcp.py`; the
+representative repository gate is `scripts/acceptance_repositories.py`.
+Checked-in results remain evidence for their exact pinned revisions, not a
+claim that every framework pattern is supported.
 
 ## Delivery order
 
