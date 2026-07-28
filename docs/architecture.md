@@ -47,10 +47,28 @@ emitted edge records the winning scope and confidence. Constructor inference
 supports `new Type()`, Python `Type()` assignments, declared Java-style local
 types, and Rust `Type::new()` values.
 
+Semantic extraction has a separate adapter seam after language parsing.
+Adapters consume the syntax tree and append ordinary symbols, relationships,
+and pending relationships to the same file-local Fact set. The current
+adapters cover named JavaScript callback registrations, Express routes,
+FastAPI decorators, and literal event registration/dispatch. This keeps
+framework policy out of the storage Module while letting every adapter reuse
+import scope, alias resolution, evidence, atomic publication, and graph
+traversal.
+
+Direct calls and registrations carry their own provenance, confidence, and
+explanation through one resolution path. Literal event dispatch joins only
+registrations with the same file-local receiver and channel, refuses dynamic
+channel expressions, and emits no inferred dispatch edge above a fanout of
+six. Invocations of a lexically shadowing callable parameter are retained as
+dynamic Observations but deliberately do not bind to an unrelated global
+Symbol.
+
 ## Modules
 
 - `model` owns the versioned graph vocabulary and stable identity algorithm.
 - `parser` converts supported source text into file-local facts.
+- `semantic` owns pure callback and framework Resolver adapters.
 - `store` owns schema migration, transactions, search, and graph epochs.
 - `engine` owns scan, incremental invalidation, resolution, and publication.
 - `mcp` adapts JSON-RPC/MCP requests to the engine.
