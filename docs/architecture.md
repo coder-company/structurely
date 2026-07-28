@@ -53,7 +53,9 @@ and pending relationships to the same file-local Fact set. The current
 adapters cover named JavaScript callback registrations, Express routes,
 FastAPI decorators, NestJS HTTP controllers, and literal event
 registration/dispatch. React runtime adapters bridge state updates to class
-renders and capitalized JSX children to their component definitions. This keeps
+renders and capitalized JSX children to their component definitions. A bounded
+post-resolution adapter connects interface methods to directly declared
+concrete implementations. This keeps
 framework policy out of the storage Module while letting every adapter reuse
 import scope, alias resolution, evidence, atomic publication, and graph
 traversal.

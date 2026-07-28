@@ -68,6 +68,12 @@ index and 8.76× faster for query-process p50 while using 89.2% less peak
 memory. Pass `--minimum-index-speedup 2 --minimum-query-speedup 2` to make the
 benchmark command fail when either required advantage regresses.
 
+The
+[`codegraph-source-intersection-2026-07-28-post-dispatch`](../benchmarks/codegraph-source-intersection-2026-07-28-post-dispatch/README.md)
+rerun covers React runtime and interface dispatch. Structurely remains 3.85×
+faster to index and 9.08× faster for query p50 while using 89.5% less peak
+memory.
+
 ## Semantic quality
 
 Quality manifests list expected caller/callee edges by language. Evaluate a
@@ -90,5 +96,5 @@ TypeScript, JavaScript, Python, and Rust fixture on every change.
 and pinned CodeGraph, then scores required facts, relevant-file recall, file
 precision, flow-spine coverage, line-numbered source, and output budget. The
 checked-in [`differential-mcp-2026-07-28`](../benchmarks/differential-mcp-2026-07-28/README.md)
-run passes all 16 compatibility scenarios and scores Structurely 1.0000 versus
+run passes all 17 compatibility scenarios and scores Structurely 1.0000 versus
 CodeGraph 0.9583 on its flow fixture.

@@ -3,8 +3,9 @@
 This persistent-stdio differential run compares Structurely with CodeGraph
 1.5.0 commit `572d22bfbe82602080e457bec655f72e3314f9ef`.
 
-- All 16 protocol and behavioral scenarios pass for both engines, including
-  React `setState → render` and `render → JSX child` runtime-flow checks.
+- All 17 protocol and behavioral scenarios pass for both engines, including
+  React `setState → render`, `render → JSX child`, and interface-to-concrete
+  runtime-flow checks.
 - Both return every required fact, all three relevant files, both flow spines,
   current line-numbered source, and stay within the 48,000-character budget.
 - Structurely returns only the three relevant files.
