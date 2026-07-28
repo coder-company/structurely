@@ -147,6 +147,13 @@ impl ProjectResolutionContext {
                 );
             }
         }
+        for export in &mut facts.module_exports {
+            if let Some((resolved, _)) =
+                self.resolve_import_from(&facts.path, &export.target_file_hint)
+            {
+                export.target_file_hint = resolved;
+            }
+        }
         for call in &mut facts.unresolved_calls {
             let Some(hint) = call.target_file_hint.as_deref() else {
                 continue;

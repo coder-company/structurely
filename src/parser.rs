@@ -110,6 +110,7 @@ pub(crate) fn parse_file_as(
         unresolved_references,
         dynamic_events: Vec::new(),
         literal_bindings: Vec::new(),
+        module_exports: Vec::new(),
     };
     enrich_file_facts(tree.root_node(), source_bytes, &mut facts);
     Ok(facts)

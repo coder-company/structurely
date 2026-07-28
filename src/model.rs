@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path};
 
-pub const GRAPH_MODEL_VERSION: u32 = 32;
+pub const GRAPH_MODEL_VERSION: u32 = 33;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -319,6 +319,14 @@ pub(crate) struct LiteralBindingFact {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct ModuleExportFact {
+    pub export_name: String,
+    pub target_file_hint: String,
+    pub target_name: String,
+    pub is_star: bool,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct UnresolvedReference {
     pub source_id: String,
     pub target_name: String,
@@ -343,6 +351,7 @@ pub(crate) struct FileFacts {
     pub unresolved_references: Vec<UnresolvedReference>,
     pub dynamic_events: Vec<DynamicEventFact>,
     pub literal_bindings: Vec<LiteralBindingFact>,
+    pub module_exports: Vec<ModuleExportFact>,
 }
 
 #[cfg(test)]

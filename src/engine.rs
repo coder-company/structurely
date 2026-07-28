@@ -3092,10 +3092,49 @@ mod tests {
         )
         .unwrap();
         fs::write(
+            temp.path().join("app/entry/src/main/ets/barrel-one.ets"),
+            "export { messageEvent as forwardedMessage, numericEvent } from './events'\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("app/entry/src/main/ets/barrel-two.ets"),
+            "export { forwardedMessage as barrelMessage } from './barrel-one'\n\
+             export * from './barrel-one'\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("app/entry/src/main/ets/value-a.ets"),
+            "export const shared = 11\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("app/entry/src/main/ets/value-b.ets"),
+            "export const shared = 12\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("app/entry/src/main/ets/ambiguous.ets"),
+            "export * from './value-a'\nexport * from './value-b'\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("app/entry/src/main/ets/cycle-a.ets"),
+            "export * from './cycle-b'\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("app/entry/src/main/ets/cycle-b.ets"),
+            "export * from './cycle-a'\n",
+        )
+        .unwrap();
+        fs::write(
             temp.path().join("app/entry/src/main/ets/listener.ets"),
             "import emitter from '@ohos.events.emitter'\n\
              import { messageEvent as incoming, numericEvent, stringEvent, mutableEvent } from './events'\n\
              import { EmitterConst as Events } from './EmitterConst'\n\
+             import { barrelMessage, numericEvent as barrelNumeric } from './barrel-two'\n\
+             import { shared as ambiguous } from './ambiguous'\n\
+             import { missing as cyclic } from './cycle-a'\n\
              function onMessage() {}\n\
              function onNumeric() {}\n\
              function onString() {}\n\
@@ -3103,6 +3142,10 @@ mod tests {
              function onMemberNumeric() {}\n\
              function onMemberString() {}\n\
              function onMemberMutable() {}\n\
+             function onBarrelMessage() {}\n\
+             function onBarrelNumeric() {}\n\
+             function onAmbiguous() {}\n\
+             function onCycle() {}\n\
              export function registerImported() {\n\
                emitter.on(incoming, onMessage)\n\
                emitter.on(numericEvent, onNumeric)\n\
@@ -3111,6 +3154,10 @@ mod tests {
                emitter.on(Events.NUMERIC, onMemberNumeric)\n\
                emitter.on(Events.STRING, onMemberString)\n\
                emitter.on(Events.MUTABLE, onMemberMutable)\n\
+               emitter.on(barrelMessage, onBarrelMessage)\n\
+               emitter.on(barrelNumeric, onBarrelNumeric)\n\
+               emitter.on(ambiguous, onAmbiguous)\n\
+               emitter.on(cyclic, onCycle)\n\
              }\n",
         )
         .unwrap();
@@ -3119,12 +3166,19 @@ mod tests {
             "import { emitter as bus } from '@kit.BasicServicesKit'\n\
              import { messageEvent, numericEvent, stringEvent } from './events'\n\
              import { EmitterConst } from './EmitterConst'\n\
+             import { barrelMessage, numericEvent as barrelNumeric } from './barrel-two'\n\
+             import { shared as ambiguous } from './ambiguous'\n\
+             import { missing as cyclic } from './cycle-a'\n\
              export function sendMessage() { bus.emit(messageEvent) }\n\
              export function sendNumeric() { bus.emit(numericEvent) }\n\
              export function sendString() { bus.emit(stringEvent) }\n\
              export function sendMemberNumeric() { bus.emit(EmitterConst.NUMERIC) }\n\
              export function sendMemberString() { bus.emit(EmitterConst.STRING) }\n\
              export function sendMemberMutable() { bus.emit(EmitterConst.MUTABLE) }\n\
+             export function sendBarrelMessage() { bus.emit(barrelMessage) }\n\
+             export function sendBarrelNumeric() { bus.emit(barrelNumeric) }\n\
+             export function sendAmbiguous() { bus.emit(ambiguous) }\n\
+             export function sendCycle() { bus.emit(cyclic) }\n\
              export function sendShadowed(EmitterConst: LocalEvents) {\n\
                bus.emit(EmitterConst.NUMERIC)\n\
              }\n",
@@ -3140,20 +3194,38 @@ mod tests {
                 .find(|hit| hit.symbol.qualified_name == caller_name)
                 .unwrap()
                 .symbol;
-            engine
+            let mut targets = engine
                 .callees(&caller.id)
                 .unwrap()
                 .into_iter()
                 .filter(|(_, evidence)| evidence.provenance == "framework/ohos-emitter")
                 .map(|(target, _)| target.qualified_name)
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            targets.sort();
+            targets
         };
-        assert_eq!(targets(&engine, "sendMessage"), ["onMessage"]);
-        assert_eq!(targets(&engine, "sendNumeric"), ["onNumeric"]);
+        assert_eq!(
+            targets(&engine, "sendMessage"),
+            ["onBarrelMessage", "onMessage"]
+        );
+        assert_eq!(
+            targets(&engine, "sendNumeric"),
+            ["onBarrelNumeric", "onNumeric"]
+        );
         assert_eq!(targets(&engine, "sendString"), ["onString"]);
         assert_eq!(targets(&engine, "sendMemberNumeric"), ["onMemberNumeric"]);
         assert_eq!(targets(&engine, "sendMemberString"), ["onMemberString"]);
         assert!(targets(&engine, "sendMemberMutable").is_empty());
+        assert_eq!(
+            targets(&engine, "sendBarrelMessage"),
+            ["onBarrelMessage", "onMessage"]
+        );
+        assert_eq!(
+            targets(&engine, "sendBarrelNumeric"),
+            ["onBarrelNumeric", "onNumeric"]
+        );
+        assert!(targets(&engine, "sendAmbiguous").is_empty());
+        assert!(targets(&engine, "sendCycle").is_empty());
         assert!(targets(&engine, "sendShadowed").is_empty());
         assert!(!targets(&engine, "sendMessage")
             .iter()

@@ -196,6 +196,16 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS literal_bindings_lookup_idx
                 ON literal_bindings(file_id,export_name,member_path);
+            CREATE TABLE IF NOT EXISTS module_exports (
+                id INTEGER PRIMARY KEY,
+                file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                export_name TEXT NOT NULL,
+                target_file_hint TEXT NOT NULL,
+                target_name TEXT NOT NULL,
+                is_star INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS module_exports_lookup_idx
+                ON module_exports(file_id,export_name,is_star);
             CREATE TABLE IF NOT EXISTS unresolved_references (
                 id INTEGER PRIMARY KEY,
                 file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
@@ -690,6 +700,20 @@ impl Store {
                 binding.channel
             ])?;
         }
+        for export in &file.module_exports {
+            tx.prepare_cached(
+                "INSERT INTO module_exports(
+                    file_id,export_name,target_file_hint,target_name,is_star
+                 ) VALUES (?1,?2,?3,?4,?5)",
+            )?
+            .execute(params![
+                file_id,
+                export.export_name,
+                export.target_file_hint,
+                export.target_name,
+                export.is_star
+            ])?;
+        }
         for reference in &file.unresolved_references {
             tx.prepare_cached(
                 "INSERT INTO unresolved_references(
@@ -1159,42 +1183,77 @@ impl Store {
 
     fn resolve_dynamic_events(tx: &Transaction<'_>) -> Result<usize> {
         const EVENT_FANOUT_CAP: usize = 6;
-        let effective_channel = "
-            COALESCE(
-              NULLIF(e.channel,''),
-              (
-                SELECT CASE WHEN COUNT(DISTINCT b.channel)=1 THEN MIN(b.channel) END
-                FROM literal_bindings b
-                JOIN files target_file ON target_file.id=b.file_id
-                WHERE target_file.path IN (
-                        e.channel_target_file_hint,
-                        e.channel_target_file_hint || '.ts',
-                        e.channel_target_file_hint || '.tsx',
-                        e.channel_target_file_hint || '.js',
-                        e.channel_target_file_hint || '.jsx',
-                        e.channel_target_file_hint || '.mjs',
-                        e.channel_target_file_hint || '.cjs',
-                        e.channel_target_file_hint || '.mts',
-                        e.channel_target_file_hint || '.cts',
-                        e.channel_target_file_hint || '.vue',
-                        e.channel_target_file_hint || '.svelte',
-                        e.channel_target_file_hint || '.ets'
-                      )
-                  AND b.export_name=e.channel_export_name
-                  AND b.member_path=COALESCE(e.channel_member_path,'')
-              )
-            )";
-        let mut event_statement = tx.prepare(&format!(
-            "SELECT id,file_id,owner_public_id,receiver,effective_channel,action,
-                    callback_name,evidence_file,evidence_line
-             FROM (
-               SELECT e.*,{effective_channel} AS effective_channel
-               FROM dynamic_events e
-             )
-             WHERE effective_channel IS NOT NULL
+        type LiteralKey = (String, String, String);
+        type ExportTarget = (String, String);
+        let mut literals = HashMap::<LiteralKey, HashSet<String>>::new();
+        let mut literal_statement = tx.prepare(
+            "SELECT f.path,b.export_name,b.member_path,b.channel
+             FROM literal_bindings b
+             JOIN files f ON f.id=b.file_id
+             ORDER BY f.path,b.export_name,b.member_path,b.channel",
+        )?;
+        for literal in literal_statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })? {
+            let (file, export_name, member_path, channel) = literal?;
+            literals
+                .entry((normalized_module_key(&file), export_name, member_path))
+                .or_default()
+                .insert(channel);
+        }
+        drop(literal_statement);
+
+        let mut named_exports = HashMap::<(String, String), Vec<ExportTarget>>::new();
+        let mut star_exports = HashMap::<String, Vec<String>>::new();
+        let mut export_statement = tx.prepare(
+            "SELECT f.path,e.export_name,e.target_file_hint,e.target_name,e.is_star
+             FROM module_exports e
+             JOIN files f ON f.id=e.file_id
+             ORDER BY f.path,e.export_name,e.target_file_hint,e.target_name",
+        )?;
+        for export in export_statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, bool>(4)?,
+            ))
+        })? {
+            let (file, export_name, target_file_hint, target_name, is_star) = export?;
+            let file = normalized_module_key(&file);
+            if is_star {
+                star_exports.entry(file).or_default().push(target_file_hint);
+            } else {
+                named_exports
+                    .entry((file, export_name))
+                    .or_default()
+                    .push((target_file_hint, target_name));
+            }
+        }
+        drop(export_statement);
+        for targets in named_exports.values_mut() {
+            targets.sort();
+            targets.dedup();
+        }
+        for targets in star_exports.values_mut() {
+            targets.sort();
+            targets.dedup();
+        }
+
+        let mut event_statement = tx.prepare(
+            "SELECT id,file_id,owner_public_id,receiver,channel,
+                    channel_target_file_hint,channel_export_name,channel_member_path,
+                    action,callback_name,evidence_file,evidence_line
+             FROM dynamic_events
              ORDER BY evidence_file,evidence_line,id",
-        ))?;
-        let events = event_statement
+        )?;
+        let raw_events = event_statement
             .query_map([], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
@@ -1202,14 +1261,57 @@ impl Store {
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(5)?,
                     row.get::<_, Option<String>>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, i64>(8)? as usize,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, i64>(11)? as usize,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(event_statement);
+        let mut events = Vec::new();
+        for (
+            id,
+            file_id,
+            owner,
+            receiver,
+            channel,
+            target_file_hint,
+            export_name,
+            member_path,
+            action,
+            callback,
+            file,
+            line,
+        ) in raw_events
+        {
+            let effective_channel = if channel.is_empty() {
+                let (Some(target_file_hint), Some(export_name)) = (target_file_hint, export_name)
+                else {
+                    continue;
+                };
+                resolve_exported_literal(
+                    &target_file_hint,
+                    &export_name,
+                    member_path.as_deref().unwrap_or_default(),
+                    &literals,
+                    &named_exports,
+                    &star_exports,
+                    &mut HashSet::new(),
+                    0,
+                )
+            } else {
+                Some(channel)
+            };
+            if let Some(channel) = effective_channel {
+                events.push((
+                    id, file_id, owner, receiver, channel, action, callback, file, line,
+                ));
+            }
+        }
 
         let mut callback_statement = tx.prepare(
             "SELECT rel.source_public_id,target.name,rel.target_public_id
@@ -1809,6 +1911,80 @@ impl Store {
             end_line: row.get::<_, i64>(10)? as usize,
         })
     }
+}
+
+fn normalized_module_key(path: &str) -> String {
+    const EXTENSIONS: &[&str] = &[
+        "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts", "vue", "svelte", "ets",
+    ];
+    for extension in EXTENSIONS {
+        if let Some(stem) = path.strip_suffix(&format!(".{extension}")) {
+            return stem.to_owned();
+        }
+    }
+    path.to_owned()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_exported_literal(
+    file: &str,
+    export_name: &str,
+    member_path: &str,
+    literals: &HashMap<(String, String, String), HashSet<String>>,
+    named_exports: &HashMap<(String, String), Vec<(String, String)>>,
+    star_exports: &HashMap<String, Vec<String>>,
+    visited: &mut HashSet<(String, String, String)>,
+    depth: usize,
+) -> Option<String> {
+    const MAX_EXPORT_DEPTH: usize = 16;
+    if depth >= MAX_EXPORT_DEPTH {
+        return None;
+    }
+    let file = normalized_module_key(file);
+    let visit = (file.clone(), export_name.to_owned(), member_path.to_owned());
+    if !visited.insert(visit.clone()) {
+        return None;
+    }
+
+    let literal_key = (file.clone(), export_name.to_owned(), member_path.to_owned());
+    let mut candidates = literals.get(&literal_key).cloned().unwrap_or_default();
+    if candidates.is_empty() {
+        if let Some(targets) = named_exports.get(&(file.clone(), export_name.to_owned())) {
+            for (target_file, target_name) in targets {
+                if let Some(channel) = resolve_exported_literal(
+                    target_file,
+                    target_name,
+                    member_path,
+                    literals,
+                    named_exports,
+                    star_exports,
+                    visited,
+                    depth + 1,
+                ) {
+                    candidates.insert(channel);
+                }
+            }
+        } else if let Some(targets) = star_exports.get(&file) {
+            for target_file in targets {
+                if let Some(channel) = resolve_exported_literal(
+                    target_file,
+                    export_name,
+                    member_path,
+                    literals,
+                    named_exports,
+                    star_exports,
+                    visited,
+                    depth + 1,
+                ) {
+                    candidates.insert(channel);
+                }
+            }
+        }
+    }
+    visited.remove(&visit);
+    (candidates.len() == 1)
+        .then(|| candidates.into_iter().next())
+        .flatten()
 }
 
 fn file_size(path: &Path) -> Result<u64> {

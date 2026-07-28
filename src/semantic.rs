@@ -1,7 +1,7 @@
 use crate::model::{
     DynamicEventFact, EventAction, EventChannel, Evidence, FileFacts, Language, LiteralBindingFact,
-    Relationship, RelationshipKind, SourceSpan, Symbol, SymbolKind, UnresolvedCall,
-    UnresolvedReference,
+    ModuleExportFact, Relationship, RelationshipKind, SourceSpan, Symbol, SymbolKind,
+    UnresolvedCall, UnresolvedReference,
 };
 use std::{collections::HashSet, path::Path};
 use tree_sitter::Node;
@@ -17,6 +17,7 @@ pub(crate) fn enrich_file_facts(root: Node<'_>, source: &[u8], facts: &mut FileF
         | Language::ArkTs => {
             if contains_bytes(source, b"export const ")
                 || contains_bytes(source, b"static readonly ")
+                || (contains_bytes(source, b"export ") && contains_bytes(source, b" from "))
             {
                 collect_exported_literal_bindings(root, source, facts);
             }
@@ -76,6 +77,9 @@ fn collect_ohos_emitter_semantics(root: Node<'_>, source: &[u8], facts: &mut Fil
 }
 
 fn collect_exported_literal_bindings(node: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+    if node.kind() == "export_statement" {
+        collect_forwarded_module_exports(node, source, facts);
+    }
     if node.kind() == "variable_declarator" && enclosing_export_const(node, source) {
         if let (Some(name), Some(value)) = (
             node.child_by_field_name("name")
@@ -124,6 +128,56 @@ fn collect_exported_literal_bindings(node: Node<'_>, source: &[u8], facts: &mut 
         }
     }
     collect_exported_literal_binding_children(node, source, facts);
+}
+
+fn collect_forwarded_module_exports(node: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+    let Some(target_file_hint) = node
+        .child_by_field_name("source")
+        .and_then(|source_node| string_literal(source_node, source))
+    else {
+        return;
+    };
+    let statement = text(node, source);
+    let Some((clause, _)) = statement
+        .trim()
+        .strip_prefix("export")
+        .and_then(|body| body.rsplit_once(" from "))
+    else {
+        return;
+    };
+    let clause = clause.trim();
+    if clause == "*" {
+        facts.module_exports.push(ModuleExportFact {
+            export_name: String::new(),
+            target_file_hint,
+            target_name: String::new(),
+            is_star: true,
+        });
+        return;
+    }
+    let Some(body) = clause
+        .strip_prefix('{')
+        .and_then(|body| body.strip_suffix('}'))
+    else {
+        return;
+    };
+    for specifier in body.split(',') {
+        let words = specifier.split_whitespace().collect::<Vec<_>>();
+        let (target_name, export_name) = match words.as_slice() {
+            [name] => (*name, *name),
+            [target, "as", exported] => (*target, *exported),
+            _ => continue,
+        };
+        if !is_javascript_identifier(target_name) || !is_javascript_identifier(export_name) {
+            continue;
+        }
+        facts.module_exports.push(ModuleExportFact {
+            export_name: export_name.to_owned(),
+            target_file_hint: target_file_hint.clone(),
+            target_name: target_name.to_owned(),
+            is_star: false,
+        });
+    }
 }
 
 fn collect_exported_literal_binding_children(node: Node<'_>, source: &[u8], facts: &mut FileFacts) {
