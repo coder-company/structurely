@@ -338,6 +338,7 @@ fn load_ohpm_packages(root: &Path) -> Vec<WorkspacePackage> {
 
     let mut queue = VecDeque::from([(PathBuf::new(), 0_usize)]);
     let mut visited = 0_usize;
+    let canonical_root = fs::canonicalize(root).unwrap_or_else(|_| root.to_owned());
     let mut targets = HashMap::<String, PathBuf>::new();
     let mut ambiguous = HashSet::<String>::new();
     while let Some((relative, depth)) = queue.pop_front() {
@@ -388,7 +389,13 @@ fn load_ohpm_packages(root: &Path) -> Vec<WorkspacePackage> {
                     continue;
                 };
                 let target_absolute = normalize_absolute(&absolute.join(target));
-                if !target_absolute.starts_with(root) || !target_absolute.is_dir() {
+                let Ok(canonical_target) = fs::canonicalize(&target_absolute) else {
+                    continue;
+                };
+                if !target_absolute.starts_with(root)
+                    || !canonical_target.starts_with(&canonical_root)
+                    || !canonical_target.is_dir()
+                {
                     continue;
                 }
                 let Ok(target) = target_absolute.strip_prefix(root).map(Path::to_owned) else {
@@ -962,6 +969,36 @@ mod tests {
 
         let context = ProjectResolutionContext::load(root.path());
         assert_eq!(context.resolve_workspace_package("common"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ohpm_file_dependencies_reject_symlink_escapes() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        fs::create_dir_all(root.path().join("apps/entry")).unwrap();
+        fs::create_dir(root.path().join("modules")).unwrap();
+        fs::write(
+            root.path().join("apps/entry/oh-package.json5"),
+            r#"{"dependencies":{"escape":"file:../../modules/escape"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            outside.path().join("oh-package.json5"),
+            r#"{"name":"escape","main":"Index.ets"}"#,
+        )
+        .unwrap();
+        fs::write(
+            outside.path().join("Index.ets"),
+            "export function escaped() {}",
+        )
+        .unwrap();
+        symlink(outside.path(), root.path().join("modules/escape")).unwrap();
+
+        let context = ProjectResolutionContext::load(root.path());
+        assert_eq!(context.resolve_workspace_package("escape"), None);
     }
 
     #[test]
