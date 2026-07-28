@@ -87,6 +87,28 @@ malformed or unexpectedly broad agent requests fail predictably.
 - [CodeGraph compatibility contract](docs/compatibility.md)
 - [Production acceptance gates](docs/acceptance.md)
 - [Reproducible benchmark protocol](docs/benchmarks.md)
+- [CodeGraph feature-parity matrix](docs/codegraph-parity.md)
+
+## Project configuration
+
+Structurely reads `structurely.json`, falling back to a compatible
+`codegraph.json` when the Structurely-specific file is absent. Custom source
+extensions and explicit exclusions are supported:
+
+```json
+{
+  "extensions": {
+    ".view": "typescript"
+  },
+  "exclude": [
+    "vendor/**",
+    "generated/**"
+  ]
+}
+```
+
+Invalid extension entries and malformed JSON degrade to the zero-config
+defaults. `structurely.json` takes precedence when both files exist.
 - [Release and artifact verification](docs/releases.md)
 - [Changelog](CHANGELOG.md)
 - [Installation, privacy, and troubleshooting](docs/operations.md)
