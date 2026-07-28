@@ -58,6 +58,9 @@ The pinned 6,995-file ArkTS acceptance result is recorded separately under
 origin, provenance, confidence, and source line in one relationship record.
 The follow-up `benchmarks/openharmony-ohpm-2026-07-28/` gate adds a correlated
 cross-package component assertion through a real `oh-package.json5` dependency.
+The `benchmarks/openharmony-router-2026-07-28/` gate adds an exact,
+evidence-bearing literal page transition and retains all earlier ArkTS
+assertions across the same 6,995-file pin.
 
 The authoritative capability inventory is
 [`codegraph-parity.md`](codegraph-parity.md). A matching command name or schema

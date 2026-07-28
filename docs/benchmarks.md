@@ -126,3 +126,19 @@ passes 20/20 scenarios. The pinned
 resolves a real `@ohos/window-component` import, and the enforced
 [`post-ohpm performance run`](../benchmarks/codegraph-source-intersection-2026-07-28-post-ohpm/README.md)
 remains 3.90× faster to index and 9.81× faster for query p50.
+
+After hardened ArkUI page routing, the
+[`post-router differential`](../benchmarks/differential-mcp-2026-07-28-post-router/README.md)
+passes 21/21 scenarios for both engines and explicitly requires Structurely
+route provenance. Both engines score 1.0000 for context usefulness; Structurely
+uses 2,164 response characters versus CodeGraph's 2,560. Adversarial tests
+separately cover import binding, lexical shadows, ambiguous entries, bounded
+path normalization, and incremental cleanup.
+The enforced
+[`post-router performance run`](../benchmarks/codegraph-source-intersection-2026-07-28-post-router/README.md)
+remains 3.66× faster to index and 9.55× faster for query p50 while using 88.4%
+less peak initialization memory.
+The pinned
+[`OpenHarmony router gate`](../benchmarks/openharmony-router-2026-07-28/README.md)
+indexes all 6,995 ETS files in 114.929 seconds and passes four correlated
+semantic assertions, including the exact `Index.build → DocumentPage` route.

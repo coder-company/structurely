@@ -73,7 +73,11 @@ are pruned only when they do not collide with a local or imported project
 symbol. Harmony `oh-package.json5` `file:` dependencies use bounded discovery,
 reject lexical and symlink escapes, drop names mapped to multiple directories,
 and honor a target module's declared `main`; registry dependencies stay
-external. Router string targets, emitter channels, and decorated
+external. Literal ArkUI `pushUrl` and `replaceUrl` targets resolve across the
+owning Harmony module only when the receiver has a verified `@ohos.router` or
+`@kit.ArkUI` import and the normalized path identifies exactly one `@Entry`
+symbol. Dynamic paths, lexical router shadows, traversal, non-entry pages, and
+ambiguous page files fail closed. Emitter channels and decorated
 `@Builder`/`@Extend`/`@Styles` helper lifting are not yet resolved.
 
 Direct calls and registrations carry their own provenance, confidence, and

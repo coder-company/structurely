@@ -1,0 +1,64 @@
+{
+  "pinnedCodeGraph": {
+    "version": "1.5.0",
+    "commit": "572d22bfbe82602080e457bec655f72e3314f9ef"
+  },
+  "structurelyBinary": {
+    "commit": "c7af33fa986c00dd4c09fef2758a0b837990bc88",
+    "sha256": "845f7b1ba157354318f9dae42fa8c2d75c0be0c3bb8cce4ce5cf504b6efe0f86",
+    "worktree": "clean"
+  },
+  "compatibility": {
+    "passed": 21,
+    "total": 21,
+    "score": 1.0,
+    "predicates": {
+      "initialize": true,
+      "tools": true,
+      "search-exact": true,
+      "search-ambiguous": true,
+      "callers": true,
+      "callees": true,
+      "react-rerender": true,
+      "jsx-child-render": true,
+      "interface-dispatch": true,
+      "arkui-event": true,
+      "arkui-state": true,
+      "ohpm-package": true,
+      "arkui-route": true,
+      "impact": true,
+      "node-window": true,
+      "explore-flow": true,
+      "status": true,
+      "files": true,
+      "missing-required": true,
+      "invalid-limit": true,
+      "missing-symbol": true
+    }
+  },
+  "contextUsefulness": {
+    "structurely": {
+      "score": 1.0,
+      "requiredFactRecall": 1.0,
+      "relevantFileRecall": 1.0,
+      "filePrecision": 1.0,
+      "flowSpinesPassed": 2,
+      "flowSpinesTotal": 2,
+      "lineNumberedSource": true,
+      "characters": 2164,
+      "withinBudget": true
+    },
+    "codeGraph": {
+      "score": 1.0,
+      "requiredFactRecall": 1.0,
+      "relevantFileRecall": 1.0,
+      "filePrecision": 1.0,
+      "flowSpinesPassed": 2,
+      "flowSpinesTotal": 2,
+      "lineNumberedSource": true,
+      "characters": 2560,
+      "withinBudget": true
+    },
+    "atLeastPinnedCodeGraph": true
+  }
+}
