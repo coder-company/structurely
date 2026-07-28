@@ -100,6 +100,32 @@
           ]
         }
       ]
+    },
+    {
+      "name": "nest",
+      "url": "https://github.com/nestjs/nest",
+      "commit": "fafe503bd8ca073f2fdd41ed7138081af84c478e",
+      "minimumIndexedFiles": 1700,
+      "assertions": [
+        {
+          "command": "search",
+          "query": "GET /users/:id",
+          "contains": [
+            "integration/repl/src/users/users.controller.ts",
+            "GET /users/:id"
+          ]
+        },
+        {
+          "command": "callees",
+          "query": "GET /users/:id",
+          "file": "integration/repl/src/users/users.controller.ts",
+          "contains": [
+            "\"name\": \"findOne\"",
+            "\"qualified_name\": \"UsersController.findOne\"",
+            "\"provenance\": \"framework/nestjs-route\""
+          ]
+        }
+      ]
     }
   ]
 }

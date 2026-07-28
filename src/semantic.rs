@@ -9,6 +9,7 @@ pub(crate) fn enrich_file_facts(root: Node<'_>, source: &[u8], facts: &mut FileF
         Language::TypeScript | Language::Tsx | Language::JavaScript | Language::Jsx => {
             collect_javascript_registrations(root, source, facts);
             collect_javascript_function_references(root, source, facts);
+            collect_nestjs_routes(root, source, facts);
             if matches!(facts.language, Language::Tsx | Language::Jsx) {
                 collect_react_router_jsx(root, source, facts);
             }
@@ -18,6 +19,198 @@ pub(crate) fn enrich_file_facts(root: Node<'_>, source: &[u8], facts: &mut FileF
             collect_django_routes(root, source, facts);
         }
         _ => {}
+    }
+}
+
+fn collect_nestjs_routes(node: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+    if node.kind() == "class_declaration" {
+        enrich_nestjs_controller(node, source, facts);
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_nestjs_routes(child, source, facts);
+    }
+}
+
+fn enrich_nestjs_controller(class: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+    const HTTP_DECORATORS: &[&str] = &[
+        "Get", "Post", "Put", "Patch", "Delete", "Head", "Options", "All",
+    ];
+    let class_decorators = direct_decorators(class);
+    let parent_decorators = class.parent().into_iter().flat_map(direct_decorators);
+    let Some(prefixes) = class_decorators
+        .chain(parent_decorators)
+        .find_map(|decorator| {
+            let (name, arguments) = decorator_call(decorator, source)?;
+            (name == "Controller").then(|| nestjs_controller_paths(&arguments, source))
+        })
+    else {
+        return;
+    };
+    let Some(prefixes) = prefixes else {
+        return;
+    };
+
+    let Some(body) = class.child_by_field_name("body") else {
+        return;
+    };
+    let mut cursor = body.walk();
+    let children = body.named_children(&mut cursor).collect::<Vec<_>>();
+    let mut pending_decorators = Vec::new();
+    for method in children {
+        if method.kind() == "decorator" {
+            pending_decorators.push(method);
+            continue;
+        }
+        if method.kind() != "method_definition" {
+            pending_decorators.clear();
+            continue;
+        }
+        let Some(handler) = method
+            .child_by_field_name("name")
+            .map(|name| text(name, source))
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        for decorator in pending_decorators.drain(..) {
+            let Some((decorator_name, arguments)) = decorator_call(decorator, source) else {
+                continue;
+            };
+            if !HTTP_DECORATORS.contains(&decorator_name.as_str()) {
+                continue;
+            }
+            let method_paths = if let Some(argument) = arguments.first() {
+                let Some(paths) = literal_string_values(*argument, source) else {
+                    continue;
+                };
+                paths
+            } else {
+                vec![String::new()]
+            };
+            for prefix in &prefixes {
+                for method_path in &method_paths {
+                    let path = join_route_path(prefix, method_path);
+                    let verb = decorator_name.to_ascii_uppercase();
+                    let name = format!("{verb} {path}");
+                    let occurrence = facts
+                        .symbols
+                        .iter()
+                        .filter(|symbol| symbol.kind == SymbolKind::Route && symbol.name == name)
+                        .count()
+                        + 1;
+                    let route = Symbol::new_disambiguated(
+                        facts.language,
+                        SymbolKind::Route,
+                        &name,
+                        &name,
+                        &facts.path,
+                        span(decorator),
+                        &format!("nestjs|{verb}|{path}|{handler}|occurrence:{occurrence}"),
+                    );
+                    let file_symbol = facts.symbols.first().expect("file symbol");
+                    facts.relationships.push(Relationship {
+                        source_id: file_symbol.id.clone(),
+                        target_id: route.id.clone(),
+                        kind: RelationshipKind::Contains,
+                        evidence: Evidence::new(
+                            "framework/nestjs-route",
+                            1.0,
+                            format!("{name} is registered in {}", facts.path),
+                            &facts.path,
+                            decorator.start_position().row + 1,
+                        ),
+                    });
+                    facts.unresolved_calls.push(UnresolvedCall {
+                        caller_id: route.id.clone(),
+                        callee_name: handler.clone(),
+                        receiver_type: None,
+                        target_file_hint: None,
+                        provenance: "framework/nestjs-route".to_owned(),
+                        confidence: 0.99,
+                        explanation: format!("NestJS route {name} decorates handler {handler}"),
+                        resolvable: true,
+                        file: facts.path.clone(),
+                        line: decorator.start_position().row + 1,
+                    });
+                    facts.symbols.push(route);
+                }
+            }
+        }
+    }
+}
+
+fn nestjs_controller_paths(arguments: &[Node<'_>], source: &[u8]) -> Option<Vec<String>> {
+    let Some(argument) = arguments.first().copied() else {
+        return Some(vec![String::new()]);
+    };
+    if argument.kind() != "object" {
+        return literal_string_values(argument, source);
+    }
+    let mut cursor = argument.walk();
+    for pair in argument.named_children(&mut cursor) {
+        if pair.kind() != "pair" {
+            continue;
+        }
+        let key = pair.child_by_field_name("key")?;
+        if text(key, source).trim_matches(['\'', '"']) != "path" {
+            continue;
+        }
+        return literal_string_values(pair.child_by_field_name("value")?, source);
+    }
+    Some(vec![String::new()])
+}
+
+fn literal_string_values(node: Node<'_>, source: &[u8]) -> Option<Vec<String>> {
+    if let Some(value) = string_literal(node, source) {
+        return Some(vec![value]);
+    }
+    if node.kind() != "array" {
+        return None;
+    }
+    let mut cursor = node.walk();
+    let values = node
+        .named_children(&mut cursor)
+        .map(|element| string_literal(element, source))
+        .collect::<Option<Vec<_>>>()?;
+    (!values.is_empty()).then_some(values)
+}
+
+fn direct_decorators(node: Node<'_>) -> impl Iterator<Item = Node<'_>> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .filter(|child| child.kind() == "decorator")
+        .collect::<Vec<_>>()
+        .into_iter()
+}
+
+fn decorator_call<'tree>(
+    decorator: Node<'tree>,
+    source: &[u8],
+) -> Option<(String, Vec<Node<'tree>>)> {
+    let call = first_descendant_of_kind(decorator, "call_expression")?;
+    let function = call.child_by_field_name("function")?;
+    if function.kind() != "identifier" {
+        return None;
+    }
+    let name = text(function, source);
+    let arguments = call.child_by_field_name("arguments")?;
+    let mut cursor = arguments.walk();
+    let arguments = arguments.named_children(&mut cursor).collect::<Vec<_>>();
+    Some((name, arguments))
+}
+
+fn join_route_path(prefix: &str, path: &str) -> String {
+    let joined = [prefix.trim_matches('/'), path.trim_matches('/')]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("/");
+    if joined.is_empty() {
+        "/".to_owned()
+    } else {
+        format!("/{joined}")
     }
 }
 

@@ -2128,6 +2128,117 @@ mod tests {
     }
 
     #[test]
+    fn nestjs_controller_decorators_join_paths_and_resolve_handlers() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("users.controller.ts"),
+            "@Controller('api/users')\n\
+             export class UsersController {\n\
+               @Get(':id')\n\
+               findOne() { return 1; }\n\
+               @Post()\n\
+               create() { return 2; }\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        for (route_name, handler) in [
+            ("GET /api/users/:id", "findOne"),
+            ("POST /api/users", "create"),
+        ] {
+            let route = engine
+                .search(route_name, 10)
+                .unwrap()
+                .into_iter()
+                .find(|hit| {
+                    hit.symbol.kind == crate::model::SymbolKind::Route
+                        && hit.symbol.name == route_name
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "missing {route_name}; routes: {:?}",
+                        engine
+                            .search("GET POST", 20)
+                            .unwrap()
+                            .into_iter()
+                            .filter(|hit| hit.symbol.kind == crate::model::SymbolKind::Route)
+                            .map(|hit| hit.symbol.name)
+                            .collect::<Vec<_>>()
+                    )
+                })
+                .symbol;
+            let callees = engine.callees(&route.id).unwrap();
+            assert_eq!(callees.len(), 1);
+            assert_eq!(callees[0].0.name, handler);
+            assert_eq!(callees[0].1.provenance, "framework/nestjs-route");
+            assert_eq!(callees[0].1.confidence, 0.99);
+        }
+    }
+
+    #[test]
+    fn nestjs_adapter_rejects_dynamic_paths_and_lookalike_decorators() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("fake.controller.ts"),
+            "const dynamic = 'users';\n\
+             @Controller(dynamic)\n\
+             class FakeController {\n\
+               @Get(dynamic)\n\
+               dynamicRoute() {}\n\
+               @get('lowercase')\n\
+               lookalike() {}\n\
+             }\n\
+             class NotAController {\n\
+               @Get('accidental')\n\
+               accidental() {}\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        assert!(engine
+            .search("ROUTE", 20)
+            .unwrap()
+            .into_iter()
+            .all(|hit| hit.symbol.kind != crate::model::SymbolKind::Route));
+    }
+
+    #[test]
+    fn nestjs_controller_supports_literal_path_arrays_and_options() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("health.controller.ts"),
+            "@Controller({ path: ['health', 'ready'] })\n\
+             class HealthController {\n\
+               @Get(['live', 'status'])\n\
+               check() {}\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        for route_name in [
+            "GET /health/live",
+            "GET /health/status",
+            "GET /ready/live",
+            "GET /ready/status",
+        ] {
+            let route = engine
+                .search(route_name, 10)
+                .unwrap()
+                .into_iter()
+                .find(|hit| {
+                    hit.symbol.kind == crate::model::SymbolKind::Route
+                        && hit.symbol.name == route_name
+                })
+                .unwrap()
+                .symbol;
+            assert_eq!(engine.callees(&route.id).unwrap()[0].0.name, "check");
+        }
+    }
+
+    #[test]
     fn watcher_makes_saved_symbols_query_visible() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("main.ts"), "function before() {}\n").unwrap();
