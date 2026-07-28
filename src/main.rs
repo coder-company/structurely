@@ -98,6 +98,10 @@ enum Command {
         #[command(subcommand)]
         command: DaemonCommand,
     },
+    Integrations {
+        #[command(subcommand)]
+        command: IntegrationCommand,
+    },
     Serve {
         #[arg(long)]
         mcp: bool,
@@ -128,6 +132,25 @@ enum DaemonCommand {
         path: PathBuf,
         #[arg(long, default_value_t = 250)]
         debounce_ms: u64,
+    },
+}
+
+#[derive(Subcommand)]
+enum IntegrationCommand {
+    Install {
+        client: String,
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+    },
+    Status {
+        client: String,
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+    },
+    Uninstall {
+        client: String,
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
     },
 }
 
@@ -282,6 +305,39 @@ fn main() -> Result<()> {
             command: DaemonCommand::Run { path, debounce_ms },
         } => {
             structurely::daemon::run(path, Duration::from_millis(debounce_ms.max(10)))?;
+        }
+        Command::Integrations {
+            command: IntegrationCommand::Install { client, path },
+        } => {
+            let client = structurely::integrations::AgentClient::parse(&client)?;
+            let executable = std::env::current_exe()?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&structurely::integrations::install(
+                    path, client, executable
+                )?)?
+            );
+        }
+        Command::Integrations {
+            command: IntegrationCommand::Status { client, path },
+        } => {
+            let client = structurely::integrations::AgentClient::parse(&client)?;
+            let executable = std::env::current_exe()?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&structurely::integrations::status(
+                    path, client, executable
+                )?)?
+            );
+        }
+        Command::Integrations {
+            command: IntegrationCommand::Uninstall { client, path },
+        } => {
+            let client = structurely::integrations::AgentClient::parse(&client)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&structurely::integrations::uninstall(path, client)?)?
+            );
         }
         Command::Serve { mcp: true, path } => mcp::serve_stdio(&path)?,
         Command::Serve { mcp: false, .. } => {

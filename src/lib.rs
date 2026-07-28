@@ -1,5 +1,6 @@
 pub mod daemon;
 pub mod engine;
+pub mod integrations;
 mod inventory;
 pub mod mcp;
 pub mod model;
