@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path};
 
-pub const GRAPH_MODEL_VERSION: u32 = 30;
+pub const GRAPH_MODEL_VERSION: u32 = 31;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -291,14 +291,31 @@ impl fmt::Display for EventAction {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) enum EventChannel {
+    Canonical(String),
+    Imported {
+        target_file_hint: String,
+        export_name: String,
+        member_path: String,
+    },
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct DynamicEventFact {
     pub owner_id: String,
     pub receiver: String,
-    pub channel: String,
+    pub channel: EventChannel,
     pub action: EventAction,
     pub callback_name: Option<String>,
     pub file: String,
     pub line: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LiteralBindingFact {
+    pub export_name: String,
+    pub member_path: String,
+    pub channel: String,
 }
 
 #[derive(Debug, Clone)]
@@ -325,6 +342,7 @@ pub(crate) struct FileFacts {
     pub unresolved_calls: Vec<UnresolvedCall>,
     pub unresolved_references: Vec<UnresolvedReference>,
     pub dynamic_events: Vec<DynamicEventFact>,
+    pub literal_bindings: Vec<LiteralBindingFact>,
 }
 
 #[cfg(test)]

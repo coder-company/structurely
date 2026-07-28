@@ -3068,6 +3068,105 @@ mod tests {
     }
 
     #[test]
+    fn harmony_emitter_resolves_imported_exported_descriptors_and_literals() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("app/AppScope")).unwrap();
+        fs::create_dir_all(temp.path().join("app/entry/src/main/ets")).unwrap();
+        fs::write(temp.path().join("app/AppScope/app.json5"), "{}").unwrap();
+        let constants = temp.path().join("app/entry/src/main/ets/events.ets");
+        fs::write(
+            &constants,
+            "export const messageEvent = { eventId: 1 }\n\
+             export const numericEvent = 1001\n\
+             export const stringEvent = '1001'\n\
+             export let mutableEvent = { eventId: 1 }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("app/entry/src/main/ets/EmitterConst.ts"),
+            "export class EmitterConst {\n\
+               public static readonly NUMERIC = 1025\n\
+               public static readonly STRING = '1025'\n\
+               public static MUTABLE = 1025\n\
+             }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("app/entry/src/main/ets/listener.ets"),
+            "import emitter from '@ohos.events.emitter'\n\
+             import { messageEvent as incoming, numericEvent, stringEvent, mutableEvent } from './events'\n\
+             import { EmitterConst as Events } from './EmitterConst'\n\
+             function onMessage() {}\n\
+             function onNumeric() {}\n\
+             function onString() {}\n\
+             function onMutable() {}\n\
+             function onMemberNumeric() {}\n\
+             function onMemberString() {}\n\
+             function onMemberMutable() {}\n\
+             export function registerImported() {\n\
+               emitter.on(incoming, onMessage)\n\
+               emitter.on(numericEvent, onNumeric)\n\
+               emitter.on(stringEvent, onString)\n\
+               emitter.on(mutableEvent, onMutable)\n\
+               emitter.on(Events.NUMERIC, onMemberNumeric)\n\
+               emitter.on(Events.STRING, onMemberString)\n\
+               emitter.on(Events.MUTABLE, onMemberMutable)\n\
+             }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("app/entry/src/main/ets/sender.ets"),
+            "import { emitter as bus } from '@kit.BasicServicesKit'\n\
+             import { messageEvent, numericEvent, stringEvent } from './events'\n\
+             import { EmitterConst } from './EmitterConst'\n\
+             export function sendMessage() { bus.emit(messageEvent) }\n\
+             export function sendNumeric() { bus.emit(numericEvent) }\n\
+             export function sendString() { bus.emit(stringEvent) }\n\
+             export function sendMemberNumeric() { bus.emit(EmitterConst.NUMERIC) }\n\
+             export function sendMemberString() { bus.emit(EmitterConst.STRING) }\n\
+             export function sendMemberMutable() { bus.emit(EmitterConst.MUTABLE) }\n\
+             export function sendShadowed(EmitterConst: LocalEvents) {\n\
+               bus.emit(EmitterConst.NUMERIC)\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let targets = |engine: &Engine, caller_name: &str| {
+            let caller = engine
+                .search(caller_name, 10)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.qualified_name == caller_name)
+                .unwrap()
+                .symbol;
+            engine
+                .callees(&caller.id)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, evidence)| evidence.provenance == "framework/ohos-emitter")
+                .map(|(target, _)| target.qualified_name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(targets(&engine, "sendMessage"), ["onMessage"]);
+        assert_eq!(targets(&engine, "sendNumeric"), ["onNumeric"]);
+        assert_eq!(targets(&engine, "sendString"), ["onString"]);
+        assert_eq!(targets(&engine, "sendMemberNumeric"), ["onMemberNumeric"]);
+        assert_eq!(targets(&engine, "sendMemberString"), ["onMemberString"]);
+        assert!(targets(&engine, "sendMemberMutable").is_empty());
+        assert!(targets(&engine, "sendShadowed").is_empty());
+        assert!(!targets(&engine, "sendMessage")
+            .iter()
+            .any(|target| target == "onMutable"));
+
+        fs::remove_file(constants).unwrap();
+        assert_eq!(engine.sync().unwrap().files_deleted, 1);
+        assert!(targets(&engine, "sendMessage").is_empty());
+        assert!(targets(&engine, "sendNumeric").is_empty());
+        assert!(targets(&engine, "sendString").is_empty());
+    }
+
+    #[test]
     fn component_templates_ignore_script_strings_and_intrinsic_elements() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(

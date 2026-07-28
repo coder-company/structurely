@@ -1,4 +1,4 @@
-use crate::model::FileFacts;
+use crate::model::{EventChannel, FileFacts};
 use globset::{Glob, GlobSetBuilder};
 use ignore::WalkBuilder;
 use std::{
@@ -111,6 +111,15 @@ impl ProjectResolutionContext {
         for event in &mut facts.dynamic_events {
             if event.receiver == "ohos-emitter" {
                 event.receiver = format!("ohos-emitter@{emitter_scope}");
+            }
+            if let EventChannel::Imported {
+                target_file_hint, ..
+            } = &mut event.channel
+            {
+                if let Some((resolved, _)) = self.resolve_import_from(&facts.path, target_file_hint)
+                {
+                    *target_file_hint = resolved;
+                }
             }
         }
         for reference in &mut facts.unresolved_references {

@@ -1,6 +1,6 @@
 use crate::model::{
-    Evidence, FileFacts, Language, Relationship, RelationshipKind, Symbol, SymbolKind,
-    GRAPH_MODEL_VERSION,
+    EventChannel, Evidence, FileFacts, Language, Relationship, RelationshipKind, Symbol,
+    SymbolKind, GRAPH_MODEL_VERSION,
 };
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -177,6 +177,9 @@ impl Store {
                 owner_public_id TEXT NOT NULL,
                 receiver TEXT NOT NULL,
                 channel TEXT NOT NULL,
+                channel_target_file_hint TEXT,
+                channel_export_name TEXT,
+                channel_member_path TEXT,
                 action TEXT NOT NULL,
                 callback_name TEXT,
                 evidence_file TEXT NOT NULL,
@@ -184,6 +187,15 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS dynamic_events_match_idx
                 ON dynamic_events(file_id,receiver,channel,action);
+            CREATE TABLE IF NOT EXISTS literal_bindings (
+                id INTEGER PRIMARY KEY,
+                file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                export_name TEXT NOT NULL,
+                member_path TEXT NOT NULL,
+                channel TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS literal_bindings_lookup_idx
+                ON literal_bindings(file_id,export_name,member_path);
             CREATE TABLE IF NOT EXISTS unresolved_references (
                 id INTEGER PRIMARY KEY,
                 file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
@@ -254,6 +266,24 @@ impl Store {
             "unresolved_references",
             "binding_name",
             "TEXT NOT NULL DEFAULT ''",
+        )?;
+        Self::ensure_column(
+            &self.connection,
+            "dynamic_events",
+            "channel_target_file_hint",
+            "TEXT",
+        )?;
+        Self::ensure_column(
+            &self.connection,
+            "dynamic_events",
+            "channel_export_name",
+            "TEXT",
+        )?;
+        Self::ensure_column(
+            &self.connection,
+            "dynamic_events",
+            "channel_member_path",
+            "TEXT",
         )?;
         Self::ensure_search_schema(&self.connection)?;
         Self::ensure_column(
@@ -613,21 +643,51 @@ impl Store {
             ])?;
         }
         for event in &file.dynamic_events {
+            let (channel, target_file_hint, export_name, member_path) = match &event.channel {
+                EventChannel::Canonical(channel) => (channel.as_str(), None, None, None),
+                EventChannel::Imported {
+                    target_file_hint,
+                    export_name,
+                    member_path,
+                } => (
+                    "",
+                    Some(target_file_hint.as_str()),
+                    Some(export_name.as_str()),
+                    Some(member_path.as_str()),
+                ),
+            };
             tx.prepare_cached(
                 "INSERT INTO dynamic_events(
-                    file_id,owner_public_id,receiver,channel,action,callback_name,
+                    file_id,owner_public_id,receiver,channel,channel_target_file_hint,
+                    channel_export_name,channel_member_path,action,callback_name,
                     evidence_file,evidence_line
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             )?
             .execute(params![
                 file_id,
                 event.owner_id,
                 event.receiver,
-                event.channel,
+                channel,
+                target_file_hint,
+                export_name,
+                member_path,
                 event.action.to_string(),
                 event.callback_name,
                 event.file,
                 event.line as i64
+            ])?;
+        }
+        for binding in &file.literal_bindings {
+            tx.prepare_cached(
+                "INSERT INTO literal_bindings(
+                    file_id,export_name,member_path,channel
+                 ) VALUES (?1,?2,?3,?4)",
+            )?
+            .execute(params![
+                file_id,
+                binding.export_name,
+                binding.member_path,
+                binding.channel
             ])?;
         }
         for reference in &file.unresolved_references {
@@ -1099,12 +1159,38 @@ impl Store {
 
     fn resolve_dynamic_events(tx: &Transaction<'_>) -> Result<usize> {
         const EVENT_FANOUT_CAP: usize = 6;
-        let mut dispatch_statement = tx.prepare(
-            "SELECT id,file_id,owner_public_id,receiver,channel,evidence_file,evidence_line
-             FROM dynamic_events
-             WHERE action='dispatch'
+        let effective_channel = "
+            COALESCE(
+              NULLIF(e.channel,''),
+              (
+                SELECT CASE WHEN COUNT(DISTINCT b.channel)=1 THEN MIN(b.channel) END
+                FROM literal_bindings b
+                JOIN files target_file ON target_file.id=b.file_id
+                WHERE target_file.path IN (
+                        e.channel_target_file_hint,
+                        e.channel_target_file_hint || '.ts',
+                        e.channel_target_file_hint || '.tsx',
+                        e.channel_target_file_hint || '.js',
+                        e.channel_target_file_hint || '.jsx',
+                        e.channel_target_file_hint || '.mjs',
+                        e.channel_target_file_hint || '.cjs',
+                        e.channel_target_file_hint || '.mts',
+                        e.channel_target_file_hint || '.cts',
+                        e.channel_target_file_hint || '.vue',
+                        e.channel_target_file_hint || '.svelte',
+                        e.channel_target_file_hint || '.ets'
+                      )
+                  AND b.export_name=e.channel_export_name
+                  AND b.member_path=COALESCE(e.channel_member_path,'')
+              )
+            )";
+        let mut dispatch_statement = tx.prepare(&format!(
+            "SELECT id,file_id,owner_public_id,receiver,{effective_channel},
+                    evidence_file,evidence_line
+             FROM dynamic_events e
+             WHERE action='dispatch' AND {effective_channel} IS NOT NULL
              ORDER BY evidence_file,evidence_line,id",
-        )?;
+        ))?;
         let dispatches = dispatch_statement
             .query_map([], |row| {
                 Ok((
@@ -1120,7 +1206,7 @@ impl Store {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(dispatch_statement);
 
-        let mut registrations = tx.prepare(
+        let mut registrations = tx.prepare(&format!(
             "SELECT DISTINCT rel.target_public_id,r.evidence_file,r.evidence_line
              FROM dynamic_events r
              JOIN relationships rel
@@ -1134,10 +1220,21 @@ impl Store {
                ON target.public_id=rel.target_public_id
               AND target.name=r.callback_name
              WHERE (r.file_id=?1 OR ?2 LIKE 'ohos-emitter@%')
-               AND r.receiver=?2 AND r.channel=?3
+               AND r.receiver=?2 AND {effective_channel_registration}=?3
                AND r.action='register'
              ORDER BY r.evidence_file,r.evidence_line,rel.target_public_id",
-        )?;
+            effective_channel_registration = effective_channel
+                .replace("NULLIF(e.channel", "NULLIF(r.channel")
+                .replace("e.channel_target_file_hint", "r.channel_target_file_hint",)
+                .replace(
+                    "b.export_name=e.channel_export_name",
+                    "b.export_name=r.channel_export_name",
+                )
+                .replace(
+                    "COALESCE(e.channel_member_path",
+                    "COALESCE(r.channel_member_path",
+                ),
+        ))?;
         let mut resolved = 0;
         for (_, file_id, dispatcher_id, receiver, channel, file, line) in dispatches {
             let is_ohos_emitter = receiver.starts_with("ohos-emitter@");
