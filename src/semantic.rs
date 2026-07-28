@@ -41,18 +41,53 @@ pub(crate) fn enrich_file_facts(root: Node<'_>, source: &[u8], facts: &mut FileF
 }
 
 fn collect_arkui_semantics(node: Node<'_>, source: &[u8], facts: &mut FileFacts) {
-    if node.kind() == "struct_declaration"
-        && ["Component", "ComponentV2"]
+    if node.kind() == "struct_declaration" {
+        if has_decorator(node, "Entry", source) {
+            mark_arkui_entry_component(node, source, facts);
+        }
+        if ["Component", "ComponentV2"]
             .iter()
             .any(|decorator| has_decorator(node, decorator, source))
-    {
-        enrich_arkui_component(node, source, facts);
-        return;
+        {
+            enrich_arkui_component(node, source, facts);
+            return;
+        }
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         collect_arkui_semantics(child, source, facts);
     }
+}
+
+fn mark_arkui_entry_component(node: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+    let Some(name) = node
+        .child_by_field_name("name")
+        .map(|name| text(name, source))
+    else {
+        return;
+    };
+    let Some(symbol) = facts.symbols.iter().find(|symbol| {
+        symbol.kind == SymbolKind::Struct
+            && symbol.name == name
+            && symbol.start_byte == node.start_byte()
+    }) else {
+        return;
+    };
+    facts.unresolved_references.push(UnresolvedReference {
+        source_id: symbol.id.clone(),
+        target_name: "__arkui_entry__".to_owned(),
+        binding_name: "__arkui_entry__".to_owned(),
+        target_file_hint: Some(facts.path.clone()),
+        kind: RelationshipKind::References,
+        provenance: "framework/arkui-entry".to_owned(),
+        confidence: 1.0,
+        explanation: format!(
+            "{} is an ArkUI @Entry page component",
+            symbol.qualified_name
+        ),
+        file: facts.path.clone(),
+        line: node.start_position().row + 1,
+    });
 }
 
 fn enrich_arkui_component(component: Node<'_>, source: &[u8], facts: &mut FileFacts) {
@@ -200,6 +235,7 @@ fn collect_arkui_runtime_calls(
             }
         }
     } else if node.kind() == "call_expression" {
+        collect_arkui_route_call(node, source, facts);
         if let Some(function) = node.child_by_field_name("function") {
             if function.kind() == "member_expression" {
                 let method = function
@@ -240,6 +276,93 @@ fn collect_arkui_runtime_calls(
     for child in node.named_children(&mut cursor) {
         collect_arkui_runtime_calls(child, component_name, source, facts);
     }
+}
+
+fn collect_arkui_route_call(node: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+    let Some(function) = node.child_by_field_name("function") else {
+        return;
+    };
+    if function.kind() != "member_expression"
+        || function
+            .child_by_field_name("object")
+            .is_none_or(|object| text(object, source) != "router")
+        || function
+            .child_by_field_name("property")
+            .is_none_or(|property| {
+                !matches!(text(property, source).as_str(), "pushUrl" | "replaceUrl")
+            })
+    {
+        return;
+    }
+    let Some(arguments) = node.child_by_field_name("arguments") else {
+        return;
+    };
+    let mut arguments_cursor = arguments.walk();
+    let Some(configuration) = arguments.named_children(&mut arguments_cursor).next() else {
+        return;
+    };
+    if configuration.kind() != "object" {
+        return;
+    }
+    let mut object_cursor = configuration.walk();
+    let url = configuration
+        .named_children(&mut object_cursor)
+        .filter(|property| property.kind() == "pair")
+        .find_map(|property| {
+            let key = property.child_by_field_name("key")?;
+            (text(key, source).trim_matches(['\'', '"']) == "url")
+                .then(|| property.child_by_field_name("value"))
+                .flatten()
+                .and_then(|value| string_literal(value, source))
+        });
+    let Some(url) = url else {
+        return;
+    };
+    let Some(target_file_hint) = arkui_route_target_hint(&facts.path, &url) else {
+        return;
+    };
+    let Some(owner) = owning_callable_symbol(node, &facts.symbols) else {
+        return;
+    };
+    facts.unresolved_calls.push(UnresolvedCall {
+        caller_id: owner.id.clone(),
+        callee_name: url
+            .trim_end_matches(".ets")
+            .rsplit('/')
+            .next()
+            .unwrap_or(&url)
+            .to_owned(),
+        receiver_type: None,
+        target_file_hint: Some(target_file_hint),
+        provenance: "framework/arkui-route".to_owned(),
+        confidence: 0.97,
+        explanation: format!(
+            "{} navigates to literal ArkUI page {url}",
+            owner.qualified_name
+        ),
+        resolvable: true,
+        file: facts.path.clone(),
+        line: node.start_position().row + 1,
+    });
+}
+
+fn arkui_route_target_hint(source_file: &str, url: &str) -> Option<String> {
+    let marker = "/src/main/ets/";
+    let module_end = source_file.rfind(marker)? + marker.len();
+    let route = url.trim().trim_start_matches('/').trim_end_matches(".ets");
+    let route_path = Path::new(route);
+    if route.is_empty()
+        || route_path.is_absolute()
+        || route_path.components().any(|component| {
+            !matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+    {
+        return None;
+    }
+    Some(format!("{}{}", &source_file[..module_end], route))
 }
 
 fn arkui_target_is_project_defined(target: &str, facts: &FileFacts) -> bool {

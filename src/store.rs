@@ -665,6 +665,7 @@ impl Store {
                 'framework/express-route',
                 'framework/fastapi-route',
                 'framework/react-router',
+                'framework/arkui-route',
                 'dynamic/event-registration'
              )",
             [],
@@ -760,8 +761,32 @@ impl Store {
                     .push((candidate.3, candidate.4, candidate.5, candidate.6));
             }
         }
-        let mut candidate_cache =
-            HashMap::<(String, String, i64, String, String), Vec<(String, String, i64)>>::new();
+        let arkui_entry_candidates = {
+            let mut statement = tx.prepare(
+                "SELECT s.public_id,s.qualified_name,s.file_id,f.path
+                 FROM unresolved_references u
+                 JOIN symbols s ON s.public_id=u.source_public_id
+                 JOIN files f ON f.id=s.file_id
+                 WHERE u.provenance='framework/arkui-entry'
+                   AND s.language='arkts' AND s.kind='struct'
+                 ORDER BY f.path,s.qualified_name,s.public_id",
+            )?;
+            let candidates = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<Candidate>>>()?;
+            candidates
+        };
+        let mut candidate_cache = HashMap::<
+            (String, String, i64, String, String, String),
+            Vec<(String, String, i64)>,
+        >::new();
         for (
             caller_id,
             callee_name,
@@ -788,6 +813,7 @@ impl Store {
                 file_id,
                 receiver_type.clone(),
                 target_file_hint.clone(),
+                provenance.clone(),
             );
             if !candidate_cache.contains_key(&cache_key) {
                 let direct = direct_candidates
@@ -795,19 +821,31 @@ impl Store {
                     .map(Vec::as_slice)
                     .unwrap_or_default();
                 let receiver_qualified = format!("{receiver_type}.{callee_name}");
-                let mut targets = direct
-                    .iter()
-                    .filter(|candidate| {
-                        (!target_file_hint.is_empty() || !receiver_type.is_empty())
-                            && (target_file_hint.is_empty()
-                                || module_hint_matches(&target_file_hint, &candidate.3))
-                            && (receiver_type.is_empty()
-                                || candidate.1 == receiver_qualified
-                                || candidate.1.ends_with(&format!(".{receiver_qualified}")))
-                    })
-                    .map(|candidate| (candidate.0.clone(), candidate.1.clone(), 0))
-                    .collect::<Vec<_>>();
-                if targets.is_empty() {
+                let is_arkui_route = provenance == "framework/arkui-route";
+                let mut targets = if is_arkui_route {
+                    arkui_entry_candidates
+                        .iter()
+                        .filter(|candidate| {
+                            !target_file_hint.is_empty()
+                                && module_hint_matches(&target_file_hint, &candidate.3)
+                        })
+                        .map(|candidate| (candidate.0.clone(), candidate.1.clone(), 0))
+                        .collect::<Vec<_>>()
+                } else {
+                    direct
+                        .iter()
+                        .filter(|candidate| {
+                            (!target_file_hint.is_empty() || !receiver_type.is_empty())
+                                && (target_file_hint.is_empty()
+                                    || module_hint_matches(&target_file_hint, &candidate.3))
+                                && (receiver_type.is_empty()
+                                    || candidate.1 == receiver_qualified
+                                    || candidate.1.ends_with(&format!(".{receiver_qualified}")))
+                        })
+                        .map(|candidate| (candidate.0.clone(), candidate.1.clone(), 0))
+                        .collect::<Vec<_>>()
+                };
+                if !is_arkui_route && targets.is_empty() {
                     if let Some(local) =
                         local_candidates.get(&(file_id, callee_name.clone(), language.clone()))
                     {
@@ -818,7 +856,7 @@ impl Store {
                         );
                     }
                 }
-                if targets.is_empty() {
+                if !is_arkui_route && targets.is_empty() {
                     for candidate_language in
                         std::iter::once(language.as_str()).chain(compatible_web_language(&language))
                     {
@@ -835,7 +873,7 @@ impl Store {
                         }
                     }
                 }
-                if targets.is_empty() {
+                if !is_arkui_route && targets.is_empty() {
                     targets.extend(
                         direct
                             .iter()

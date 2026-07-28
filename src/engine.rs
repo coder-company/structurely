@@ -2663,6 +2663,76 @@ mod tests {
     }
 
     #[test]
+    fn arkui_literal_routes_resolve_only_to_same_module_entry_pages() {
+        let temp = tempfile::tempdir().unwrap();
+        for module in ["first", "second"] {
+            fs::create_dir_all(temp.path().join(format!("{module}/src/main/ets/pages"))).unwrap();
+            fs::write(
+                temp.path()
+                    .join(format!("{module}/src/main/ets/pages/Detail.ets")),
+                format!(
+                    "@Entry\n@Component\nstruct {module}Detail {{ build() {{ Text('detail') }} }}\n"
+                ),
+            )
+            .unwrap();
+        }
+        fs::write(
+            temp.path().join("first/src/main/ets/pages/Plain.ets"),
+            "@Component\nstruct Plain { build() { Text('not a page') } }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("first/src/main/ets/pages/Home.ets"),
+            "@Entry\n\
+             @Component\n\
+             struct Home {\n\
+               openDetail() { router.pushUrl({ url: 'pages/Detail' }) }\n\
+               replaceDetail() { router.replaceUrl({ url: 'pages/Detail' }) }\n\
+               dynamic(url: string) { router.pushUrl({ url }) }\n\
+               openPlain() { router.pushUrl({ url: 'pages/Plain' }) }\n\
+               escape() { router.pushUrl({ url: '../second/src/main/ets/pages/Detail' }) }\n\
+               build() { Text('home') }\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        for caller_name in ["Home.openDetail", "Home.replaceDetail"] {
+            let caller = engine
+                .search(caller_name, 10)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.qualified_name == caller_name)
+                .unwrap()
+                .symbol;
+            let routes = engine
+                .callees(&caller.id)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, evidence)| evidence.provenance == "framework/arkui-route")
+                .collect::<Vec<_>>();
+            assert_eq!(routes.len(), 1);
+            assert_eq!(routes[0].0.qualified_name, "firstDetail");
+            assert_eq!(routes[0].0.file, "first/src/main/ets/pages/Detail.ets");
+            assert_eq!(routes[0].1.confidence, 0.97);
+        }
+        for caller_name in ["Home.dynamic", "Home.openPlain", "Home.escape"] {
+            let caller = engine
+                .search(caller_name, 10)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.qualified_name == caller_name)
+                .unwrap()
+                .symbol;
+            assert!(engine
+                .callees(&caller.id)
+                .unwrap()
+                .iter()
+                .all(|(_, evidence)| evidence.provenance != "framework/arkui-route"));
+        }
+    }
+
+    #[test]
     fn component_templates_ignore_script_strings_and_intrinsic_elements() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(

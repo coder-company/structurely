@@ -144,6 +144,18 @@
       }
     },
     {
+      "label": "arkui-route",
+      "method": "tools/call",
+      "params": {
+        "name": "codegraph_callees",
+        "arguments": {
+          "symbol": "RouterHome.openDetail",
+          "file": "harmony/entry/src/main/ets/pages/RouterHome.ets",
+          "limit": 20
+        }
+      }
+    },
+    {
       "label": "impact",
       "method": "tools/call",
       "params": {

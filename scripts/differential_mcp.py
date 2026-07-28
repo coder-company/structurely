@@ -108,6 +108,13 @@ def predicates(
             value in result_text(capture["ohpm-package"])
             for value in ("fetchProfile", "harmony/profile-data/Index.ets")
         ),
+        "arkui-route": all(
+            value in result_text(capture["arkui-route"])
+            for value in (
+                "RouterDetail",
+                "harmony/entry/src/main/ets/pages/RouterDetail.ets",
+            )
+        ),
         "impact": "showUser" in result_text(capture["impact"]),
         "node-window": "showUser" in result_text(capture["node-window"]),
         "explore-flow": all(
