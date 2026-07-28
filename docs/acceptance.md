@@ -17,6 +17,9 @@ Structurely is complete only when all gates are evidenced on pinned fixtures.
 - Framework resolver adapters require adversarial fixtures and two real repos.
 - Function-reference and dynamic-dispatch facts have bounded fanout,
   provenance, confidence, and false-positive fixtures.
+- Ambiguous call targets are capped at six; heritage links prefer module hints,
+  same-file declarations, and explicit imports, and reject non-unique global
+  fallbacks.
 - TypeScript aliases and workspace packages pass wildcard, ambiguity,
   traversal, scoped-package, and cross-package fixtures.
 

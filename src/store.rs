@@ -654,6 +654,7 @@ impl Store {
     }
 
     fn resolve_calls(tx: &Transaction<'_>) -> Result<usize> {
+        const CALL_FANOUT_CAP: usize = 6;
         let mut resolved = Self::resolve_structural_references(tx)?;
         tx.execute(
             "DELETE FROM relationships
@@ -847,6 +848,9 @@ impl Store {
                 .iter()
                 .take_while(|target| target.2 == best_rank)
                 .count();
+            if target_count > CALL_FANOUT_CAP {
+                continue;
+            }
             let resolution_confidence: f64 = match (best_rank, target_count) {
                 (0, 1) => 0.995,
                 (1, 1) => 0.99,
@@ -1164,7 +1168,7 @@ impl Store {
                 continue;
             }
             let mut target_statement = tx.prepare(
-                "SELECT s.public_id,s.qualified_name,f.path
+                "SELECT s.public_id,s.qualified_name,f.path,s.file_id
                  FROM symbols s JOIN files f ON f.id=s.file_id
                  WHERE s.name=?1 AND s.public_id<>?2 AND s.language=?3
                  ORDER BY s.qualified_name,s.public_id",
@@ -1175,6 +1179,7 @@ impl Store {
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
                     ))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1188,12 +1193,46 @@ impl Store {
                     targets = hinted;
                 }
             }
+            if kind != "imports" && target_file_hint.is_none() {
+                let same_file = targets
+                    .iter()
+                    .filter(|target| target.3 == file_id)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !same_file.is_empty() {
+                    targets = same_file;
+                } else {
+                    let imported_ids = {
+                        let mut statement = tx.prepare_cached(
+                            "SELECT target_public_id
+                             FROM import_bindings
+                             WHERE file_id=?1 AND binding_name=?2",
+                        )?;
+                        let ids = statement
+                            .query_map(params![file_id, binding_name], |row| {
+                                row.get::<_, String>(0)
+                            })?
+                            .collect::<rusqlite::Result<Vec<_>>>()?;
+                        ids
+                    };
+                    let imported = targets
+                        .iter()
+                        .filter(|target| imported_ids.contains(&target.0))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if !imported.is_empty() {
+                        targets = imported;
+                    } else if targets.len() != 1 {
+                        targets.clear();
+                    }
+                }
+            }
             let confidence = if targets.len() == 1 {
                 base_confidence
             } else {
                 base_confidence.min(0.55)
             };
-            for (target_id, qualified_name, _) in targets {
+            for (target_id, qualified_name, _, _) in targets {
                 Self::insert_relationship(
                     tx,
                     &Relationship {

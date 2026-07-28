@@ -1718,6 +1718,27 @@ mod tests {
     }
 
     #[test]
+    fn call_resolution_refuses_unbounded_ambiguous_fanout() {
+        let temp = tempfile::tempdir().unwrap();
+        let candidates = "def shared():\n    return 1\n".repeat(7);
+        fs::write(
+            temp.path().join("caller.py"),
+            format!("{candidates}\ndef dispatch():\n    shared()\n"),
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let dispatch = engine
+            .search("dispatch", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.name == "dispatch")
+            .unwrap()
+            .symbol;
+        assert!(engine.callees(&dispatch.id).unwrap().is_empty());
+    }
+
+    #[test]
     fn function_reference_roles_resolve_imports_and_surface_in_explore() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(
@@ -1870,6 +1891,73 @@ mod tests {
             .symbols
             .iter()
             .all(|symbol| symbol.kind != crate::model::SymbolKind::Route));
+    }
+
+    #[test]
+    fn django_paths_and_drf_viewsets_create_evidence_bearing_routes() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("views.py"),
+            "def home(request):\n    return None\n\
+             class ArticleView:\n    @classmethod\n    def as_view(cls):\n        return cls\n\
+             class ArticleViewSet:\n    pass\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("urls.py"),
+            "from views import home, ArticleView, ArticleViewSet\n\
+             urlpatterns = [\n\
+                 path('home/', home, name='home'),\n\
+                 re_path(r'^articles/$', ArticleView.as_view()),\n\
+             ]\n\
+             router.register(r'articles', ArticleViewSet)\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let cases = [
+            ("ROUTE /home/", "home"),
+            ("ROUTE /^articles/$", "ArticleView"),
+            ("VIEWSET /articles", "ArticleViewSet"),
+        ];
+        for (route_name, handler_name) in cases {
+            let route = engine
+                .search(route_name, 10)
+                .unwrap()
+                .into_iter()
+                .find(|hit| {
+                    hit.symbol.kind == crate::model::SymbolKind::Route
+                        && hit.symbol.name == route_name
+                })
+                .unwrap()
+                .symbol;
+            let callees = engine.callees(&route.id).unwrap();
+            assert_eq!(callees.len(), 1);
+            assert_eq!(callees[0].0.name, handler_name);
+            assert_eq!(callees[0].1.provenance, "framework/django-route");
+            assert_eq!(callees[0].1.confidence, 0.97);
+        }
+    }
+
+    #[test]
+    fn django_adapter_rejects_dynamic_paths_non_callables_and_lookalike_registers() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("urls.py"),
+            "def home(request):\n    return None\n\
+             prefix = 'dynamic/'\n\
+             path(prefix, home)\n\
+             path('string-handler/', 'home')\n\
+             registry.register('articles', ArticleViewSet)\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        assert!(engine
+            .search("ROUTE", 20)
+            .unwrap()
+            .into_iter()
+            .all(|hit| hit.symbol.kind != crate::model::SymbolKind::Route));
     }
 
     #[test]

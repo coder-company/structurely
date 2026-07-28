@@ -13,7 +13,10 @@ pub(crate) fn enrich_file_facts(root: Node<'_>, source: &[u8], facts: &mut FileF
                 collect_react_router_jsx(root, source, facts);
             }
         }
-        Language::Python => collect_fastapi_routes(root, source, facts),
+        Language::Python => {
+            collect_fastapi_routes(root, source, facts);
+            collect_django_routes(root, source, facts);
+        }
         _ => {}
     }
 }
@@ -189,6 +192,155 @@ fn enrich_fastapi_definition(definition: Node<'_>, source: &[u8], facts: &mut Fi
         });
         facts.symbols.push(route);
     }
+}
+
+fn collect_django_routes(node: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+    if node.kind() == "call" {
+        enrich_django_call(node, source, facts);
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_django_routes(child, source, facts);
+    }
+}
+
+fn enrich_django_call(call: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+    let Some(function) = call.child_by_field_name("function") else {
+        return;
+    };
+    let Some(arguments_node) = call.child_by_field_name("arguments") else {
+        return;
+    };
+    let mut cursor = arguments_node.walk();
+    let arguments = arguments_node
+        .named_children(&mut cursor)
+        .collect::<Vec<_>>();
+    let (path, handler, target_file_hint, label) =
+        if matches!(text(function, source).as_str(), "path" | "re_path" | "url") {
+            let Some(path) = arguments
+                .first()
+                .and_then(|argument| string_literal(*argument, source))
+            else {
+                return;
+            };
+            let Some((handler, target_file_hint)) = arguments
+                .get(1)
+                .and_then(|argument| django_handler_target(*argument, source))
+            else {
+                return;
+            };
+            (path, handler, target_file_hint, "ROUTE")
+        } else if member_method(function, source).as_deref() == Some("register")
+            && member_receiver(function, source).as_deref() == Some("router")
+        {
+            let Some(prefix) = arguments
+                .first()
+                .and_then(|argument| string_literal(*argument, source))
+            else {
+                return;
+            };
+            let Some((handler, target_file_hint)) = arguments
+                .get(1)
+                .and_then(|argument| django_handler_target(*argument, source))
+                .filter(|(handler, _)| handler.ends_with("View") || handler.ends_with("ViewSet"))
+            else {
+                return;
+            };
+            (
+                format!("/{}", prefix.trim_matches('/')),
+                handler,
+                target_file_hint,
+                "VIEWSET",
+            )
+        } else {
+            return;
+        };
+
+    let name = format!("{label} /{}", path.trim_start_matches('/'));
+    let occurrence = facts
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.kind == SymbolKind::Route && symbol.name == name)
+        .count()
+        + 1;
+    let route = Symbol::new_disambiguated(
+        facts.language,
+        SymbolKind::Route,
+        &name,
+        &name,
+        &facts.path,
+        span(call),
+        &format!("django|{label}|{path}|{handler}|occurrence:{occurrence}"),
+    );
+    let file_symbol = facts.symbols.first().expect("file symbol");
+    facts.relationships.push(Relationship {
+        source_id: file_symbol.id.clone(),
+        target_id: route.id.clone(),
+        kind: RelationshipKind::Contains,
+        evidence: Evidence::new(
+            "framework/django-route",
+            1.0,
+            format!("{name} is registered in {}", facts.path),
+            &facts.path,
+            call.start_position().row + 1,
+        ),
+    });
+    facts.unresolved_calls.push(UnresolvedCall {
+        caller_id: route.id.clone(),
+        callee_name: handler.clone(),
+        receiver_type: None,
+        target_file_hint,
+        provenance: "framework/django-route".to_owned(),
+        confidence: 0.98,
+        explanation: format!("Django {label} {name} registers handler {handler}"),
+        resolvable: true,
+        file: facts.path.clone(),
+        line: call.start_position().row + 1,
+    });
+    facts.symbols.push(route);
+}
+
+fn django_handler_target(node: Node<'_>, source: &[u8]) -> Option<(String, Option<String>)> {
+    match node.kind() {
+        "identifier" => Some((text(node, source), None)),
+        "attribute" => {
+            let name = node
+                .child_by_field_name("attribute")
+                .map(|attribute| text(attribute, source))?;
+            let hint = node
+                .child_by_field_name("object")
+                .or_else(|| node.child_by_field_name("value"))
+                .filter(|receiver| receiver.kind() == "identifier")
+                .map(|receiver| text(receiver, source));
+            Some((name, hint))
+        }
+        "call" => {
+            let function = node.child_by_field_name("function")?;
+            if member_method(function, source).as_deref() != Some("as_view") {
+                return None;
+            }
+            let receiver = function
+                .child_by_field_name("object")
+                .or_else(|| function.child_by_field_name("value"))?;
+            match receiver.kind() {
+                "identifier" => Some((text(receiver, source), None)),
+                "attribute" => {
+                    let name = receiver
+                        .child_by_field_name("attribute")
+                        .map(|attribute| text(attribute, source))?;
+                    let hint = receiver
+                        .child_by_field_name("object")
+                        .or_else(|| receiver.child_by_field_name("value"))
+                        .filter(|object| object.kind() == "identifier")
+                        .map(|object| text(object, source));
+                    Some((name, hint))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+    .filter(|(name, _)| !name.is_empty())
 }
 
 fn first_descendant_of_kind<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
@@ -655,8 +807,20 @@ fn referenced_callable_name(node: Node<'_>, source: &[u8]) -> Option<String> {
 }
 
 fn string_literal(node: Node<'_>, source: &[u8]) -> Option<String> {
-    matches!(node.kind(), "string" | "string_literal")
-        .then(|| text(node, source).trim_matches(['\'', '"']).to_owned())
+    if !matches!(node.kind(), "string" | "string_literal") {
+        return None;
+    }
+    let literal = text(node, source);
+    let quote_index = literal.find(['\'', '"'])?;
+    if !literal[..quote_index]
+        .chars()
+        .all(|character| matches!(character, 'r' | 'R' | 'b' | 'B' | 'u' | 'U'))
+    {
+        return None;
+    }
+    let quote = literal.as_bytes()[quote_index];
+    (literal.len() > quote_index + 1 && literal.as_bytes().last() == Some(&quote))
+        .then(|| literal[quote_index + 1..literal.len() - 1].to_owned())
 }
 
 fn owning_symbol<'a>(node: Node<'_>, symbols: &'a [Symbol]) -> Option<&'a Symbol> {

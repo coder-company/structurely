@@ -14,7 +14,7 @@ behavioral evidence; matching a command or tool name is not enough.
 | TS/JS path aliases | Compatible (core) | JSONC baseUrl/paths, wildcard specificity, target fallback, index/extension canonicalization and escape tests | representative real-repo evidence |
 | Workspace/package resolution | Compatible (core) | npm/yarn/pnpm workspaces, scoped packages, entrypoints/subpaths, Cargo crates, and Go workspaces | Bun workspace fixture and representative monorepo gates |
 | Nested repositories and worktrees | Partial | embedded repo opt-in and built-in dependency/build safety tests | submodule, worktree and mismatch suites |
-| Framework resolvers | Partial | Express, FastAPI, and React Router JSX/object route symbols; complete named Express middleware chains; adversarial fixtures; pinned Express, LightRAG, and Graphiti acceptance runs | Django and prioritized remaining adapters; second real repository for Express and React Router |
+| Framework resolvers | Partial | Express, FastAPI, React Router JSX/object routes, Django `path`/`re_path`/legacy `url`, and DRF viewsets; adversarial fixtures; pinned Express, LightRAG, Graphiti, and Django acceptance runs | prioritized remaining adapters; second real repository per adapter |
 | Callbacks and dynamic dispatch | Partial | named callbacks; initializer/object/array/assignment references; strict import/local resolution; literal events, fanout cap, incremental cleanup, provenance and shadowing tests | broader member/type dispatch and differential fixtures |
 | Language/dialect breadth | Behind | 18 language dialects | prioritized missing grammars and kernel-parity fixtures |
 | Daemon and shared live index | Compatible (core) | spawned-process start/status/catch-up/stop test; exclusive project lock; failure release/restart; MCP daemon/foreground fallback metadata | cross-platform CI evidence and sustained fault-injection soak |
@@ -32,8 +32,8 @@ claim that every framework pattern is supported.
 3. Budgeted and freshness-honest Explore/Node output.
 4. Function references, callbacks, and dynamic dispatch. (named callbacks and
    literal events delivered; broader value-flow remains)
-5. Express/React Router and Django/FastAPI resolver adapters. (Express,
-   React Router, and FastAPI delivered; Django remains)
+5. Express/React Router and Django/FastAPI resolver adapters. (core adapters
+   delivered; broader framework-specific dispatch remains)
 6. Remaining framework and language adapters prioritized by real repositories.
 7. Shared daemon, project discovery, installers, and operational hardening.
    (core daemon and three project-scoped integrations delivered)

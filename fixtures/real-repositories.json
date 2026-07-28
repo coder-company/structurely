@@ -74,6 +74,32 @@
           ]
         }
       ]
+    },
+    {
+      "name": "django",
+      "url": "https://github.com/django/django",
+      "commit": "92470ad3742524902b29769d2c822dbe791630db",
+      "minimumIndexedFiles": 2900,
+      "assertions": [
+        {
+          "command": "search",
+          "query": "ROUTE /regular/",
+          "contains": [
+            "tests/handlers/urls.py",
+            "ROUTE /regular/"
+          ]
+        },
+        {
+          "command": "callees",
+          "query": "ROUTE /regular/",
+          "file": "tests/handlers/urls.py",
+          "contains": [
+            "\"name\": \"regular\"",
+            "tests/handlers/views.py",
+            "\"provenance\": \"framework/django-route\""
+          ]
+        }
+      ]
     }
   ]
 }

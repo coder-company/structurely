@@ -40,6 +40,19 @@
         "POST /search resolves to retrieve.py",
         "search callers include POST /search with framework/fastapi-route evidence"
       ]
+    },
+    {
+      "name": "django",
+      "commit": "92470ad3742524902b29769d2c822dbe791630db",
+      "freshIndexWallMs": 48759.187,
+      "indexedFiles": 2972,
+      "symbols": 47287,
+      "relationships": 262090,
+      "databaseBytes": 238231552,
+      "assertions": [
+        "ROUTE /regular/ resolves to tests/handlers/urls.py",
+        "route callee is tests/handlers/views.py::regular with framework/django-route evidence"
+      ]
     }
   ]
 }

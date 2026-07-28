@@ -9,11 +9,14 @@ not a comparison of raw edge counts.
 | expressjs/express | `a3714473` | 141 | 255.610 ms | repeated routes and middleware chains |
 | HKUDS/LightRAG | `44db36fe` | 514 | 4,517.198 ms | FastAPI, React Router, TS aliases |
 | getzep/graphiti | `526dcad7` | 255 | 637.366 ms | FastAPI |
+| django/django | `92470ad3` | 2,972 | 48,560 ms | Django URLs and ambiguity pressure |
 
-All six assertions passed. In particular, the Express corpus originally
+All eight assertions passed. In particular, the Express corpus originally
 exposed a duplicate route semantic-key crash. The acceptance run verifies both
 the corrected repeated-route identity and the `count` → `users` middleware
-chain for `GET /middleware`.
+chain for `GET /middleware`. Django initially exposed 1.43 million speculative
+relationships; bounded call fanout and scope-aware heritage resolution reduced
+that to 262,090 while preserving the pinned route-to-view edge.
 
 Reproduce from existing local clones or mirrors:
 
@@ -23,6 +26,7 @@ python3 scripts/acceptance_repositories.py \
   --repository express=/path/to/express \
   --repository lightrag=/path/to/LightRAG \
   --repository graphiti=/path/to/graphiti \
+  --repository django=/path/to/django \
   --output /tmp/structurely-real-repositories.json
 ```
 
