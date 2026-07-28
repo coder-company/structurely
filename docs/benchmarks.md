@@ -74,6 +74,12 @@ rerun covers React runtime and interface dispatch. Structurely remains 3.85×
 faster to index and 9.08× faster for query p50 while using 89.5% less peak
 memory.
 
+The
+[`codegraph-source-intersection-2026-07-28-post-components`](../benchmarks/codegraph-source-intersection-2026-07-28-post-components/README.md)
+rerun covers Vue/Svelte extraction and corrected import fanout. Structurely
+remains 3.96× faster to index and 9.19× faster for query p50 while using 89.8%
+less peak memory.
+
 ## Semantic quality
 
 Quality manifests list expected caller/callee edges by language. Evaluate a

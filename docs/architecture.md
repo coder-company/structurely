@@ -55,7 +55,9 @@ FastAPI decorators, NestJS HTTP controllers, and literal event
 registration/dispatch. React runtime adapters bridge state updates to class
 renders and capitalized JSX children to their component definitions. A bounded
 post-resolution adapter connects interface methods to directly declared
-concrete implementations. This keeps
+concrete implementations. Vue and Svelte files use offset-preserving embedded
+script views plus bounded template adapters for component rendering and event
+handlers. This keeps
 framework policy out of the storage Module while letting every adapter reuse
 import scope, alias resolution, evidence, atomic publication, and graph
 traversal.
