@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path};
 
-pub const GRAPH_MODEL_VERSION: u32 = 11;
+pub const GRAPH_MODEL_VERSION: u32 = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -254,6 +254,33 @@ pub(crate) struct UnresolvedCall {
     pub provenance: String,
     pub confidence: f64,
     pub explanation: String,
+    pub resolvable: bool,
+    pub file: String,
+    pub line: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EventAction {
+    Register,
+    Dispatch,
+}
+
+impl fmt::Display for EventAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Register => "register",
+            Self::Dispatch => "dispatch",
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DynamicEventFact {
+    pub owner_id: String,
+    pub receiver: String,
+    pub channel: String,
+    pub action: EventAction,
+    pub callback_name: Option<String>,
     pub file: String,
     pub line: usize,
 }
@@ -281,6 +308,7 @@ pub(crate) struct FileFacts {
     pub relationships: Vec<Relationship>,
     pub unresolved_calls: Vec<UnresolvedCall>,
     pub unresolved_references: Vec<UnresolvedReference>,
+    pub dynamic_events: Vec<DynamicEventFact>,
 }
 
 #[cfg(test)]

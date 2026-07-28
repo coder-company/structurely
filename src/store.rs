@@ -164,11 +164,25 @@ impl Store {
                 provenance TEXT NOT NULL DEFAULT 'tree-sitter/name-resolution',
                 confidence REAL NOT NULL DEFAULT 1.0,
                 explanation TEXT NOT NULL DEFAULT 'direct call expression',
+                resolvable INTEGER NOT NULL DEFAULT 1,
                 evidence_file TEXT NOT NULL,
                 evidence_line INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS unresolved_calls_name_idx
                 ON unresolved_calls(callee_name);
+            CREATE TABLE IF NOT EXISTS dynamic_events (
+                id INTEGER PRIMARY KEY,
+                file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                owner_public_id TEXT NOT NULL,
+                receiver TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                action TEXT NOT NULL,
+                callback_name TEXT,
+                evidence_file TEXT NOT NULL,
+                evidence_line INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS dynamic_events_match_idx
+                ON dynamic_events(file_id,receiver,channel,action);
             CREATE TABLE IF NOT EXISTS unresolved_references (
                 id INTEGER PRIMARY KEY,
                 file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
@@ -221,6 +235,12 @@ impl Store {
             "unresolved_calls",
             "explanation",
             "TEXT NOT NULL DEFAULT 'direct call expression'",
+        )?;
+        Self::ensure_column(
+            &self.connection,
+            "unresolved_calls",
+            "resolvable",
+            "INTEGER NOT NULL DEFAULT 1",
         )?;
         Self::ensure_column(
             &self.connection,
@@ -466,7 +486,8 @@ impl Store {
     }
 
     fn finish_epoch(tx: &Transaction<'_>, next_epoch: u64) -> Result<usize> {
-        let relationships_resolved = Self::resolve_calls(tx)?;
+        let mut relationships_resolved = Self::resolve_calls(tx)?;
+        relationships_resolved += Self::resolve_dynamic_events(tx)?;
         tx.execute(
             "UPDATE metadata SET value = ?1 WHERE key = 'graph_epoch'",
             [next_epoch.to_string()],
@@ -566,8 +587,8 @@ impl Store {
             tx.prepare_cached(
                 "INSERT INTO unresolved_calls(
                     file_id, caller_public_id, callee_name, receiver_type, provenance,
-                    confidence, explanation, evidence_file, evidence_line
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    confidence, explanation, resolvable, evidence_file, evidence_line
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             )?
             .execute(params![
                 file_id,
@@ -577,8 +598,27 @@ impl Store {
                 call.provenance,
                 call.confidence,
                 call.explanation,
+                call.resolvable,
                 call.file,
                 call.line as i64
+            ])?;
+        }
+        for event in &file.dynamic_events {
+            tx.prepare_cached(
+                "INSERT INTO dynamic_events(
+                    file_id,owner_public_id,receiver,channel,action,callback_name,
+                    evidence_file,evidence_line
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            )?
+            .execute(params![
+                file_id,
+                event.owner_id,
+                event.receiver,
+                event.channel,
+                event.action.to_string(),
+                event.callback_name,
+                event.file,
+                event.line as i64
             ])?;
         }
         for reference in &file.unresolved_references {
@@ -612,13 +652,15 @@ impl Store {
              WHERE provenance IN (
                 'tree-sitter/name-resolution',
                 'tree-sitter/callback-registration',
-                'framework/express-route'
+                'framework/express-route',
+                'dynamic/event-registration'
              )",
             [],
         )?;
         let mut calls_statement = tx.prepare(
             "SELECT u.caller_public_id,u.callee_name,u.receiver_type,u.provenance,
-                    u.confidence,u.explanation,u.evidence_file,u.evidence_line,s.language,u.file_id
+                    u.confidence,u.explanation,u.evidence_file,u.evidence_line,s.language,u.file_id,
+                    u.resolvable
              FROM unresolved_calls u
              JOIN symbols s ON s.public_id=u.caller_public_id
              ORDER BY u.evidence_file,u.evidence_line,u.id",
@@ -636,6 +678,7 @@ impl Store {
                     row.get::<_, i64>(7)? as usize,
                     row.get::<_, String>(8)?,
                     row.get::<_, i64>(9)?,
+                    row.get::<_, bool>(10)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -667,8 +710,12 @@ impl Store {
             line,
             language,
             file_id,
+            resolvable,
         ) in calls
         {
+            if !resolvable {
+                continue;
+            }
             let receiver_type = receiver_type.unwrap_or_default();
             let cache_key = (
                 callee_name.clone(),
@@ -776,6 +823,84 @@ impl Store {
                                      {qualified_name} is a possible target"
                                 )
                             },
+                            &file,
+                            line,
+                        ),
+                    },
+                )?;
+                resolved += 1;
+            }
+        }
+        Ok(resolved)
+    }
+
+    fn resolve_dynamic_events(tx: &Transaction<'_>) -> Result<usize> {
+        const EVENT_FANOUT_CAP: usize = 6;
+        let mut dispatch_statement = tx.prepare(
+            "SELECT id,file_id,owner_public_id,receiver,channel,evidence_file,evidence_line
+             FROM dynamic_events
+             WHERE action='dispatch'
+             ORDER BY evidence_file,evidence_line,id",
+        )?;
+        let dispatches = dispatch_statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)? as usize,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(dispatch_statement);
+
+        let mut registrations = tx.prepare(
+            "SELECT DISTINCT rel.target_public_id,r.evidence_file,r.evidence_line
+             FROM dynamic_events r
+             JOIN relationships rel
+               ON rel.source_public_id=r.owner_public_id
+              AND rel.provenance='tree-sitter/callback-registration'
+             JOIN symbols target
+               ON target.public_id=rel.target_public_id
+              AND target.name=r.callback_name
+             WHERE r.file_id=?1 AND r.receiver=?2 AND r.channel=?3
+               AND r.action='register'
+             ORDER BY r.evidence_file,r.evidence_line,rel.target_public_id",
+        )?;
+        let mut resolved = 0;
+        for (_, file_id, dispatcher_id, receiver, channel, file, line) in dispatches {
+            let targets = registrations
+                .query_map(params![file_id, receiver, channel], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)? as usize,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            if targets.is_empty() || targets.len() > EVENT_FANOUT_CAP {
+                continue;
+            }
+            for (target_id, registration_file, registration_line) in targets {
+                if dispatcher_id == target_id {
+                    continue;
+                }
+                Self::insert_relationship(
+                    tx,
+                    &Relationship {
+                        source_id: dispatcher_id.clone(),
+                        target_id,
+                        kind: RelationshipKind::Calls,
+                        evidence: Evidence::new(
+                            "dynamic/event-registration",
+                            0.92,
+                            format!(
+                                "literal event `{channel}` on `{receiver}` dispatches to a handler \
+                                 registered at {registration_file}:{registration_line}"
+                            ),
                             &file,
                             line,
                         ),
@@ -1314,5 +1439,6 @@ mod tests {
         assert!(call_columns.contains(&"provenance".to_owned()));
         assert!(call_columns.contains(&"confidence".to_owned()));
         assert!(call_columns.contains(&"explanation".to_owned()));
+        assert!(call_columns.contains(&"resolvable".to_owned()));
     }
 }

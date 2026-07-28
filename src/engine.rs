@@ -1466,6 +1466,105 @@ mod tests {
     }
 
     #[test]
+    fn literal_event_dispatch_links_to_registered_handler_and_cleans_incrementally() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = "function onReady() {}\n\
+                      function register() { bus.on('ready', onReady); }\n\
+                      function dispatch() { bus.emit('ready'); }\n";
+        fs::write(temp.path().join("events.ts"), source).unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+
+        let dispatch = engine
+            .search("dispatch", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.name == "dispatch")
+            .unwrap()
+            .symbol;
+        let dynamic = engine
+            .callees(&dispatch.id)
+            .unwrap()
+            .into_iter()
+            .find(|(symbol, evidence)| {
+                symbol.name == "onReady" && evidence.provenance == "dynamic/event-registration"
+            })
+            .unwrap();
+        assert_eq!(dynamic.1.confidence, 0.92);
+        assert!(dynamic.1.explanation.contains("events.ts:2"));
+
+        fs::write(
+            temp.path().join("events.ts"),
+            "function onReady() {}\nfunction dispatch() { bus.emit('ready'); }\n",
+        )
+        .unwrap();
+        engine.sync().unwrap();
+        let dispatch = engine
+            .search("dispatch", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.name == "dispatch")
+            .unwrap()
+            .symbol;
+        assert!(engine
+            .callees(&dispatch.id)
+            .unwrap()
+            .iter()
+            .all(|(_, evidence)| evidence.provenance != "dynamic/event-registration"));
+    }
+
+    #[test]
+    fn event_dispatch_fanout_is_capped_and_dynamic_channels_are_ignored() {
+        let temp = tempfile::tempdir().unwrap();
+        let handlers = (0..7)
+            .map(|index| format!("function handler{index}() {{}}\n"))
+            .collect::<String>();
+        let registrations = (0..7)
+            .map(|index| format!("bus.on('ready', handler{index});\n"))
+            .collect::<String>();
+        fs::write(
+            temp.path().join("events.ts"),
+            format!(
+                "{handlers}function register() {{\n{registrations}}}\n\
+                 function dispatch() {{ bus.emit('ready'); bus.emit(dynamicName); }}\n"
+            ),
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let dispatch = engine
+            .search("dispatch", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.name == "dispatch")
+            .unwrap()
+            .symbol;
+        assert!(engine
+            .callees(&dispatch.id)
+            .unwrap()
+            .iter()
+            .all(|(_, evidence)| evidence.provenance != "dynamic/event-registration"));
+    }
+
+    #[test]
+    fn parameter_invocation_does_not_bind_to_unrelated_global_symbol() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("main.ts"),
+            "function callback() {}\n\
+             function invoke(callback: () => void) { callback(); }\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let invoke = engine
+            .search("invoke", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.name == "invoke")
+            .unwrap()
+            .symbol;
+        assert!(engine.callees(&invoke.id).unwrap().is_empty());
+    }
+
+    #[test]
     fn watcher_makes_saved_symbols_query_visible() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("main.ts"), "function before() {}\n").unwrap();

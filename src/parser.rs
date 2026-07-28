@@ -101,6 +101,7 @@ pub(crate) fn parse_file_as(
         relationships,
         unresolved_calls,
         unresolved_references,
+        dynamic_events: Vec::new(),
     };
     enrich_file_facts(tree.root_node(), source_bytes, &mut facts);
     Ok(facts)
@@ -649,6 +650,7 @@ fn collect_calls(
     ) {
         if let Some(function) = call_target_node(node) {
             if let Some(name) = call_name(function, source) {
+                let resolvable = !is_parameter_invocation(node, &name, source);
                 let mut owner = node.parent();
                 let mut caller_id = None;
                 while let Some(ancestor) = owner {
@@ -667,6 +669,7 @@ fn collect_calls(
                     provenance: "tree-sitter/name-resolution".to_owned(),
                     confidence: 1.0,
                     explanation: "direct call expression".to_owned(),
+                    resolvable,
                     file: file.to_owned(),
                     line: node.start_position().row + 1,
                 });
@@ -685,6 +688,32 @@ fn collect_calls(
             output,
         );
     }
+}
+
+fn is_parameter_invocation(call: Node<'_>, name: &str, source: &[u8]) -> bool {
+    let mut ancestor = call.parent();
+    while let Some(node) = ancestor {
+        if matches!(
+            node.kind(),
+            "function_declaration"
+                | "function_expression"
+                | "arrow_function"
+                | "method_definition"
+                | "function_definition"
+        ) {
+            return node
+                .child_by_field_name("parameters")
+                .is_some_and(|parameters| {
+                    let mut identifiers = Vec::new();
+                    collect_identifier_nodes(parameters, source, &mut identifiers);
+                    identifiers
+                        .iter()
+                        .any(|(parameter, _, _)| parameter == name)
+                });
+        }
+        ancestor = node.parent();
+    }
+    false
 }
 
 fn receiver_type_hint(

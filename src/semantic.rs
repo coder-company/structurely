@@ -1,6 +1,6 @@
 use crate::model::{
-    Evidence, FileFacts, Language, Relationship, RelationshipKind, SourceSpan, Symbol, SymbolKind,
-    UnresolvedCall,
+    DynamicEventFact, EventAction, Evidence, FileFacts, Language, Relationship, RelationshipKind,
+    SourceSpan, Symbol, SymbolKind, UnresolvedCall,
 };
 use tree_sitter::Node;
 
@@ -42,6 +42,14 @@ fn enrich_javascript_call(call: Node<'_>, source: &[u8], facts: &mut FileFacts) 
     if arguments.is_empty() {
         return;
     }
+    collect_dynamic_event(
+        call,
+        receiver.as_deref(),
+        method.as_str(),
+        &arguments,
+        source,
+        facts,
+    );
 
     let route = express_route(receiver.as_deref(), method.as_str(), &arguments, source).map(
         |(verb, path)| {
@@ -114,6 +122,51 @@ fn enrich_javascript_call(call: Node<'_>, source: &[u8], facts: &mut FileFacts) 
         provenance: provenance.to_owned(),
         confidence,
         explanation,
+        resolvable: true,
+        file: facts.path.clone(),
+        line: call.start_position().row + 1,
+    });
+}
+
+fn collect_dynamic_event(
+    call: Node<'_>,
+    receiver: Option<&str>,
+    method: &str,
+    arguments: &[Node<'_>],
+    source: &[u8],
+    facts: &mut FileFacts,
+) {
+    let Some(receiver) = receiver else {
+        return;
+    };
+    let Some(channel) = arguments
+        .first()
+        .and_then(|argument| string_literal(*argument, source))
+    else {
+        return;
+    };
+    let (action, callback_name) = match method {
+        "on" | "once" => (
+            EventAction::Register,
+            arguments
+                .get(1)
+                .and_then(|argument| referenced_callable_name(*argument, source)),
+        ),
+        "emit" | "dispatchEvent" => (EventAction::Dispatch, None),
+        _ => return,
+    };
+    if action == EventAction::Register && callback_name.is_none() {
+        return;
+    }
+    let owner = owning_symbol(call, &facts.symbols)
+        .or_else(|| facts.symbols.first())
+        .expect("file symbol");
+    facts.dynamic_events.push(DynamicEventFact {
+        owner_id: owner.id.clone(),
+        receiver: receiver.to_owned(),
+        channel,
+        action,
+        callback_name,
         file: facts.path.clone(),
         line: call.start_position().row + 1,
     });
