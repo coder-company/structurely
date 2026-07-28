@@ -9,7 +9,7 @@ behavioral evidence; matching a command or tool name is not enough.
 | Stable graph epochs and rollback | Superior | deterministic snapshots and injected rollback tests | preserve while expanding every resolver |
 | Index/query performance | Superior | pinned 441-file benchmark | rerun after each major semantic layer |
 | Core CLI/MCP names and schemas | Compatible (core) | eight handlers, pinned contract fixture, persistent-stdio binary test, and 14-scenario live differential run against pinned CodeGraph | pagination and cross-platform suites |
-| Explore context usefulness | Partial | global/per-symbol budgets, exact/corroborated ranking, line-numbered excerpts, omission and stale-index disclosure | differential usefulness fixture, flow spine, large-repo evaluation |
+| Explore context usefulness | Compatible (core) | global/per-symbol budgets, exact/corroborated ranking, line-numbered excerpts, omission/staleness disclosure, and a pinned differential flow scoring 1.0000 versus CodeGraph 0.9583 | broaden usefulness queries and add blinded large-repo evaluation |
 | Project config and custom extensions | Compatible (core) | `structurely.json`/`codegraph.json`; extension, exclude, include, includeIgnored, precedence and malformed-config tests | differential configuration fixture |
 | TS/JS path aliases | Compatible (core) | JSONC baseUrl/paths, wildcard specificity, target fallback, index/extension canonicalization and escape tests | representative real-repo evidence |
 | Workspace/package resolution | Compatible (core) | npm/yarn/pnpm workspaces, scoped packages, entrypoints/subpaths, Cargo crates, and Go workspaces | Bun workspace fixture and representative monorepo gates |

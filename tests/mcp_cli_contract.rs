@@ -74,7 +74,11 @@ fn mcp_stdio_preserves_the_codegraph_agent_contract() {
         json!({"query": "registerRoutes showUser", "maxFiles": 5}),
     );
     assert!(text(&explore).contains("registerRoutes"));
+    assert!(text(&explore).contains("authorize"));
     assert!(text(&explore).contains("showUser"));
+    assert!(text(&explore).contains("dispatchReady"));
+    assert!(text(&explore).contains("ready"));
+    assert!(!text(&explore).contains("api.py"));
 
     let files = session.call(
         "codegraph_files",

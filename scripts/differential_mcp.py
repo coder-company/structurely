@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -101,6 +102,49 @@ def predicates(capture: dict[str, Any]) -> dict[str, bool]:
     }
 
 
+def context_usefulness(
+    capture: dict[str, Any], expectations: dict[str, Any]
+) -> dict[str, Any]:
+    text = result_text(capture[expectations["scenario"]])
+    required = expectations["requiredFacts"]
+    relevant = set(expectations["relevantFiles"])
+    irrelevant = set(expectations["irrelevantFiles"])
+    headings = set(re.findall(r"\*\*`([^`]+)`", text))
+    mentioned_relevant = sorted(file for file in relevant if file in text)
+    mentioned_irrelevant = sorted(file for file in irrelevant if file in headings)
+    required_recall = sum(fact in text for fact in required) / len(required)
+    relevant_file_recall = len(mentioned_relevant) / len(relevant)
+    heading_files = headings & (relevant | irrelevant)
+    file_precision = (
+        len(heading_files & relevant) / len(heading_files) if heading_files else 0.0
+    )
+    flow_spines = [
+        all(fact in text for fact in spine) for spine in expectations["flowSpines"]
+    ]
+    source_is_line_numbered = bool(re.search(r"(?m)^\d+\t", text)) and "```" in text
+    within_budget = len(text) <= expectations["maximumCharacters"]
+    components = [
+        required_recall,
+        relevant_file_recall,
+        file_precision,
+        sum(flow_spines) / len(flow_spines),
+        float(source_is_line_numbered),
+        float(within_budget),
+    ]
+    return {
+        "score": round(sum(components) / len(components), 4),
+        "requiredFactRecall": round(required_recall, 4),
+        "relevantFileRecall": round(relevant_file_recall, 4),
+        "filePrecision": round(file_precision, 4),
+        "mentionedRelevantFiles": mentioned_relevant,
+        "mentionedIrrelevantFiles": mentioned_irrelevant,
+        "flowSpines": flow_spines,
+        "lineNumberedSource": source_is_line_numbered,
+        "characters": len(text),
+        "withinBudget": within_budget,
+    }
+
+
 def normalize(value: Any, roots: list[Path]) -> Any:
     if isinstance(value, dict):
         return {
@@ -164,6 +208,10 @@ def main() -> None:
 
     structurely_checks = predicates(structurely)
     codegraph_checks = predicates(codegraph)
+    structurely_usefulness = context_usefulness(
+        structurely, manifest["contextUsefulness"]
+    )
+    codegraph_usefulness = context_usefulness(codegraph, manifest["contextUsefulness"])
     shared = {
         label: structurely_checks[label] and codegraph_checks[label]
         for label in structurely_checks
@@ -184,6 +232,13 @@ def main() -> None:
             "passed": sum(codegraph_checks.values()),
             "predicates": codegraph_checks,
         },
+        "contextUsefulness": {
+            "structurely": structurely_usefulness,
+            "codegraph": codegraph_usefulness,
+            "atLeastPinnedCodeGraph": (
+                structurely_usefulness["score"] >= codegraph_usefulness["score"]
+            ),
+        },
         "captures": {
             "structurely": normalized_structurely,
             "codegraph": normalized_codegraph,
@@ -196,7 +251,7 @@ def main() -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report["compatibility"], indent=2))
-    if not all(shared.values()):
+    if not all(shared.values()) or not report["contextUsefulness"]["atLeastPinnedCodeGraph"]:
         raise SystemExit(1)
 
 

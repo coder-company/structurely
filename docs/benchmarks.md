@@ -83,3 +83,12 @@ structurely quality \
 The command emits aggregate and per-language precision/recall and exits
 non-zero for any false positive or false negative. CI runs the checked-in
 TypeScript, JavaScript, Python, and Rust fixture on every change.
+
+## Agent-facing context usefulness
+
+`scripts/differential_mcp.py` drives persistent MCP sessions for Structurely
+and pinned CodeGraph, then scores required facts, relevant-file recall, file
+precision, flow-spine coverage, line-numbered source, and output budget. The
+checked-in [`differential-mcp-2026-07-28`](../benchmarks/differential-mcp-2026-07-28/README.md)
+run passes all 14 compatibility scenarios and scores Structurely 1.0000 versus
+CodeGraph 0.9583 on its flow fixture.
