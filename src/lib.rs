@@ -1,4 +1,5 @@
 pub mod engine;
+mod inventory;
 pub mod mcp;
 pub mod model;
 pub mod parser;

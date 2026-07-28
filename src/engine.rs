@@ -1,10 +1,10 @@
 use crate::{
+    inventory::ProjectInventory,
     model::{Evidence, RelationshipKind},
     parser::parse_file,
     store::{FileSummary, SearchHit, StorageMetrics, Store},
 };
 use anyhow::{anyhow, bail, Context, Result};
-use ignore::WalkBuilder;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use serde::Serialize;
 use std::{
@@ -139,47 +139,12 @@ impl Engine {
     pub fn sync(&mut self) -> Result<IndexReport> {
         let started = Instant::now();
         let force_reindex = !self.store.is_current_graph_model()?;
-        let mut seen = HashSet::new();
-        let mut changed = Vec::<(String, PathBuf)>::new();
-        let mut files_scanned = 0;
-        let mut files_skipped = 0;
-
-        for entry in WalkBuilder::new(&self.root)
-            .hidden(false)
-            .git_ignore(true)
-            .git_global(true)
-            .git_exclude(true)
-            .filter_entry(|entry| entry.file_name() != PROJECT_DIR)
-            .build()
-        {
-            let entry = entry?;
-            if !entry.file_type().is_some_and(|kind| kind.is_file()) {
-                continue;
-            }
-            let relative = entry.path().strip_prefix(&self.root)?;
-            if crate::model::Language::from_path(relative).is_none() {
-                continue;
-            }
-            if entry.metadata()?.len() > MAX_SOURCE_BYTES {
-                files_skipped += 1;
-                continue;
-            }
-            let relative = normalize_path(relative);
-            seen.insert(relative.clone());
-            files_scanned += 1;
-            let source = fs::read_to_string(entry.path())
-                .with_context(|| format!("read source {}", entry.path().display()))?;
-            let hash = blake3::hash(source.as_bytes()).to_hex().to_string();
-            if !force_reindex
-                && self.store.content_hash(&relative)?.as_deref() == Some(hash.as_str())
-            {
-                continue;
-            }
-            changed.push((relative, entry.path().to_owned()));
-        }
-
-        let indexed: HashSet<_> = self.store.indexed_files()?.into_iter().collect();
-        let deleted: Vec<_> = indexed.difference(&seen).cloned().collect();
+        let indexed = self.store.indexed_file_hashes()?;
+        let delta = ProjectInventory::new(&self.root).delta(&indexed, force_reindex)?;
+        let changed = delta.changed;
+        let deleted = delta.deleted;
+        let files_scanned = delta.files_scanned;
+        let files_skipped = delta.files_skipped;
         let files_changed = changed.len();
         let available_workers = thread::available_parallelism()
             .map(|parallelism| parallelism.get())
@@ -265,50 +230,16 @@ impl Engine {
     }
 
     pub fn status(&self) -> Result<ProjectStatus> {
-        let indexed = self.store.indexed_files()?;
-        let indexed_set: HashSet<_> = indexed.iter().cloned().collect();
-        let mut current = HashSet::new();
-        let mut changed_or_added = 0;
-        let mut skipped_files = 0;
-        for entry in WalkBuilder::new(&self.root)
-            .filter_entry(|entry| entry.file_name() != PROJECT_DIR)
-            .build()
-            .flatten()
-        {
-            if entry.file_type().is_some_and(|kind| kind.is_file()) {
-                if let Ok(relative) = entry.path().strip_prefix(&self.root) {
-                    if crate::model::Language::from_path(relative).is_some() {
-                        if entry
-                            .metadata()
-                            .is_ok_and(|metadata| metadata.len() > MAX_SOURCE_BYTES)
-                        {
-                            skipped_files += 1;
-                            continue;
-                        }
-                        let relative = normalize_path(relative);
-                        current.insert(relative.clone());
-                        let changed = fs::read(entry.path())
-                            .ok()
-                            .map(|source| blake3::hash(&source).to_hex().to_string())
-                            .map(|hash| {
-                                self.store.content_hash(&relative).ok().flatten().as_deref()
-                                    != Some(hash.as_str())
-                            })
-                            .unwrap_or(true);
-                        changed_or_added += usize::from(changed);
-                    }
-                }
-            }
-        }
-        let deleted = indexed_set.difference(&current).count();
-        let pending = changed_or_added + deleted;
+        let indexed = self.store.indexed_file_hashes()?;
+        let delta = ProjectInventory::new(&self.root).delta(&indexed, false)?;
+        let pending = delta.changed.len() + delta.deleted.len();
         Ok(ProjectStatus {
             root: self.root.display().to_string(),
             database: self.store.path().display().to_string(),
             epoch: self.store.epoch()?,
             indexed_files: indexed.len(),
             pending_files: pending,
-            skipped_files,
+            skipped_files: delta.files_skipped,
             storage: self.store.storage_metrics()?,
         })
     }
@@ -686,13 +617,6 @@ fn absolute(path: &Path) -> Result<PathBuf> {
     } else {
         Ok(std::env::current_dir()?.join(path))
     }
-}
-
-fn normalize_path(path: &Path) -> String {
-    path.components()
-        .map(|part| part.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
 }
 
 fn percentile(sorted: &[u128], percentile: usize) -> u128 {

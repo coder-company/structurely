@@ -310,6 +310,15 @@ impl Store {
         Ok(paths)
     }
 
+    pub(crate) fn indexed_file_hashes(&self) -> Result<HashMap<String, String>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT path, content_hash FROM files ORDER BY path")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<rusqlite::Result<HashMap<_, _>>>()
+            .map_err(Into::into)
+    }
+
     pub fn file_summaries(&self) -> Result<Vec<FileSummary>> {
         let mut statement = self.connection.prepare(
             "SELECT f.path,f.language,COUNT(s.row_id)
