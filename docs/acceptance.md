@@ -56,6 +56,8 @@ checked in under `benchmarks/real-repositories-2026-07-28/`.
 The pinned 6,995-file ArkTS acceptance result is recorded separately under
 `benchmarks/openharmony-arkts-2026-07-28/`; its event assertion correlates
 origin, provenance, confidence, and source line in one relationship record.
+The follow-up `benchmarks/openharmony-ohpm-2026-07-28/` gate adds a correlated
+cross-package component assertion through a real `oh-package.json5` dependency.
 
 The authoritative capability inventory is
 [`codegraph-parity.md`](codegraph-parity.md). A matching command name or schema

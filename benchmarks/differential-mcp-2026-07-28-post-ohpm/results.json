@@ -1,0 +1,63 @@
+{
+  "pinnedCodeGraph": {
+    "version": "1.5.0",
+    "commit": "572d22bfbe82602080e457bec655f72e3314f9ef"
+  },
+  "structurelyBinary": {
+    "commit": "9e09aca5e723e979993829ef3ed2d205ad92e039",
+    "sha256": "7218a95a2edd0f0c8c135455af69ee98cd23b6a82eefabcf6740534040ef075e",
+    "worktree": "clean"
+  },
+  "compatibility": {
+    "passed": 20,
+    "total": 20,
+    "score": 1.0,
+    "predicates": {
+      "initialize": true,
+      "tools": true,
+      "search-exact": true,
+      "search-ambiguous": true,
+      "callers": true,
+      "callees": true,
+      "react-rerender": true,
+      "jsx-child-render": true,
+      "interface-dispatch": true,
+      "arkui-event": true,
+      "arkui-state": true,
+      "ohpm-package": true,
+      "impact": true,
+      "node-window": true,
+      "explore-flow": true,
+      "status": true,
+      "files": true,
+      "missing-required": true,
+      "invalid-limit": true,
+      "missing-symbol": true
+    }
+  },
+  "contextUsefulness": {
+    "structurely": {
+      "score": 1.0,
+      "requiredFactRecall": 1.0,
+      "relevantFileRecall": 1.0,
+      "filePrecision": 1.0,
+      "flowSpinesPassed": 2,
+      "flowSpinesTotal": 2,
+      "lineNumberedSource": true,
+      "characters": 2164,
+      "withinBudget": true
+    },
+    "codeGraph": {
+      "score": 0.9583,
+      "requiredFactRecall": 1.0,
+      "relevantFileRecall": 1.0,
+      "filePrecision": 0.75,
+      "flowSpinesPassed": 2,
+      "flowSpinesTotal": 2,
+      "lineNumberedSource": true,
+      "characters": 2006,
+      "withinBudget": true
+    },
+    "atLeastPinnedCodeGraph": true
+  }
+}

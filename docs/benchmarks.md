@@ -118,3 +118,11 @@ Pinned large-repository ArkTS evidence is recorded in
 [`openharmony-arkts-2026-07-28`](../benchmarks/openharmony-arkts-2026-07-28/README.md).
 The exact 6,995-file ETS corpus indexed in 106.26 seconds and passed a
 correlated real ArkUI event-flow assertion.
+
+After Harmony package resolution, the
+[`post-ohpm differential`](../benchmarks/differential-mcp-2026-07-28-post-ohpm/README.md)
+passes 20/20 scenarios. The pinned
+[`OpenHarmony ohpm gate`](../benchmarks/openharmony-ohpm-2026-07-28/README.md)
+resolves a real `@ohos/window-component` import, and the enforced
+[`post-ohpm performance run`](../benchmarks/codegraph-source-intersection-2026-07-28-post-ohpm/README.md)
+remains 3.90× faster to index and 9.81× faster for query p50.

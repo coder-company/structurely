@@ -70,9 +70,11 @@ ArkTS uses its native grammar. Bounded ArkUI adapters connect `@Component` and
 `@ComponentV2` render trees, direct `this.<member>` event handlers, and
 mutations of decorated reactive fields to `build`. Intrinsic ArkUI DSL calls
 are pruned only when they do not collide with a local or imported project
-symbol. Harmony package manifests, router string targets, emitter channels,
-and decorated `@Builder`/`@Extend`/`@Styles` helper lifting are not yet
-resolved.
+symbol. Harmony `oh-package.json5` `file:` dependencies use bounded discovery,
+reject lexical and symlink escapes, drop names mapped to multiple directories,
+and honor a target module's declared `main`; registry dependencies stay
+external. Router string targets, emitter channels, and decorated
+`@Builder`/`@Extend`/`@Styles` helper lifting are not yet resolved.
 
 Direct calls and registrations carry their own provenance, confidence, and
 explanation through one resolution path. Literal event dispatch joins only
