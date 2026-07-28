@@ -161,6 +161,9 @@ impl Store {
                 caller_public_id TEXT NOT NULL,
                 callee_name TEXT NOT NULL,
                 receiver_type TEXT,
+                provenance TEXT NOT NULL DEFAULT 'tree-sitter/name-resolution',
+                confidence REAL NOT NULL DEFAULT 1.0,
+                explanation TEXT NOT NULL DEFAULT 'direct call expression',
                 evidence_file TEXT NOT NULL,
                 evidence_line INTEGER NOT NULL
             );
@@ -200,6 +203,24 @@ impl Store {
             "unresolved_calls",
             "receiver_type",
             "TEXT",
+        )?;
+        Self::ensure_column(
+            &self.connection,
+            "unresolved_calls",
+            "provenance",
+            "TEXT NOT NULL DEFAULT 'tree-sitter/name-resolution'",
+        )?;
+        Self::ensure_column(
+            &self.connection,
+            "unresolved_calls",
+            "confidence",
+            "REAL NOT NULL DEFAULT 1.0",
+        )?;
+        Self::ensure_column(
+            &self.connection,
+            "unresolved_calls",
+            "explanation",
+            "TEXT NOT NULL DEFAULT 'direct call expression'",
         )?;
         Self::ensure_column(
             &self.connection,
@@ -544,15 +565,18 @@ impl Store {
         for call in &file.unresolved_calls {
             tx.prepare_cached(
                 "INSERT INTO unresolved_calls(
-                    file_id, caller_public_id, callee_name, receiver_type,
-                    evidence_file, evidence_line
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    file_id, caller_public_id, callee_name, receiver_type, provenance,
+                    confidence, explanation, evidence_file, evidence_line
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )?
             .execute(params![
                 file_id,
                 call.caller_id,
                 call.callee_name,
                 call.receiver_type,
+                call.provenance,
+                call.confidence,
+                call.explanation,
                 call.file,
                 call.line as i64
             ])?;
@@ -584,12 +608,17 @@ impl Store {
     fn resolve_calls(tx: &Transaction<'_>) -> Result<usize> {
         let mut resolved = Self::resolve_structural_references(tx)?;
         tx.execute(
-            "DELETE FROM relationships WHERE provenance = 'tree-sitter/name-resolution'",
+            "DELETE FROM relationships
+             WHERE provenance IN (
+                'tree-sitter/name-resolution',
+                'tree-sitter/callback-registration',
+                'framework/express-route'
+             )",
             [],
         )?;
         let mut calls_statement = tx.prepare(
-            "SELECT u.caller_public_id,u.callee_name,u.receiver_type,
-                    u.evidence_file,u.evidence_line,s.language,u.file_id
+            "SELECT u.caller_public_id,u.callee_name,u.receiver_type,u.provenance,
+                    u.confidence,u.explanation,u.evidence_file,u.evidence_line,s.language,u.file_id
              FROM unresolved_calls u
              JOIN symbols s ON s.public_id=u.caller_public_id
              ORDER BY u.evidence_file,u.evidence_line,u.id",
@@ -601,9 +630,12 @@ impl Store {
                     row.get::<_, String>(1)?,
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)? as usize,
+                    row.get::<_, f64>(4)?,
                     row.get::<_, String>(5)?,
-                    row.get::<_, i64>(6)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)? as usize,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, i64>(9)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -624,7 +656,19 @@ impl Store {
         )?;
         let mut candidate_cache =
             HashMap::<(String, String, i64, String), Vec<(String, String, i64)>>::new();
-        for (caller_id, callee_name, receiver_type, file, line, language, file_id) in calls {
+        for (
+            caller_id,
+            callee_name,
+            receiver_type,
+            provenance,
+            fact_confidence,
+            explanation,
+            file,
+            line,
+            language,
+            file_id,
+        ) in calls
+        {
             let receiver_type = receiver_type.unwrap_or_default();
             let cache_key = (
                 callee_name.clone(),
@@ -696,7 +740,7 @@ impl Store {
                 .iter()
                 .take_while(|target| target.2 == best_rank)
                 .count();
-            let confidence = match (best_rank, target_count) {
+            let resolution_confidence: f64 = match (best_rank, target_count) {
                 (0, 1) => 0.995,
                 (1, 1) => 0.99,
                 (2, 1) => 0.97,
@@ -720,13 +764,16 @@ impl Store {
                         target_id: target_id.clone(),
                         kind: RelationshipKind::Calls,
                         evidence: Evidence::new(
-                            "tree-sitter/name-resolution",
-                            confidence,
-                            if confidence >= 0.75 {
-                                format!("call name resolves to {qualified_name} through {scope}")
+                            &provenance,
+                            fact_confidence.min(resolution_confidence),
+                            if resolution_confidence >= 0.75 {
+                                format!(
+                                    "{explanation}; target resolves to {qualified_name} through {scope}"
+                                )
                             } else {
                                 format!(
-                                    "{scope} has multiple candidates; {qualified_name} is a possible target"
+                                    "{explanation}; {scope} has multiple candidates; \
+                                     {qualified_name} is a possible target"
                                 )
                             },
                             &file,
@@ -1264,5 +1311,8 @@ mod tests {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         assert!(call_columns.contains(&"receiver_type".to_owned()));
+        assert!(call_columns.contains(&"provenance".to_owned()));
+        assert!(call_columns.contains(&"confidence".to_owned()));
+        assert!(call_columns.contains(&"explanation".to_owned()));
     }
 }

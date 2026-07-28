@@ -6,6 +6,7 @@ pub mod parser;
 mod project_config;
 mod project_resolution;
 pub mod quality;
+mod semantic;
 pub mod store;
 
 pub use engine::{

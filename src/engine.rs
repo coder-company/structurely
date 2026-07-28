@@ -1378,6 +1378,94 @@ mod tests {
     }
 
     #[test]
+    fn named_callback_registrations_create_evidence_bearing_call_edges() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("callbacks.ts"),
+            "export function later() {}\n\
+             export function register() {\n\
+               setTimeout(later, 10);\n\
+               Promise.resolve().then(later);\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let register = engine
+            .search("register", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.name == "register")
+            .unwrap()
+            .symbol;
+        let callbacks = engine
+            .callees(&register.id)
+            .unwrap()
+            .into_iter()
+            .filter(|(symbol, evidence)| {
+                symbol.name == "later" && evidence.provenance == "tree-sitter/callback-registration"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(callbacks.len(), 2);
+        assert!(callbacks
+            .iter()
+            .all(|(_, evidence)| evidence.confidence == 0.95));
+    }
+
+    #[test]
+    fn express_routes_are_symbols_wired_to_the_last_named_handler() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("handlers.ts"),
+            "export function authorize() {}\nexport function showUser() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("routes.ts"),
+            "import { authorize, showUser } from './handlers';\n\
+             router.get('/users/:id', authorize, showUser);\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let route = engine
+            .search("GET users", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.kind == crate::model::SymbolKind::Route)
+            .unwrap()
+            .symbol;
+        assert_eq!(route.name, "GET /users/:id");
+        let callees = engine.callees(&route.id).unwrap();
+        assert_eq!(callees.len(), 1);
+        assert_eq!(callees[0].0.name, "showUser");
+        assert_eq!(callees[0].0.file, "handlers.ts");
+        assert_eq!(callees[0].1.provenance, "framework/express-route");
+        assert_eq!(callees[0].1.confidence, 0.97);
+    }
+
+    #[test]
+    fn route_adapter_rejects_non_router_get_calls_and_dynamic_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("main.ts"),
+            "function handler() {}\n\
+             cache.get('/not-a-route', handler);\n\
+             const path = '/dynamic';\n\
+             router.get(path, handler);\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        assert!(engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .iter()
+            .all(|symbol| symbol.kind != crate::model::SymbolKind::Route));
+    }
+
+    #[test]
     fn watcher_makes_saved_symbols_query_visible() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("main.ts"), "function before() {}\n").unwrap();

@@ -2,6 +2,7 @@ use crate::model::{
     Evidence, FileFacts, Language, Relationship, RelationshipKind, SourceSpan, Symbol, SymbolKind,
     UnresolvedCall, UnresolvedReference,
 };
+use crate::semantic::enrich_file_facts;
 use anyhow::{anyhow, Context, Result};
 use std::collections::HashMap;
 #[cfg(test)]
@@ -92,7 +93,7 @@ pub(crate) fn parse_file_as(
         &mut unresolved_references,
     );
 
-    Ok(FileFacts {
+    let mut facts = FileFacts {
         path: relative_path.to_owned(),
         content_hash,
         language,
@@ -100,7 +101,9 @@ pub(crate) fn parse_file_as(
         relationships,
         unresolved_calls,
         unresolved_references,
-    })
+    };
+    enrich_file_facts(tree.root_node(), source_bytes, &mut facts);
+    Ok(facts)
 }
 
 fn disambiguate_duplicate_symbols(symbols: &mut [Symbol]) {
@@ -661,6 +664,9 @@ fn collect_calls(
                     caller_id: caller_id.unwrap_or(file_symbol_id).to_owned(),
                     callee_name: name,
                     receiver_type: receiver_type_hint(function, node, source, receiver_bindings),
+                    provenance: "tree-sitter/name-resolution".to_owned(),
+                    confidence: 1.0,
+                    explanation: "direct call expression".to_owned(),
                     file: file.to_owned(),
                     line: node.start_position().row + 1,
                 });
