@@ -123,6 +123,7 @@ fn parse_language(value: &str) -> Option<Language> {
         "jsx" => Some(Language::Jsx),
         "vue" => Some(Language::Vue),
         "svelte" => Some(Language::Svelte),
+        "astro" => Some(Language::Astro),
         "arkts" => Some(Language::ArkTs),
         "python" => Some(Language::Python),
         "rust" => Some(Language::Rust),
@@ -181,6 +182,25 @@ mod tests {
         assert_eq!(
             config.language_for_path(Path::new("main.rs")),
             Some(Language::Rust)
+        );
+    }
+
+    #[test]
+    fn astro_is_available_as_a_builtin_and_custom_extension_language() {
+        let root = tempdir().unwrap();
+        fs::write(
+            root.path().join("structurely.json"),
+            r#"{"extensions": {".page": "AsTrO"}}"#,
+        )
+        .unwrap();
+        let config = ProjectConfig::load(root.path()).unwrap();
+        assert_eq!(
+            config.language_for_path(Path::new("src/index.astro")),
+            Some(Language::Astro)
+        );
+        assert_eq!(
+            config.language_for_path(Path::new("src/index.page")),
+            Some(Language::Astro)
         );
     }
 }

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path};
 
-pub const GRAPH_MODEL_VERSION: u32 = 56;
+pub const GRAPH_MODEL_VERSION: u32 = 57;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -14,6 +14,7 @@ pub enum Language {
     Jsx,
     Vue,
     Svelte,
+    Astro,
     #[serde(rename = "arkts")]
     ArkTs,
     Python,
@@ -37,12 +38,13 @@ pub enum Language {
 impl Language {
     pub fn from_path(path: &Path) -> Option<Self> {
         match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
-            "ts" => Some(Self::TypeScript),
+            "ts" | "mts" | "cts" => Some(Self::TypeScript),
             "tsx" => Some(Self::Tsx),
             "js" | "mjs" | "cjs" => Some(Self::JavaScript),
             "jsx" => Some(Self::Jsx),
             "vue" => Some(Self::Vue),
             "svelte" => Some(Self::Svelte),
+            "astro" => Some(Self::Astro),
             "ets" => Some(Self::ArkTs),
             "py" | "pyi" => Some(Self::Python),
             "rs" => Some(Self::Rust),
@@ -73,6 +75,7 @@ impl fmt::Display for Language {
             Self::Jsx => "jsx",
             Self::Vue => "vue",
             Self::Svelte => "svelte",
+            Self::Astro => "astro",
             Self::ArkTs => "arkts",
             Self::Python => "python",
             Self::Rust => "rust",
@@ -450,6 +453,31 @@ pub(crate) struct FileFacts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_and_serializes_astro_sources() {
+        assert_eq!(
+            Language::from_path(Path::new("src/pages/Index.AsTrO")),
+            Some(Language::Astro)
+        );
+        assert_eq!(
+            Language::from_path(Path::new("src/module.mts")),
+            Some(Language::TypeScript)
+        );
+        assert_eq!(
+            Language::from_path(Path::new("src/module.cts")),
+            Some(Language::TypeScript)
+        );
+        assert_eq!(Language::Astro.to_string(), "astro");
+        assert_eq!(
+            serde_json::to_string(&Language::Astro).unwrap(),
+            "\"astro\""
+        );
+        assert_eq!(
+            serde_json::from_str::<Language>("\"astro\"").unwrap(),
+            Language::Astro
+        );
+    }
 
     #[test]
     fn stable_identity_ignores_source_position() {

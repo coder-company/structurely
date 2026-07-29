@@ -24,8 +24,11 @@ pub(crate) fn parse_file_as(
     source: &str,
     language: Language,
 ) -> Result<FileFacts> {
-    let embedded_source = matches!(language, Language::Vue | Language::Svelte)
-        .then(|| embedded_script_source(source));
+    let embedded_source = match language {
+        Language::Vue | Language::Svelte => Some(embedded_script_source(source)),
+        Language::Astro => Some(astro_script_source(source)),
+        _ => None,
+    };
     let syntax_source = embedded_source.as_deref().unwrap_or(source);
     let tree = parse_tree(language, syntax_source)?;
     let content_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
@@ -58,7 +61,7 @@ pub(crate) fn parse_file_as(
     let mut callable_returns = Vec::new();
     if matches!(
         language,
-        Language::TypeScript | Language::Tsx | Language::ArkTs
+        Language::TypeScript | Language::Tsx | Language::Astro | Language::ArkTs
     ) {
         let symbols_by_span = symbols
             .iter()
@@ -332,6 +335,21 @@ fn collect_structural_references(
     output: &mut Vec<UnresolvedReference>,
 ) {
     match node.kind() {
+        "import_clause" => {
+            if let (Some(file_symbol), Some((target_name, binding_name, target_file_hint))) =
+                (symbols.first(), relative_default_import(node, source))
+            {
+                push_import_reference(
+                    output,
+                    file_symbol,
+                    target_name,
+                    binding_name,
+                    Some(target_file_hint),
+                    file,
+                    node.start_position().row + 1,
+                );
+            }
+        }
         "import_specifier" => {
             if let (Some(file_symbol), Some(name)) =
                 (symbols.first(), node.child_by_field_name("name"))
@@ -412,6 +430,29 @@ fn collect_structural_references(
     for child in node.named_children(&mut cursor) {
         collect_structural_references(child, source, file, symbols, output);
     }
+}
+
+fn relative_default_import(clause: Node<'_>, source: &[u8]) -> Option<(String, String, String)> {
+    let target_file_hint = import_source_hint(clause, source)?;
+    if !target_file_hint.starts_with("./") && !target_file_hint.starts_with("../") {
+        return None;
+    }
+    let binding_name = (0..clause.named_child_count())
+        .filter_map(|index| clause.named_child(index))
+        .find(|child| child.kind() == "identifier")
+        .map(|identifier| node_text(identifier, source))?;
+    let target_name = target_file_hint
+        .rsplit_once('.')
+        .filter(|(_, extension)| extension.eq_ignore_ascii_case("astro"))
+        .and_then(|_| std::path::Path::new(&target_file_hint).file_stem())
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| binding_name.clone());
+    (!target_name.is_empty() && !binding_name.is_empty()).then_some((
+        target_name,
+        binding_name,
+        target_file_hint,
+    ))
 }
 
 fn rust_use_reference(
@@ -626,7 +667,7 @@ fn parse_tree(language: Language, source: &str) -> Result<Tree> {
         Language::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
         Language::Tsx => tree_sitter_typescript::LANGUAGE_TSX,
         Language::JavaScript | Language::Jsx => tree_sitter_javascript::LANGUAGE,
-        Language::Vue | Language::Svelte => tree_sitter_typescript::LANGUAGE_TSX,
+        Language::Vue | Language::Svelte | Language::Astro => tree_sitter_typescript::LANGUAGE_TSX,
         Language::ArkTs => tree_sitter_arkts::LANGUAGE,
         Language::Python => tree_sitter_python::LANGUAGE,
         Language::Rust => tree_sitter_rust::LANGUAGE,
@@ -683,6 +724,243 @@ fn embedded_script_source(source: &str) -> String {
         offset = close + relative_end + 1;
     }
     String::from_utf8(masked).expect("masking source preserves UTF-8")
+}
+
+pub(crate) fn astro_script_source(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut masked = bytes
+        .iter()
+        .map(|byte| {
+            if matches!(*byte, b'\n' | b'\r') {
+                *byte
+            } else {
+                b' '
+            }
+        })
+        .collect::<Vec<_>>();
+
+    match copy_astro_frontmatter(bytes, &mut masked) {
+        AstroFrontmatter::Absent => copy_astro_script_blocks(bytes, 0, &mut masked),
+        AstroFrontmatter::Closed(script_start) => {
+            copy_astro_script_blocks(bytes, script_start, &mut masked);
+        }
+        AstroFrontmatter::Unclosed => {}
+    }
+    String::from_utf8(masked).expect("masking source preserves UTF-8")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AstroFrontmatter {
+    Absent,
+    Closed(usize),
+    Unclosed,
+}
+
+fn copy_astro_frontmatter(source: &[u8], masked: &mut [u8]) -> AstroFrontmatter {
+    let mut line_start = 0;
+    let (body_start, mut line_start) = loop {
+        let Some((start, end, next)) = line_bounds(source, line_start) else {
+            return AstroFrontmatter::Absent;
+        };
+        let mut line = &source[start..end];
+        if start == 0 {
+            line = line.strip_prefix(b"\xef\xbb\xbf").unwrap_or(line);
+        }
+        let trimmed = trim_ascii_horizontal(line);
+        if trimmed.is_empty() {
+            if next <= line_start {
+                return AstroFrontmatter::Absent;
+            }
+            line_start = next;
+            continue;
+        }
+        if trimmed != b"---" {
+            return AstroFrontmatter::Absent;
+        }
+        break (next, next);
+    };
+
+    while let Some((start, end, next)) = line_bounds(source, line_start) {
+        if trim_ascii_horizontal(&source[start..end]) == b"---" {
+            masked[body_start..start].copy_from_slice(&source[body_start..start]);
+            return AstroFrontmatter::Closed(next);
+        }
+        if next <= line_start {
+            break;
+        }
+        line_start = next;
+    }
+    AstroFrontmatter::Unclosed
+}
+
+fn line_bounds(source: &[u8], start: usize) -> Option<(usize, usize, usize)> {
+    if start >= source.len() {
+        return None;
+    }
+    let newline = source[start..]
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map(|relative| start + relative);
+    match newline {
+        Some(newline) => {
+            let end = newline - usize::from(newline > start && source[newline - 1] == b'\r');
+            Some((start, end, newline + 1))
+        }
+        None => Some((start, source.len(), source.len())),
+    }
+}
+
+fn trim_ascii_horizontal(mut value: &[u8]) -> &[u8] {
+    while value
+        .first()
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+    {
+        value = &value[1..];
+    }
+    while value
+        .last()
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+    {
+        value = &value[..value.len() - 1];
+    }
+    value
+}
+
+fn copy_astro_script_blocks(source: &[u8], mut offset: usize, masked: &mut [u8]) {
+    while offset < source.len() {
+        if starts_ascii_case_insensitive(&source[offset..], b"<!--") {
+            offset = find_ascii_case_insensitive(source, offset + 4, b"-->")
+                .map_or(source.len(), |end| end + 3);
+            continue;
+        }
+        if source[offset] != b'<'
+            || !starts_ascii_case_insensitive(&source[offset + 1..], b"script")
+            || !source
+                .get(offset + 7)
+                .is_none_or(|byte| byte.is_ascii_whitespace() || matches!(byte, b'>' | b'/'))
+        {
+            offset += 1;
+            continue;
+        }
+
+        let Some(open_end) = find_tag_end(source, offset + 7) else {
+            break;
+        };
+        if source[offset..open_end]
+            .iter()
+            .rev()
+            .find(|byte| !byte.is_ascii_whitespace())
+            == Some(&b'/')
+        {
+            offset = open_end + 1;
+            continue;
+        }
+        let body_start = open_end + 1;
+        let Some(close) = find_script_close(source, body_start) else {
+            break;
+        };
+        let Some(close_end) = find_tag_end(source, close + 8) else {
+            break;
+        };
+        masked[body_start..close].copy_from_slice(&source[body_start..close]);
+        offset = close_end + 1;
+    }
+}
+
+fn find_tag_end(source: &[u8], mut offset: usize) -> Option<usize> {
+    let mut quote = None;
+    while let Some(&byte) = source.get(offset) {
+        match (quote, byte) {
+            (Some(active), current) if current == active => quote = None,
+            (None, b'\'' | b'"') => quote = Some(byte),
+            (None, b'>') => return Some(offset),
+            _ => {}
+        }
+        offset += 1;
+    }
+    None
+}
+
+fn find_script_close(source: &[u8], mut offset: usize) -> Option<usize> {
+    #[derive(Clone, Copy)]
+    enum LexicalState {
+        Code,
+        Quote(u8),
+        LineComment,
+        BlockComment,
+    }
+
+    let mut state = LexicalState::Code;
+    while offset < source.len() {
+        match state {
+            LexicalState::Code => {
+                if starts_ascii_case_insensitive(&source[offset..], b"</script")
+                    && source
+                        .get(offset + 8)
+                        .is_none_or(|byte| byte.is_ascii_whitespace() || *byte == b'>')
+                {
+                    return Some(offset);
+                }
+                match (source[offset], source.get(offset + 1).copied()) {
+                    (b'/', Some(b'/')) => {
+                        state = LexicalState::LineComment;
+                        offset += 2;
+                        continue;
+                    }
+                    (b'/', Some(b'*')) => {
+                        state = LexicalState::BlockComment;
+                        offset += 2;
+                        continue;
+                    }
+                    (quote @ (b'\'' | b'"' | b'`'), _) => {
+                        state = LexicalState::Quote(quote);
+                    }
+                    _ => {}
+                }
+            }
+            LexicalState::Quote(quote) => {
+                if source[offset] == b'\\' {
+                    offset = (offset + 2).min(source.len());
+                    continue;
+                }
+                if source[offset] == quote {
+                    state = LexicalState::Code;
+                } else if quote != b'`' && matches!(source[offset], b'\n' | b'\r') {
+                    // Recover from a malformed single-line string without hiding all
+                    // subsequent, otherwise valid script blocks.
+                    state = LexicalState::Code;
+                }
+            }
+            LexicalState::LineComment => {
+                if matches!(source[offset], b'\n' | b'\r') {
+                    state = LexicalState::Code;
+                }
+            }
+            LexicalState::BlockComment => {
+                if source[offset] == b'*' && source.get(offset + 1) == Some(&b'/') {
+                    state = LexicalState::Code;
+                    offset += 2;
+                    continue;
+                }
+            }
+        }
+        offset += 1;
+    }
+    None
+}
+
+fn find_ascii_case_insensitive(source: &[u8], start: usize, needle: &[u8]) -> Option<usize> {
+    source
+        .get(start..)?
+        .windows(needle.len())
+        .position(|window| window.eq_ignore_ascii_case(needle))
+        .map(|relative| start + relative)
+}
+
+fn starts_ascii_case_insensitive(source: &[u8], needle: &[u8]) -> bool {
+    source
+        .get(..needle.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(needle))
 }
 
 fn collect_symbols(
@@ -3525,6 +3803,120 @@ mod tests {
                 .unwrap();
             assert_eq!(call.line, function_line);
         }
+    }
+
+    #[test]
+    fn extracts_astro_frontmatter_and_multiple_scripts_with_exact_offsets() {
+        let source = "\u{feff}\r\n\
+                      \t--- \r\n\
+                      import Graph from './GraphDiagram.astro'\r\n\
+                      export function loadCafé() { helper() }\r\n\
+                      function helper() {}\r\n\
+                      ---\r\n\
+                      <main>你好</main>\r\n\
+                      <script data-label='>'>\r\n\
+                      const decoy = \"</script>\" // </script>\r\n\
+                      /* </script> */ export function browserOne() {}\r\n\
+                      </ScRiPt>\r\n\
+                      <script>\r\n\
+                      export function browserTwo() {}\r\n\
+                      </script>\r\n";
+        let facts = parse_file("src/pages/Index.astro", source).unwrap();
+        assert_eq!(facts.language, Language::Astro);
+
+        for (name, line) in [
+            ("loadCafé", 4),
+            ("helper", 5),
+            ("browserOne", 10),
+            ("browserTwo", 13),
+        ] {
+            let symbol = facts
+                .symbols
+                .iter()
+                .find(|symbol| symbol.name == name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert_eq!(
+                symbol.start_byte,
+                source.find(&format!("function {name}")).unwrap()
+            );
+            assert_eq!(symbol.start_line, line);
+        }
+        assert!(!facts.symbols.iter().any(|symbol| symbol.name == "main"));
+
+        let import = facts
+            .unresolved_references
+            .iter()
+            .find(|reference| reference.binding_name == "Graph")
+            .expect("Astro default import reference");
+        assert_eq!(import.target_name, "GraphDiagram");
+        assert_eq!(
+            import.target_file_hint.as_deref(),
+            Some("./GraphDiagram.astro")
+        );
+        assert_eq!(import.kind, RelationshipKind::Imports);
+    }
+
+    #[test]
+    fn astro_mask_preserves_every_byte_and_line_break() {
+        let source = "\r\n---\r\nconst café = '你好'\r\n---\r\n<div>Привет</div>\r\n\
+                      <script>const λ = 1</script>\r\n";
+        let masked = astro_script_source(source);
+        assert_eq!(masked.len(), source.len());
+        for (index, byte) in source.bytes().enumerate() {
+            if matches!(byte, b'\r' | b'\n') {
+                assert_eq!(masked.as_bytes()[index], byte);
+            }
+        }
+        for retained in ["const café = '你好'", "const λ = 1"] {
+            let start = source.find(retained).unwrap();
+            assert_eq!(&masked[start..start + retained.len()], retained);
+        }
+        for hidden in ["---", "<div>Привет</div>", "<script>", "</script>"] {
+            let start = source.find(hidden).unwrap();
+            assert!(masked.as_bytes()[start..start + hidden.len()]
+                .iter()
+                .all(|byte| *byte == b' '));
+        }
+    }
+
+    #[test]
+    fn malformed_astro_regions_fail_closed_without_poisoning_markup() {
+        for source in [
+            "---\nconst text = `<script>function fake() {}</script>`\n",
+            "<script data-value=\">\nfunction fake() {}\n</script>",
+            "<script>\nconst text = `</script>`\nfunction fake() {}\n",
+            "<!-- <script>function fake() {}</script> -->",
+            "<scripture>function fake() {}</scripture>",
+        ] {
+            let facts = parse_file("Broken.astro", source).unwrap();
+            assert!(
+                facts.symbols.iter().all(|symbol| symbol.name != "fake"),
+                "malformed Astro source leaked code: {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn astro_script_close_scanner_ignores_strings_templates_and_comments() {
+        let source = "<script>\n\
+                      const a = '</script>';\n\
+                      const b = \"</SCRIPT>\";\n\
+                      const c = `literal </script> ${1 + 1}`;\n\
+                      // </script>\n\
+                      /* </script> */\n\
+                      export function retained() {}\n\
+                      </script>\n";
+        let facts = parse_file("Lexical.astro", source).unwrap();
+        let retained = facts
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "retained")
+            .expect("lexically valid closing tag must be found");
+        assert_eq!(
+            retained.start_byte,
+            source.find("function retained").unwrap()
+        );
+        assert_eq!(retained.start_line, 7);
     }
 
     #[test]

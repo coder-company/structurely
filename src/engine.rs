@@ -4411,6 +4411,274 @@ mod tests {
     }
 
     #[test]
+    fn astro_components_routes_and_imported_templates_are_exact_and_incremental() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("src/pages/blog")).unwrap();
+        fs::create_dir_all(temp.path().join("src/components")).unwrap();
+        fs::create_dir_all(temp.path().join("src/utils")).unwrap();
+        fs::write(
+            temp.path().join("src/components/Layout.astro"),
+            "<main><slot /></main>\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("src/components/Scripture.astro"),
+            "<article><slot /></article>\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("src/components/ImportedCard.astro"),
+            "<article>card</article>\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("src/utils/format.ts"),
+            "export default function formatDate(value: string) { return value; }\n",
+        )
+        .unwrap();
+        let page = temp.path().join("src/pages/blog/[id].astro");
+        let original = "---\n\
+             import Layout from '../../components/Layout.astro';\n\
+             import Scripture from '../../components/Scripture.astro';\n\
+             import ImportedCard from '../../components/ImportedCard.astro';\n\
+             import formatDate from '../../utils/format';\n\
+             const decoy = '<Layout />';\n\
+             ---\n\
+             <script>const hidden = '<Layout />';</script>\n\
+             <style>.fake::after { content: '</styleguide>'; } /* <ImportedCard /> */</style>\n\
+             <!-- <Layout /> -->\n\
+             <Layout><p>story</p></Layout>\n\
+             <Scripture />\n\
+             <Ghost />\n\
+             <UI.Card />\n\
+             <{Layout} />\n\
+             <p>{formatDate('2026-07-29')}</p>\n\
+             <p>{formatDate(\n\
+               '2026-07-30'\n\
+             )}</p>\n\
+             <Fragment><Code /><Debug /></Fragment>\n";
+        fs::write(&page, original).unwrap();
+
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let snapshot = engine.snapshot().unwrap();
+        let page_component = snapshot
+            .symbols
+            .iter()
+            .find(|symbol| {
+                symbol.file == "src/pages/blog/[id].astro"
+                    && symbol.kind == crate::model::SymbolKind::Component
+            })
+            .unwrap();
+        assert_eq!(page_component.name, "[id]");
+        let route = snapshot
+            .symbols
+            .iter()
+            .find(|symbol| {
+                symbol.file == "src/pages/blog/[id].astro"
+                    && symbol.kind == crate::model::SymbolKind::Route
+            })
+            .unwrap();
+        assert_eq!(route.name, "/blog/:id");
+        assert!(engine
+            .callees(&route.id)
+            .unwrap()
+            .iter()
+            .any(|(symbol, evidence)| {
+                symbol.id == page_component.id
+                    && evidence.provenance == "framework/astro-route"
+                    && evidence.confidence == 1.0
+            }));
+        let template_callees = engine.callees(&page_component.id).unwrap();
+        assert_eq!(
+            template_callees
+                .iter()
+                .filter(|(_, evidence)| evidence.provenance == "framework/astro-template")
+                .count(),
+            2
+        );
+        assert!(template_callees.iter().any(|(symbol, evidence)| {
+            symbol.file == "src/components/Layout.astro"
+                && symbol.kind == crate::model::SymbolKind::Component
+                && evidence.provenance == "framework/astro-template"
+                && evidence.confidence == 0.99
+        }));
+        assert!(template_callees.iter().any(|(symbol, evidence)| {
+            symbol.file == "src/components/Scripture.astro"
+                && symbol.kind == crate::model::SymbolKind::Component
+                && evidence.provenance == "framework/astro-template"
+        }));
+        assert!(template_callees.iter().all(|(symbol, evidence)| {
+            symbol.file != "src/components/ImportedCard.astro"
+                || evidence.provenance != "framework/astro-template"
+        }));
+        assert_eq!(
+            template_callees
+                .iter()
+                .filter(|(symbol, evidence)| {
+                    symbol.file == "src/utils/format.ts"
+                        && symbol.name == "formatDate"
+                        && evidence.provenance == "framework/astro-template-expression"
+                        && evidence.confidence == 0.97
+                })
+                .count(),
+            1,
+            "{template_callees:#?}"
+        );
+
+        fs::write(
+            &page,
+            original.replace("<Layout><p>story</p></Layout>", "<p>story</p>"),
+        )
+        .unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 1);
+        let changed_component = engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .into_iter()
+            .find(|symbol| {
+                symbol.file == "src/pages/blog/[id].astro"
+                    && symbol.kind == crate::model::SymbolKind::Component
+            })
+            .unwrap();
+        assert_eq!(changed_component.id, page_component.id);
+        let changed_callees = engine.callees(&changed_component.id).unwrap();
+        assert!(changed_callees.iter().all(|(symbol, evidence)| {
+            symbol.file != "src/components/Layout.astro"
+                || evidence.provenance != "framework/astro-template"
+        }));
+        assert!(changed_callees.iter().any(|(symbol, evidence)| {
+            symbol.file == "src/components/Scripture.astro"
+                && evidence.provenance == "framework/astro-template"
+        }));
+
+        fs::write(&page, original).unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 1);
+        let incremental = serde_json::to_string(&engine.snapshot().unwrap()).unwrap();
+        let (fresh, _) = Engine::init(temp.path()).unwrap();
+        assert_eq!(
+            incremental,
+            serde_json::to_string(&fresh.snapshot().unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn astro_routes_and_template_bindings_fail_closed_on_malformed_or_ambiguous_input() {
+        let temp = tempfile::tempdir().unwrap();
+        for relative in [
+            "src/pages/index.astro",
+            "src/pages/docs/[...slug].astro",
+            "src/pages/index/ordinary.astro",
+            "src/pages/[...rest]/child.astro",
+            "src/pages/[...one]/[...two].astro",
+            "src/pages/_private.astro",
+            "src/pages/site.config.astro",
+            "src/pages/über.astro",
+            "src/pages/bad/[broken.astro",
+            "pages/outside.astro",
+        ] {
+            let path = temp.path().join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "<p>page</p>\n").unwrap();
+        }
+        fs::create_dir_all(temp.path().join("src/components")).unwrap();
+        fs::write(temp.path().join("src/components/One.astro"), "<p>one</p>\n").unwrap();
+        fs::write(temp.path().join("src/components/Two.astro"), "<p>two</p>\n").unwrap();
+        fs::write(
+            temp.path().join("src/pages/ambiguous.astro"),
+            "---\n\
+             import Card from '../components/One.astro';\n\
+             import Card from '../components/Two.astro';\n\
+             ---\n\
+             <Card />\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("src/components/SocialIcons.astro"),
+            "---\n\
+             import Default from '@astrojs/starlight/components/SocialIcons.astro';\n\
+             ---\n\
+             <Default />\n",
+        )
+        .unwrap();
+        fs::write(temp.path().join("Card.astro"), "<p>root card</p>\n").unwrap();
+        fs::write(
+            temp.path().join("src/components/Escape.astro"),
+            "---\n\
+             import Card from '../../../Card.astro';\n\
+             ---\n\
+             <Card />\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let routes = engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .into_iter()
+            .filter(|symbol| symbol.kind == crate::model::SymbolKind::Route)
+            .map(|symbol| symbol.name)
+            .collect::<std::collections::HashSet<_>>();
+        assert!(routes.contains("/"));
+        assert!(routes.contains("/docs/*slug"));
+        assert!(routes.contains("/index/ordinary"));
+        assert!(routes.contains("/*rest/child"));
+        assert!(routes.contains("/ambiguous"));
+        assert!(routes.contains("/site.config"));
+        assert!(routes.contains("/über"));
+        assert_eq!(routes.len(), 7);
+
+        let ambiguous = engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .into_iter()
+            .find(|symbol| {
+                symbol.file == "src/pages/ambiguous.astro"
+                    && symbol.kind == crate::model::SymbolKind::Component
+            })
+            .unwrap();
+        assert!(engine
+            .callees(&ambiguous.id)
+            .unwrap()
+            .iter()
+            .all(|(_, evidence)| evidence.provenance != "framework/astro-template"));
+        let social_icons = engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .into_iter()
+            .find(|symbol| {
+                symbol.file == "src/components/SocialIcons.astro"
+                    && symbol.kind == crate::model::SymbolKind::Component
+            })
+            .unwrap();
+        assert!(engine
+            .callees(&social_icons.id)
+            .unwrap()
+            .iter()
+            .all(|(_, evidence)| evidence.provenance != "framework/astro-template"));
+        let escaping = engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .into_iter()
+            .find(|symbol| {
+                symbol.file == "src/components/Escape.astro"
+                    && symbol.kind == crate::model::SymbolKind::Component
+            })
+            .unwrap();
+        let escaping_callees = engine.callees(&escaping.id).unwrap();
+        assert!(
+            escaping_callees
+                .iter()
+                .all(|(_, evidence)| evidence.provenance != "framework/astro-template"),
+            "{escaping_callees:#?}"
+        );
+    }
+
+    #[test]
     fn arkui_components_link_state_rebuilds_children_and_event_handlers() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(

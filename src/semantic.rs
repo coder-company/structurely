@@ -18,6 +18,7 @@ pub(crate) fn enrich_file_facts(root: Node<'_>, source: &[u8], facts: &mut FileF
         | Language::Jsx
         | Language::Vue
         | Language::Svelte
+        | Language::Astro
         | Language::ArkTs => {
             if contains_bytes(source, b"export const ")
                 || contains_bytes(source, b"static readonly ")
@@ -47,6 +48,9 @@ pub(crate) fn enrich_file_facts(root: Node<'_>, source: &[u8], facts: &mut FileF
             }
             if matches!(facts.language, Language::Vue | Language::Svelte) {
                 collect_component_template_edges(root, source, facts);
+            }
+            if facts.language == Language::Astro {
+                collect_astro_semantics(root, source, facts);
             }
         }
         Language::Python => {
@@ -2704,6 +2708,488 @@ fn direct_named_children(node: Node<'_>) -> Vec<Node<'_>> {
     node.named_children(&mut cursor).collect()
 }
 
+fn collect_astro_semantics(_root: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+    const TEMPLATE_CHILD_CAP: usize = 64;
+    let component_name = Path::new(&facts.path)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("Component");
+    let component = Symbol::new(
+        Language::Astro,
+        SymbolKind::Component,
+        component_name,
+        component_name,
+        &facts.path,
+        SourceSpan {
+            start_byte: 0,
+            end_byte: source.len(),
+            start_line: 1,
+            end_line: source.iter().filter(|byte| **byte == b'\n').count() + 1,
+        },
+    );
+    let file_symbol = facts.symbols.first().expect("file symbol");
+    facts.relationships.push(Relationship {
+        source_id: file_symbol.id.clone(),
+        target_id: component.id.clone(),
+        kind: RelationshipKind::Contains,
+        evidence: Evidence::new(
+            "framework/astro-component",
+            1.0,
+            format!("{} defines Astro component {component_name}", facts.path),
+            &facts.path,
+            1,
+        ),
+    });
+
+    let mut imported_bindings = HashMap::<String, Vec<(String, Option<String>)>>::new();
+    for reference in &facts.unresolved_references {
+        if reference.kind == RelationshipKind::Imports && is_identifier(&reference.binding_name) {
+            imported_bindings
+                .entry(reference.binding_name.clone())
+                .or_default()
+                .push((
+                    reference.target_name.clone(),
+                    reference.target_file_hint.clone(),
+                ));
+        }
+    }
+    for candidates in imported_bindings.values_mut() {
+        candidates.sort();
+        candidates.dedup();
+    }
+
+    let template = astro_template_source(source);
+    let mut children = template_child_components(&template);
+    children.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    children.dedup_by(|left, right| left.0 == right.0);
+    for (binding, offset) in children.into_iter().take(TEMPLATE_CHILD_CAP) {
+        if matches!(binding.as_str(), "Fragment" | "Code" | "Debug") || binding == component_name {
+            continue;
+        }
+        let Some(candidates) = imported_bindings.get(&binding) else {
+            continue;
+        };
+        let [(target_name, target_file_hint)] = candidates.as_slice() else {
+            continue;
+        };
+        if !target_file_hint.as_deref().is_some_and(|hint| {
+            (hint.starts_with("./") || hint.starts_with("../"))
+                && hint.to_ascii_lowercase().ends_with(".astro")
+        }) {
+            continue;
+        }
+        facts.unresolved_calls.push(UnresolvedCall {
+            caller_id: component.id.clone(),
+            fallback_caller_id: None,
+            callee_name: target_name.clone(),
+            receiver_binding: None,
+            receiver_type: None,
+            receiver_call_start_byte: None,
+            target_file_hint: target_file_hint.clone(),
+            provenance: "framework/astro-template".to_owned(),
+            confidence: 0.99,
+            explanation: format!(
+                "Astro component {component_name} renders explicitly imported {binding}"
+            ),
+            resolvable: true,
+            file: facts.path.clone(),
+            line: byte_line(source, offset),
+            start_byte: offset,
+        });
+    }
+
+    for (binding, offset) in astro_template_expression_calls(&template)
+        .into_iter()
+        .take(TEMPLATE_CHILD_CAP)
+    {
+        let Some(candidates) = imported_bindings.get(&binding) else {
+            continue;
+        };
+        let [(target_name, target_file_hint)] = candidates.as_slice() else {
+            continue;
+        };
+        if !target_file_hint
+            .as_deref()
+            .is_some_and(|hint| hint.starts_with("./") || hint.starts_with("../"))
+        {
+            continue;
+        }
+        facts.unresolved_calls.push(UnresolvedCall {
+            caller_id: component.id.clone(),
+            fallback_caller_id: None,
+            callee_name: target_name.clone(),
+            receiver_binding: None,
+            receiver_type: None,
+            receiver_call_start_byte: None,
+            target_file_hint: target_file_hint.clone(),
+            provenance: "framework/astro-template-expression".to_owned(),
+            confidence: 0.99,
+            explanation: format!(
+                "Astro component {component_name} calls explicitly imported {binding} \
+                 from a template expression"
+            ),
+            resolvable: true,
+            file: facts.path.clone(),
+            line: byte_line(source, offset),
+            start_byte: offset,
+        });
+    }
+
+    if let Some(route_path) = astro_page_route(&facts.path) {
+        let route = Symbol::new(
+            Language::Astro,
+            SymbolKind::Route,
+            &route_path,
+            &route_path,
+            &facts.path,
+            SourceSpan {
+                start_byte: 0,
+                end_byte: source.len(),
+                start_line: 1,
+                end_line: source.iter().filter(|byte| **byte == b'\n').count() + 1,
+            },
+        );
+        facts.relationships.push(Relationship {
+            source_id: file_symbol.id.clone(),
+            target_id: route.id.clone(),
+            kind: RelationshipKind::Contains,
+            evidence: Evidence::new(
+                "framework/astro-route",
+                1.0,
+                format!("Astro route {route_path} is derived from {}", facts.path),
+                &facts.path,
+                1,
+            ),
+        });
+        facts.relationships.push(Relationship {
+            source_id: route.id.clone(),
+            target_id: component.id.clone(),
+            kind: RelationshipKind::Calls,
+            evidence: Evidence::new(
+                "framework/astro-route",
+                1.0,
+                format!("Astro route {route_path} renders component {component_name}"),
+                &facts.path,
+                1,
+            ),
+        });
+        facts.symbols.push(route);
+    }
+    facts.symbols.push(component);
+}
+
+fn astro_template_source(source: &[u8]) -> String {
+    let source_text = String::from_utf8_lossy(source);
+    let lower = source_text.to_ascii_lowercase();
+    let mut template = source.to_vec();
+
+    // Reuse the parser's lexical region recognizer so fake closing tags inside
+    // JavaScript strings/comments cannot expose script code to template scans.
+    let code_regions = crate::parser::astro_script_source(&source_text);
+    for (output, code) in template.iter_mut().zip(code_regions.bytes()) {
+        if !matches!(code, b' ' | b'\n' | b'\r') {
+            *output = b' ';
+        }
+    }
+    if let Some((start, end)) = astro_frontmatter_mask_span(source) {
+        mask_non_newlines(&mut template, start, end);
+    }
+
+    for tag in ["script", "style"] {
+        let opening = format!("<{tag}");
+        let mut offset = 0;
+        while let Some(relative_open) = lower[offset..].find(&opening) {
+            let open = offset + relative_open;
+            let name_end = open + opening.len();
+            if !source
+                .get(name_end)
+                .is_none_or(|byte| byte.is_ascii_whitespace() || matches!(byte, b'>' | b'/'))
+            {
+                offset = name_end;
+                continue;
+            }
+            let Some(close) = find_astro_embedded_close(source, &lower, name_end, tag) else {
+                mask_non_newlines(&mut template, open, source.len());
+                break;
+            };
+            let end = lower[close..]
+                .find('>')
+                .map_or(source.len(), |relative| close + relative + 1);
+            mask_non_newlines(&mut template, open, end);
+            offset = end;
+        }
+    }
+    let mut offset = 0;
+    while let Some(relative_open) = source_text[offset..].find("<!--") {
+        let open = offset + relative_open;
+        let end = source_text[open + 4..]
+            .find("-->")
+            .map_or(source.len(), |relative| open + 4 + relative + 3);
+        mask_non_newlines(&mut template, open, end);
+        offset = end;
+    }
+    String::from_utf8(template).expect("Astro template masking preserves UTF-8")
+}
+
+fn find_astro_embedded_close(
+    source: &[u8],
+    lower: &str,
+    mut offset: usize,
+    tag: &str,
+) -> Option<usize> {
+    let closing = format!("</{tag}");
+    let mut quote = None;
+    let mut block_comment = false;
+    while offset < source.len() {
+        if block_comment {
+            if source[offset..].starts_with(b"*/") {
+                block_comment = false;
+                offset += 2;
+            } else {
+                offset += 1;
+            }
+            continue;
+        }
+        if let Some(terminator) = quote {
+            if source[offset] == b'\\' {
+                offset = (offset + 2).min(source.len());
+                continue;
+            }
+            if source[offset] == terminator {
+                quote = None;
+            }
+            offset += 1;
+            continue;
+        }
+        if source[offset..].starts_with(b"/*") {
+            block_comment = true;
+            offset += 2;
+            continue;
+        }
+        if matches!(source[offset], b'\'' | b'"' | b'`') {
+            quote = Some(source[offset]);
+            offset += 1;
+            continue;
+        }
+        if lower.as_bytes()[offset..].starts_with(closing.as_bytes())
+            && source
+                .get(offset + closing.len())
+                .is_none_or(|byte| byte.is_ascii_whitespace() || *byte == b'>')
+        {
+            return Some(offset);
+        }
+        offset += 1;
+    }
+    None
+}
+
+fn astro_frontmatter_mask_span(source: &[u8]) -> Option<(usize, usize)> {
+    let mut line_start = 0;
+    let (opening_start, body_start) = loop {
+        let (start, end, next) = astro_line_bounds(source, line_start)?;
+        let mut line = &source[start..end];
+        if start == 0 {
+            line = line.strip_prefix(b"\xef\xbb\xbf").unwrap_or(line);
+        }
+        let trimmed = trim_astro_line(line);
+        if trimmed.is_empty() {
+            if next <= line_start {
+                return None;
+            }
+            line_start = next;
+            continue;
+        }
+        if trimmed != b"---" {
+            return None;
+        }
+        break (start, next);
+    };
+    line_start = body_start;
+    while let Some((start, end, next)) = astro_line_bounds(source, line_start) {
+        if trim_astro_line(&source[start..end]) == b"---" {
+            return Some((opening_start, end));
+        }
+        if next <= line_start {
+            break;
+        }
+        line_start = next;
+    }
+    Some((opening_start, source.len()))
+}
+
+fn astro_line_bounds(source: &[u8], start: usize) -> Option<(usize, usize, usize)> {
+    if start >= source.len() {
+        return None;
+    }
+    let newline = source[start..]
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map(|relative| start + relative);
+    match newline {
+        Some(newline) => {
+            let end = newline - usize::from(newline > start && source[newline - 1] == b'\r');
+            Some((start, end, newline + 1))
+        }
+        None => Some((start, source.len(), source.len())),
+    }
+}
+
+fn trim_astro_line(mut line: &[u8]) -> &[u8] {
+    while line
+        .first()
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+    {
+        line = &line[1..];
+    }
+    while line.last().is_some_and(|byte| matches!(byte, b' ' | b'\t')) {
+        line = &line[..line.len() - 1];
+    }
+    line
+}
+
+fn astro_template_expression_calls(template: &str) -> Vec<(String, usize)> {
+    let bytes = template.as_bytes();
+    let mut calls = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'{' {
+            index += 1;
+            continue;
+        }
+        let mut cursor = index + 1;
+        let mut depth = 1usize;
+        let mut quote = None;
+        while cursor < bytes.len() && depth > 0 {
+            if let Some(terminator) = quote {
+                if bytes[cursor] == b'\\' {
+                    cursor = (cursor + 2).min(bytes.len());
+                    continue;
+                }
+                if bytes[cursor] == terminator {
+                    quote = None;
+                }
+                cursor += 1;
+                continue;
+            }
+            if matches!(bytes[cursor], b'\'' | b'"' | b'`') {
+                quote = Some(bytes[cursor]);
+                cursor += 1;
+                continue;
+            }
+            if bytes[cursor..].starts_with(b"//") {
+                cursor = bytes[cursor..]
+                    .iter()
+                    .position(|byte| *byte == b'\n')
+                    .map_or(bytes.len(), |relative| cursor + relative + 1);
+                continue;
+            }
+            if bytes[cursor..].starts_with(b"/*") {
+                cursor = template[cursor + 2..]
+                    .find("*/")
+                    .map_or(bytes.len(), |relative| cursor + 2 + relative + 2);
+                continue;
+            }
+            match bytes[cursor] {
+                b'{' => {
+                    depth += 1;
+                    cursor += 1;
+                }
+                b'}' => {
+                    depth -= 1;
+                    cursor += 1;
+                }
+                byte if byte == b'_' || byte == b'$' || byte.is_ascii_alphabetic() => {
+                    let start = cursor;
+                    cursor += 1;
+                    while bytes.get(cursor).is_some_and(|byte| {
+                        *byte == b'_' || *byte == b'$' || byte.is_ascii_alphanumeric()
+                    }) {
+                        cursor += 1;
+                    }
+                    let previous = template[..start].trim_end().as_bytes().last().copied();
+                    let mut after = cursor;
+                    while bytes.get(after).is_some_and(u8::is_ascii_whitespace) {
+                        after += 1;
+                    }
+                    if previous != Some(b'.') && bytes.get(after) == Some(&b'(') {
+                        calls.push((template[start..cursor].to_owned(), start));
+                    }
+                }
+                _ => cursor += 1,
+            }
+        }
+        index = cursor.max(index + 1);
+    }
+    calls.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    calls.dedup_by(|left, right| left.0 == right.0);
+    calls
+}
+
+fn mask_non_newlines(output: &mut [u8], start: usize, end: usize) {
+    let length = output.len();
+    for byte in &mut output[start.min(length)..end.min(length)] {
+        if !matches!(*byte, b'\n' | b'\r') {
+            *byte = b' ';
+        }
+    }
+}
+
+fn astro_page_route(path: &str) -> Option<String> {
+    let normalized = path.replace('\\', "/");
+    let segments = normalized.split('/').collect::<Vec<_>>();
+    let pages = segments
+        .windows(2)
+        .position(|pair| pair == ["src", "pages"])?;
+    let page_segments = &segments[pages + 2..];
+    let (file, directories) = page_segments.split_last()?;
+    let stem = file.strip_suffix(".astro")?;
+    if stem.is_empty() || page_segments.iter().any(|segment| segment.starts_with('_')) {
+        return None;
+    }
+    let mut route_segments = directories
+        .iter()
+        .map(|segment| astro_route_segment(segment))
+        .collect::<Option<Vec<_>>>()?;
+    if stem != "index" {
+        route_segments.push(astro_route_segment(stem)?);
+    }
+    if route_segments
+        .iter()
+        .filter(|segment| segment.starts_with('*'))
+        .count()
+        > 1
+    {
+        return None;
+    }
+    Some(if route_segments.is_empty() {
+        "/".to_owned()
+    } else {
+        format!("/{}", route_segments.join("/"))
+    })
+}
+
+fn astro_route_segment(segment: &str) -> Option<String> {
+    if segment.is_empty() || segment.starts_with('_') {
+        return None;
+    }
+    if let Some(parameter) = segment
+        .strip_prefix("[...")
+        .and_then(|value| value.strip_suffix(']'))
+    {
+        return is_identifier(parameter).then(|| format!("*{parameter}"));
+    }
+    if let Some(parameter) = segment
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+    {
+        return is_identifier(parameter).then(|| format!(":{parameter}"));
+    }
+    (!segment.contains(['[', ']'])
+        && !segment.contains(['/', '\\', '\0'])
+        && !matches!(segment, "." | ".."))
+    .then(|| segment.to_owned())
+}
+
 fn collect_component_template_edges(root: Node<'_>, source: &[u8], facts: &mut FileFacts) {
     const TEMPLATE_CHILD_CAP: usize = 32;
     let component_name = Path::new(&facts.path)
@@ -5159,7 +5645,38 @@ fn span(node: Node<'_>) -> SourceSpan {
 
 #[cfg(test)]
 mod tests {
-    use super::uppercase_first;
+    use super::{astro_template_expression_calls, astro_template_source, uppercase_first};
+
+    #[test]
+    fn astro_template_mask_preserves_crlf_offsets_and_hides_code_regions() {
+        let source = b"\r\n---\r\nconst fake = '<Fake />'\r\n---\r\n<Real />\r\n\
+                       <script>const hidden = '<Hidden />'</script>\r\n";
+        let template = astro_template_source(source);
+        assert_eq!(template.len(), source.len());
+        assert!(!template.contains("<Fake"));
+        assert!(!template.contains("<Hidden"));
+        assert!(template.contains("<Real />"));
+        for (index, byte) in source.iter().enumerate() {
+            if matches!(byte, b'\r' | b'\n') {
+                assert_eq!(template.as_bytes()[index], *byte);
+            }
+        }
+    }
+
+    #[test]
+    fn astro_template_expression_scanner_is_bounded_to_direct_calls() {
+        let template = "<p>{formatDate('a')}</p>\n\
+                        <p>{formatDate(\n'b'\n)}</p>\n\
+                        <p>{object.formatDate('c')}</p>\n\
+                        <p>{'formatDate()'}</p>\n";
+        assert_eq!(
+            astro_template_expression_calls(template),
+            vec![(
+                "formatDate".to_owned(),
+                template.find("formatDate").unwrap()
+            )]
+        );
+    }
 
     #[test]
     fn nestjs_grpc_default_method_uppercases_ascii_and_unicode_initials() {

@@ -199,7 +199,7 @@ impl ProjectResolutionContext {
             let parent = Path::new(source_file)
                 .parent()
                 .unwrap_or_else(|| Path::new(""));
-            let relative = normalize_absolute(&parent.join(import_path));
+            let relative = normalize_relative_checked(&parent.join(import_path))?;
             return canonical_source_hint(&self.root, &relative)
                 .map(|path| (path, "project/relative-import"));
         }
@@ -784,9 +784,27 @@ fn normalize_absolute(path: &Path) -> PathBuf {
     normalized
 }
 
+fn normalize_relative_checked(path: &Path) -> Option<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return None;
+                }
+            }
+            Component::CurDir => {}
+            Component::Normal(part) => normalized.push(part),
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(normalized)
+}
+
 fn canonical_source_hint(root: &Path, relative: &Path) -> Option<String> {
     const EXTENSIONS: &[&str] = &[
-        "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts", "vue", "svelte", "ets", "json", "rs",
+        "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts", "vue", "svelte", "astro", "ets",
+        "json", "rs",
     ];
     let direct = root.join(relative);
     if direct.is_file() {
@@ -878,6 +896,35 @@ fn strip_jsonc(source: &str) -> String {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn relative_import_normalization_rejects_project_root_escape() {
+        assert_eq!(
+            normalize_relative_checked(Path::new("src/pages/../../Card.astro")),
+            Some(PathBuf::from("Card.astro"))
+        );
+        assert_eq!(
+            normalize_relative_checked(Path::new("src/pages/../../../Card.astro")),
+            None
+        );
+    }
+
+    #[test]
+    fn extensionless_resolution_discovers_astro_files_and_indexes() {
+        let root = tempdir().unwrap();
+        fs::create_dir_all(root.path().join("components/Card")).unwrap();
+        fs::write(root.path().join("components/Hero.astro"), "").unwrap();
+        fs::write(root.path().join("components/Card/index.astro"), "").unwrap();
+
+        assert_eq!(
+            canonical_source_hint(root.path(), Path::new("components/Hero")),
+            Some("components/Hero".to_owned())
+        );
+        assert_eq!(
+            canonical_source_hint(root.path(), Path::new("components/Card")),
+            Some("components/Card/index".to_owned())
+        );
+    }
 
     #[test]
     fn aliases_honor_jsonc_specificity_fallback_and_escape_protection() {

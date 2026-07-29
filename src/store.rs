@@ -1378,6 +1378,14 @@ impl Store {
             let receiver_binding = receiver_binding.unwrap_or_default();
             let mut receiver_type = receiver_type.unwrap_or_default();
             let mut target_file_hint = target_file_hint.unwrap_or_default();
+            if provenance.starts_with("framework/astro-template")
+                && (target_file_hint.starts_with("./") || target_file_hint.starts_with("../"))
+            {
+                // Project resolution canonicalizes valid relative imports. A
+                // surviving relative hint escaped the root or targeted no
+                // indexed source and must not fall through to global names.
+                continue;
+            }
             let mut inferred_factory = None::<(String, String)>;
             let mut inferred_confidence = 1.0_f64;
             if receiver_type.is_empty() && !receiver_binding.is_empty() {
@@ -3177,6 +3185,10 @@ impl Store {
                      s.language=?3
                      OR (?3='arkts' AND s.language='typescript')
                      OR (?3='typescript' AND s.language='arkts')
+                     OR (
+                       ?3='astro'
+                       AND s.language IN ('typescript','tsx','javascript','jsx')
+                     )
                    )
                  ORDER BY s.qualified_name,s.public_id",
             )?;
@@ -3460,7 +3472,7 @@ impl Store {
 
 fn normalized_module_key(path: &str) -> String {
     const EXTENSIONS: &[&str] = &[
-        "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts", "vue", "svelte", "ets",
+        "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts", "vue", "svelte", "astro", "ets",
     ];
     for extension in EXTENSIONS {
         if let Some(stem) = path.strip_suffix(&format!(".{extension}")) {
@@ -3547,6 +3559,7 @@ fn parse_language(value: &str) -> Language {
         "jsx" => Language::Jsx,
         "vue" => Language::Vue,
         "svelte" => Language::Svelte,
+        "astro" => Language::Astro,
         "arkts" => Language::ArkTs,
         "python" => Language::Python,
         "rust" => Language::Rust,
@@ -3570,6 +3583,7 @@ fn parse_language(value: &str) -> Language {
 fn compatible_web_language(language: &str) -> Option<&'static str> {
     match language {
         "arkts" => Some("typescript"),
+        "astro" => Some("typescript"),
         "typescript" => Some("arkts"),
         _ => None,
     }
@@ -3604,6 +3618,13 @@ fn parse_relationship_kind(value: &str) -> RelationshipKind {
 }
 
 fn module_hint_matches(hint: &str, candidate: &str) -> bool {
+    let raw_hint = hint.trim_matches(['\'', '"']).replace('\\', "/");
+    if raw_hint.starts_with("./") || raw_hint.starts_with("../") {
+        // Valid project-relative imports are canonicalized before persistence.
+        // A remaining relative hint failed project resolution and must not be
+        // suffix-matched to an unrelated in-project file.
+        return false;
+    }
     let normalize = |value: &str| {
         value
             .trim_matches(['\'', '"'])
@@ -3863,6 +3884,17 @@ fn call_result_resolution_enabled(dependent_calls: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn astro_language_and_module_keys_round_trip_through_storage_helpers() {
+        assert_eq!(parse_language("astro"), Language::Astro);
+        assert_eq!(
+            normalized_module_key("src/components/Hero.astro"),
+            "src/components/Hero"
+        );
+        assert_eq!(compatible_web_language("astro"), Some("typescript"));
+        assert!(!module_hint_matches("../../../Card.astro", "Card.astro"));
+    }
 
     #[test]
     fn identifier_vocabulary_splits_common_naming_conventions() {
