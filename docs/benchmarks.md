@@ -242,3 +242,17 @@ passes 14/14 assertions across 6,995 files and proves
 `ListExchange.build →` its exact inline `deductionView` adapter. Rejected
 ordinary object callbacks and ambiguous trailing children leave no synthetic
 Symbol behind.
+
+After byte-exact callsite correlation and bounded transitive callback
+delegation, the
+[`post-delegation differential`](../benchmarks/differential-mcp-2026-07-29-post-callback-delegation/README.md)
+keeps both engines at 22/22 shared compatibility and 1.0000 usefulness. The
+enforced
+[`performance run`](../benchmarks/codegraph-source-intersection-2026-07-29-post-callback-delegation/README.md)
+is 3.268× faster to index, 8.727× faster at query p50, and 4.392× faster at
+query p95 while using 87.53% less peak memory and a 12.06% smaller database.
+The
+[`OpenHarmony inventory`](../benchmarks/openharmony-callback-delegation-2026-07-29/README.md)
+retains 14/14 prior assertions and records 3,412 delegation observations but
+zero complete delegated registrations. This negative result is why inline
+callback identities, rather than broader speculative forwarding, are next.

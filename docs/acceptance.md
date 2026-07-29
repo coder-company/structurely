@@ -87,6 +87,11 @@ inline-arrow BuilderParam dispatch from the real ListExchange sample and passes
 14/14 correlated assertions. Matching differential and performance artifacts
 pin clean commit `6379b44`, its exact release binary, and pinned CodeGraph
 1.5.0.
+The `benchmarks/openharmony-callback-delegation-2026-07-29/` inventory retains
+those 14/14 assertions after bounded formal delegation and records zero
+complete delegated registrations from 3,412 observations. It is negative
+prevalence evidence, not a fifteenth semantic assertion. Matching differential
+and performance artifacts pin clean optimized commit `23def02`.
 
 The authoritative capability inventory is
 [`codegraph-parity.md`](codegraph-parity.md). A matching command name or schema

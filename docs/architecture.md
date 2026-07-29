@@ -100,14 +100,20 @@ transitive callback delegation, and remaining cross-language emitter channels
 are intentionally not yet resolved.
 
 Direct callback-argument propagation records exact formal and actual argument
-positions. It emits an edge only after the ordinary call resolves to one
-callee, that exact formal is invoked, and the corresponding identifier,
-verified import, or `this.member` actual resolves uniquely. Invocations inside
-nested closures retain the outer formal unless an inner formal shadows it.
-Inline closures, default/rest/destructured parameters, computed members,
-parameter forwarding, ambiguous overloads, and stored or returned callbacks
-fail closed. Call-site observations are persisted as compact per-file batches
-and resolved in bulk.
+positions and byte-exact callsite identity. It emits an edge only after the
+ordinary call resolves to one callee, that exact formal is invoked, and the
+corresponding identifier, verified import, or `this.member` actual resolves
+uniquely. Exact bare formal-to-formal delegation is followed breadth-first
+through at most sixteen formal nodes; a global visited set bounds work across
+cycles, diamonds, and branching. Only directly invoking terminal owners receive
+derived call relationships. Delegated edges carry separate provenance and
+lower confidence. Invocations inside nested closures retain the outer formal
+unless an inner formal shadows it. Forwarding through a crossed closure,
+mutated/default/rest/destructured formals, ambiguous callees, computed members,
+and stored or returned callbacks fail closed. Inline closure actuals remain
+unsupported. Callsite observations are persisted as compact per-file batches;
+the exact resolved-target join map is transaction-local and rebuilt each graph
+epoch.
 
 ArkTS calls through imported singleton values prefer a unique candidate inside
 the caller's Harmony project root before language-wide fallback. This rank
