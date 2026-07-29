@@ -1,0 +1,180 @@
+{
+  "checks": {
+    "angleIncludeSearchOrder": true,
+    "binaryAndSourceIdentityRecorded": true,
+    "databaseOnlyIncrementalCleanupAndRestore": true,
+    "databaseOnlySyncInvalidation": true,
+    "databaseOrderInvariant": true,
+    "graphModelVersion66": true,
+    "noOpSyncAfterDatabaseRefresh": true,
+    "perTranslationUnitIncludeContexts": true,
+    "pinnedCodeGraphFixtureComparison": true
+  },
+  "codegraphComparison": {
+    "commit": "572d22bfbe82602080e457bec655f72e3314f9ef",
+    "fixtureDispatchTargets": {
+      "dispatch_a": ["beta", "decoy_a"],
+      "dispatch_b": ["beta", "decoy_a"],
+      "dispatch_shared": ["shared_target"]
+    },
+    "freshImportEdges": [
+      {
+        "column": 0,
+        "line": 1,
+        "metadata": {
+          "confidence": 0.9,
+          "refName": "config.h",
+          "resolvedBy": "import"
+        },
+        "source": "src/a.c",
+        "target": "include-a/config.h"
+      },
+      {
+        "column": 0,
+        "line": 1,
+        "metadata": {
+          "confidence": 0.9,
+          "refName": "config.h",
+          "resolvedBy": "import"
+        },
+        "source": "src/b.c",
+        "target": "include-a/config.h"
+      },
+      {
+        "column": 0,
+        "line": 1,
+        "metadata": {
+          "confidence": 0.9,
+          "refName": "shared.h",
+          "resolvedBy": "import"
+        },
+        "source": "src/shared.c",
+        "target": "include-shared/shared.h"
+      }
+    ],
+    "perTranslationUnitTargetsCorrect": false,
+    "reorderedDatabase": {
+      "afterFullIndexImportEdges": [
+        {
+          "column": 0,
+          "line": 1,
+          "metadata": {
+            "confidence": 0.9,
+            "refName": "config.h",
+            "resolvedBy": "import"
+          },
+          "source": "src/a.c",
+          "target": "include-b/config.h"
+        },
+        {
+          "column": 0,
+          "line": 1,
+          "metadata": {
+            "confidence": 0.9,
+            "refName": "config.h",
+            "resolvedBy": "import"
+          },
+          "source": "src/b.c",
+          "target": "include-b/config.h"
+        },
+        {
+          "column": 0,
+          "line": 1,
+          "metadata": {
+            "confidence": 0.9,
+            "refName": "shared.h",
+            "resolvedBy": "import"
+          },
+          "source": "src/shared.c",
+          "target": "include-shared/shared.h"
+        }
+      ],
+      "afterSyncImportEdges": [
+        {
+          "column": 0,
+          "line": 1,
+          "metadata": {
+            "confidence": 0.9,
+            "refName": "config.h",
+            "resolvedBy": "import"
+          },
+          "source": "src/a.c",
+          "target": "include-a/config.h"
+        },
+        {
+          "column": 0,
+          "line": 1,
+          "metadata": {
+            "confidence": 0.9,
+            "refName": "config.h",
+            "resolvedBy": "import"
+          },
+          "source": "src/b.c",
+          "target": "include-a/config.h"
+        },
+        {
+          "column": 0,
+          "line": 1,
+          "metadata": {
+            "confidence": 0.9,
+            "refName": "shared.h",
+            "resolvedBy": "import"
+          },
+          "source": "src/shared.c",
+          "target": "include-shared/shared.h"
+        }
+      ],
+      "syncOutput": "┌  Syncing CodeGraph\n│\nScanning files...\n│\n●  Already up to date\n│\n└  Done"
+    },
+    "scope": "controlled two-translation-unit fixture only",
+    "version": "1.5.0",
+    "worktreeDirty": false
+  },
+  "fixture": {
+    "aSourceSha256": "5d211b646102a70eb40740692f66375319267fe3bca9a17009f9bfd650161e2d",
+    "bSourceSha256": "9996e5f2e8f4987a8a419300c00572539fcd22b60fc637b75264258f1cf72ee2",
+    "freshDatabaseSha256": "94f9d9b8197f7f22f5445fdf7a1773f43840e7de64069d2b12af7996d6cbdace",
+    "sharedSourceSha256": "00e7aea053a0e1d16bbf04c6319721f328b795e9df7ee2512f2ffeeddae2aaed"
+  },
+  "fresh": {
+    "engineDurationMs": 17,
+    "targets": {
+      "dispatch_a": ["alpha"],
+      "dispatch_b": ["beta"],
+      "dispatch_shared": ["shared_target"]
+    },
+    "wallMs": 44.917
+  },
+  "graphModelVersion": 66,
+  "incremental": {
+    "noOp": {
+      "engineDurationMs": 1,
+      "filesChanged": 0,
+      "wallMs": 4.688
+    },
+    "rebind": {
+      "engineDurationMs": 19,
+      "targets": {
+        "dispatch_a": ["alpha"],
+        "dispatch_b": ["beta"],
+        "dispatch_shared": ["shared_target"]
+      },
+      "wallMs": 28.862
+    },
+    "restore": {
+      "engineDurationMs": 18,
+      "targets": {
+        "dispatch_a": ["alpha"],
+        "dispatch_b": ["beta"],
+        "dispatch_shared": ["shared_target"]
+      },
+      "wallMs": 28.158
+    }
+  },
+  "passed": true,
+  "structurely": {
+    "binarySha256": "4851295e3e76502d1f8e03b94f3de45f5a19bc8fda229390a038dfab669a5ca6",
+    "commit": "63f9b02bc917d5ac4d4aafa7b11c34f6a35cc81b",
+    "worktreeDirty": true
+  }
+}

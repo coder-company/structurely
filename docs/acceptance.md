@@ -192,6 +192,19 @@ zero returned `alpha`/`beta` target edges. The claim is intentionally limited
 to this fixture and the documented same-file C++ subset; cross-file, C,
 cast/bare-name, overload and transitive factory flow remain unsupported.
 
+Graph model v66 adds bounded, project-confined, per-translation-unit C/C++
+include resolution from `compile_commands.json`. The controlled differential
+gate resolves `dispatch_a → alpha`, `dispatch_b → beta`, and a shared-system
+header target, preserving all three when only compilation-database entry order
+changes. It also proves quote/angle precedence, duplicate-variant fail-closed
+behavior, header invalidation, and canonical include-directory symlink
+invalidation. Pinned CodeGraph 1.5.0 resolves the shared header but maps both
+duplicate includes through its first project-wide include directory; it does
+not observe database-only reordering on `sync`, while a full index changes both
+mappings with project order. This claim is limited to the controlled fixture;
+compiler defines, response files, external/system headers, and non-indexed
+generated headers remain unsupported.
+
 The authoritative capability inventory is
 [`codegraph-parity.md`](codegraph-parity.md). A matching command name or schema
 does not by itself satisfy behavioral parity.
