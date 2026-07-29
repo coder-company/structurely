@@ -142,13 +142,27 @@ pub fn status(project: impl AsRef<Path>) -> Result<DaemonStatus> {
             FileExt::unlock(&lock)?;
             false
         }
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => true,
+        Err(error) if lock_is_contended(&error) => true,
         Err(error) => return Err(error).context("inspect daemon project lock"),
     };
     let state = fs::read(&paths.state)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok());
     Ok(DaemonStatus { running, state })
+}
+
+fn lock_is_contended(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        // LockFileEx reports ERROR_LOCK_VIOLATION when another process owns
+        // the requested byte range; Rust does not classify it as WouldBlock.
+        return error.raw_os_error() == Some(33);
+    }
+    #[cfg(not(windows))]
+    false
 }
 
 pub fn run(project: impl AsRef<Path>, debounce: Duration) -> Result<()> {
@@ -418,5 +432,11 @@ mod tests {
         let message = format!("{:#}", error.unwrap());
         assert!(message.contains("publish daemon state"));
         assert_eq!(fs::read(state_path.join("sentinel")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_lock_violation_is_daemon_contention() {
+        assert!(lock_is_contended(&std::io::Error::from_raw_os_error(33)));
     }
 }
