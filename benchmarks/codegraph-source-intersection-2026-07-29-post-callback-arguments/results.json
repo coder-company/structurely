@@ -1,0 +1,109 @@
+{
+  "protocol": {
+    "trials": 5,
+    "query_processes": 20,
+    "query": "CodeGraph",
+    "corpus_files": 441
+  },
+  "structurely": {
+    "fresh_index_wall_samples_ms": [
+      3148.86543,
+      2236.227169,
+      2310.639811,
+      2263.162173,
+      2209.981131
+    ],
+    "fresh_index_wall_p50_ms": 2263.162173,
+    "reported_engine_samples_ms": [
+      3109,
+      2205,
+      2273,
+      2240,
+      2175
+    ],
+    "reported_engine_p50_ms": 2240,
+    "query_samples_us": [
+      33925,
+      34524,
+      42062,
+      35075,
+      41631,
+      33314,
+      33264,
+      33556,
+      41676,
+      33166,
+      43429,
+      33726,
+      33952,
+      32791,
+      33609,
+      33612,
+      34643,
+      33813,
+      33494,
+      38183
+    ],
+    "query_p50_us": 33869.0,
+    "query_p95_us": 43429,
+    "database_bytes": 38506496,
+    "indexed_files": 441,
+    "symbols": 5177,
+    "relationships": 36822,
+    "max_rss_kb": 132944
+  },
+  "codegraph": {
+    "fresh_index_wall_samples_ms": [
+      8128.215298,
+      7558.31461,
+      7360.404538,
+      7284.943956,
+      7228.38483
+    ],
+    "fresh_index_wall_p50_ms": 7360.404538,
+    "reported_engine_samples_ms": [
+      3800,
+      3600,
+      3600,
+      3500,
+      3500
+    ],
+    "reported_engine_p50_ms": 3600,
+    "query_samples_us": [
+      313223,
+      328876,
+      315827,
+      350725,
+      303100,
+      358924,
+      312675,
+      315451,
+      315283,
+      300720,
+      307410,
+      317354,
+      331452,
+      327347,
+      307028,
+      309067,
+      309795,
+      339401,
+      335124,
+      317930
+    ],
+    "query_p50_us": 315639.0,
+    "query_p95_us": 358924,
+    "database_bytes": 44453888,
+    "indexed_files": 441,
+    "nodes": 8957,
+    "edges": 35801,
+    "max_rss_kb": 1032296
+  },
+  "acceptance": {
+    "index_speedup": 3.252265624536841,
+    "query_speedup": 9.319407127461691,
+    "minimum_index_speedup": 2.0,
+    "minimum_query_speedup": 2.0,
+    "passed": true
+  }
+}

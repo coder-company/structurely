@@ -78,6 +78,10 @@ The `benchmarks/openharmony-arkui-builder-2026-07-29/` gate adds a real
 children-bearing `bindPopup` registration and passes 9/9 correlated assertions.
 Matching differential and performance artifacts pin the same clean Structurely
 commit and binary.
+The `benchmarks/openharmony-callback-arguments-2026-07-29/` gate adds exact
+formal-to-actual callback propagation through nested closures and passes 10/10
+correlated assertions. Matching differential and performance artifacts pin the
+same clean Structurely commit and binary.
 
 The authoritative capability inventory is
 [`codegraph-parity.md`](codegraph-parity.md). A matching command name or schema

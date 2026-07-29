@@ -192,3 +192,14 @@ query p95 while using 88.69% less peak memory. The
 [`real OpenHarmony gate`](../benchmarks/openharmony-arkui-builder-2026-07-29/README.md)
 passes 9/9 assertions and adds the exact
 `ActionBarButton.build → ActionBarButton.PopupBuilder` registration.
+
+After exact callback-argument propagation, the
+[`post-callback differential`](../benchmarks/differential-mcp-2026-07-29-post-callback-arguments/README.md)
+keeps both engines at 22/22 shared compatibility and 1.0000 usefulness. The
+enforced
+[`performance run`](../benchmarks/codegraph-source-intersection-2026-07-29-post-callback-arguments/README.md)
+is 3.252× faster to index, 9.319× faster at query p50, and 8.265× faster at
+query p95 while using 87.12% less peak memory. The
+[`real OpenHarmony gate`](../benchmarks/openharmony-callback-arguments-2026-07-29/README.md)
+passes 10/10 assertions and proves the package-scoped nested-closure callback
+flow from `RequestDownload.downloadFile` to `Download.downloadFileCallback`.

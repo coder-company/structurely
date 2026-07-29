@@ -96,8 +96,23 @@ canonical value. Numeric and string channel identities remain distinct;
 dynamic IDs, mutable exports, reassignment, lexical shadows, ambiguous
 registrations or exports, and cross-application matches fail closed. Named and
 inline callbacks are supported. Constructor-built descriptors,
-callback-argument propagation, and `@BuilderParam` value flow are intentionally
-not yet resolved.
+transitive callback delegation, and `@BuilderParam` value flow are
+intentionally not yet resolved.
+
+Direct callback-argument propagation records exact formal and actual argument
+positions. It emits an edge only after the ordinary call resolves to one
+callee, that exact formal is invoked, and the corresponding identifier,
+verified import, or `this.member` actual resolves uniquely. Invocations inside
+nested closures retain the outer formal unless an inner formal shadows it.
+Inline closures, default/rest/destructured parameters, computed members,
+parameter forwarding, ambiguous overloads, and stored or returned callbacks
+fail closed. Call-site observations are persisted as compact per-file batches
+and resolved in bulk.
+
+ArkTS calls through imported singleton values prefer a unique candidate inside
+the caller's Harmony project root before language-wide fallback. This rank
+requires an actual import binding and applies only across `entry`, `feature`,
+and `features` layouts. Multiple same-project candidates remain ambiguous.
 
 Decorated component-owned `@Builder` methods passed through `bindPopup`
 options resolve only when the target is an exact `this.member` on the same
