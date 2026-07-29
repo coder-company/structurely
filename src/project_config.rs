@@ -6,7 +6,7 @@ use std::{collections::HashMap, path::Path};
 
 use crate::source::{read_source_snapshot, SourceRead};
 
-const CONFIG_FILES: [&str; 2] = ["structurely.json", "codegraph.json"];
+const CONFIG_FILE: &str = "structurely.json";
 
 pub(crate) struct ProjectConfig {
     extensions: HashMap<String, Language>,
@@ -18,10 +18,8 @@ pub(crate) struct ProjectConfig {
 
 impl ProjectConfig {
     pub(crate) fn load(root: &Path) -> Result<Self> {
-        let file = CONFIG_FILES
-            .iter()
-            .map(|name| root.join(name))
-            .find(|path| path.symlink_metadata().is_ok());
+        let path = root.join(CONFIG_FILE);
+        let file = path.symlink_metadata().is_ok().then_some(path);
         let value = match file {
             Some(ref path) => {
                 let source = match read_source_snapshot(path)

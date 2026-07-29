@@ -72,7 +72,7 @@ fn daemon_start_status_catch_up_and_stop_are_idempotent() {
                 "id": 1,
                 "method": "tools/call",
                 "params": {
-                    "name": "codegraph_search",
+                    "name": "structurely_search",
                     "arguments": { "query": "afterDaemonSync" }
                 }
             }),

@@ -80,10 +80,10 @@ fn handle(engine: &mut Engine, request: Value) -> Result<Option<Value>> {
             "protocolVersion": negotiated_protocol_version(&request),
             "capabilities": { "tools": {} },
             "serverInfo": { "name": "structurely", "version": env!("CARGO_PKG_VERSION") },
-            "instructions": "Use codegraph_explore before reading files when you need task-oriented code context. Treat returned source locations as authoritative, and check freshness metadata before doing a manual repository search."
+            "instructions": "Use structurely_explore before reading files when you need task-oriented code context. Treat returned source locations as authoritative, and check freshness metadata before doing a manual repository search."
         }),
         "tools/list" => json!({ "tools": enabled_tool_definitions(
-            std::env::var("CODEGRAPH_MCP_TOOLS").ok().as_deref()
+            std::env::var("STRUCTURELY_MCP_TOOLS").ok().as_deref()
         ) }),
         "resources/list" => json!({ "resources": [] }),
         "resources/templates/list" => json!({ "resourceTemplates": [] }),
@@ -130,7 +130,7 @@ fn negotiated_protocol_version(request: &Value) -> &'static str {
 fn tool_definitions() -> Vec<Value> {
     vec![
         json!({
-            "name": "codegraph_search",
+            "name": "structurely_search",
             "description": "Quick symbol search by name. Returns locations only.",
             "inputSchema": {
                 "type": "object",
@@ -157,7 +157,7 @@ fn tool_definitions() -> Vec<Value> {
             "annotations": read_only_annotations()
         }),
         json!({
-            "name": "codegraph_explore",
+            "name": "structurely_explore",
             "description": "Explore relevant symbols with source and call context.",
             "inputSchema": {
                 "type": "object",
@@ -179,10 +179,10 @@ fn tool_definitions() -> Vec<Value> {
             },
             "annotations": read_only_annotations()
         }),
-        relationship_tool("codegraph_callers", "List functions that call a symbol."),
-        relationship_tool("codegraph_callees", "List functions that a symbol calls."),
+        relationship_tool("structurely_callers", "List functions that call a symbol."),
+        relationship_tool("structurely_callees", "List functions that a symbol calls."),
         json!({
-            "name": "codegraph_impact",
+            "name": "structurely_impact",
             "description": "List symbols affected by changing a symbol.",
             "inputSchema": {
                 "type": "object",
@@ -210,7 +210,7 @@ fn tool_definitions() -> Vec<Value> {
             "annotations": read_only_annotations()
         }),
         json!({
-            "name": "codegraph_status",
+            "name": "structurely_status",
             "description": "Index health check.",
             "inputSchema": {
                 "type": "object",
@@ -219,7 +219,7 @@ fn tool_definitions() -> Vec<Value> {
             "annotations": read_only_annotations()
         }),
         json!({
-            "name": "codegraph_files",
+            "name": "structurely_files",
             "description": "List indexed files with language and symbol counts.",
             "inputSchema": {
                 "type": "object",
@@ -235,7 +235,7 @@ fn tool_definitions() -> Vec<Value> {
             "annotations": read_only_annotations()
         }),
         json!({
-            "name": "codegraph_node",
+            "name": "structurely_node",
             "description": "Read a file or inspect a symbol with optional source.",
             "inputSchema": {
                 "type": "object",
@@ -278,7 +278,7 @@ fn enabled_tool_definitions(configured: Option<&str>) -> Vec<Value> {
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(|name| {
-            name.strip_prefix("codegraph_")
+            name.strip_prefix("structurely_")
                 .unwrap_or(name)
                 .to_lowercase()
         })
@@ -288,7 +288,7 @@ fn enabled_tool_definitions(configured: Option<&str>) -> Vec<Value> {
         .filter(|tool| {
             tool["name"]
                 .as_str()
-                .and_then(|name| name.strip_prefix("codegraph_"))
+                .and_then(|name| name.strip_prefix("structurely_"))
                 .is_some_and(|name| enabled.contains(name))
         })
         .collect()
@@ -456,7 +456,7 @@ fn foreground_refresh(engine: &mut Engine, mode: &'static str) -> RefreshOutcome
 fn dispatch_tool(engine: &Engine, name: &str, arguments: &Value) -> Result<Value> {
     let mut text_override = None;
     let payload = match name {
-        "codegraph_search" => {
+        "structurely_search" => {
             let query = required_string(arguments, "query")?;
             let limit = number_argument(arguments, "limit", 10, ResourceBudget::MAX_RESULTS)?;
             let kind = match arguments.get("kind") {
@@ -472,7 +472,7 @@ fn dispatch_tool(engine: &Engine, name: &str, arguments: &Value) -> Result<Value
             };
             serde_json::to_value(engine.search_filtered(query, kind, limit)?)?
         }
-        "codegraph_explore" => {
+        "structurely_explore" => {
             let query = required_string(arguments, "query")?;
             let max_files =
                 number_argument(arguments, "maxFiles", 12, ResourceBudget::MAX_RESULTS)?;
@@ -480,27 +480,27 @@ fn dispatch_tool(engine: &Engine, name: &str, arguments: &Value) -> Result<Value
             text_override = Some(format_explore_text(engine, query, &hits)?);
             serde_json::to_value(hits)?
         }
-        "codegraph_callers" => {
+        "structurely_callers" => {
             let symbol = required_string(arguments, "symbol")?;
             let file = optional_string(arguments, "file")?;
             let limit = number_argument(arguments, "limit", 20, ResourceBudget::MAX_RESULTS)?;
             serde_json::to_value(engine.callers_named(symbol, file, limit)?)?
         }
-        "codegraph_callees" => {
+        "structurely_callees" => {
             let symbol = required_string(arguments, "symbol")?;
             let file = optional_string(arguments, "file")?;
             let limit = number_argument(arguments, "limit", 20, ResourceBudget::MAX_RESULTS)?;
             serde_json::to_value(engine.callees_named(symbol, file, limit)?)?
         }
-        "codegraph_impact" => {
+        "structurely_impact" => {
             let symbol = required_string(arguments, "symbol")?;
             let file = optional_string(arguments, "file")?;
             let depth =
                 number_argument(arguments, "depth", 2, ResourceBudget::MAX_TRAVERSAL_DEPTH)?;
             serde_json::to_value(engine.impact_named(symbol, file, depth)?)?
         }
-        "codegraph_status" => serde_json::to_value(engine.status()?)?,
-        "codegraph_files" => {
+        "structurely_status" => serde_json::to_value(engine.status()?)?,
+        "structurely_files" => {
             let path = optional_string(arguments, "path")?;
             let pattern = optional_string(arguments, "pattern")?;
             let limit = number_argument(arguments, "limit", 1_000, 1_000)?;
@@ -529,7 +529,7 @@ fn dispatch_tool(engine: &Engine, name: &str, arguments: &Value) -> Result<Value
             }
             serde_json::to_value(files)?
         }
-        "codegraph_node" => {
+        "structurely_node" => {
             let symbol = optional_string(arguments, "symbol")?;
             let file = optional_string(arguments, "file")?;
             let include_code = optional_bool_argument(arguments, "includeCode")?.unwrap_or(false);
@@ -820,25 +820,25 @@ mod tests {
             .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
             .collect();
         for expected in [
-            "codegraph_status",
-            "codegraph_files",
-            "codegraph_node",
-            "codegraph_explore",
-            "codegraph_impact",
+            "structurely_status",
+            "structurely_files",
+            "structurely_node",
+            "structurely_explore",
+            "structurely_impact",
         ] {
             assert!(names.contains(&expected.to_owned()));
         }
 
         let callees = call_tool(
             &mut engine,
-            &json!({ "name": "codegraph_callees", "arguments": { "symbol": "caller" } }),
+            &json!({ "name": "structurely_callees", "arguments": { "symbol": "caller" } }),
         )
         .unwrap();
         assert_eq!(callees["structuredContent"][0]["symbol"]["name"], "callee");
 
         let explored = call_tool(
             &mut engine,
-            &json!({ "name": "codegraph_explore", "arguments": { "query": "callee" } }),
+            &json!({ "name": "structurely_explore", "arguments": { "query": "callee" } }),
         )
         .unwrap();
         assert!(explored["structuredContent"][0]["source"]
@@ -861,7 +861,7 @@ mod tests {
 
         let updated = call_tool(
             &mut engine,
-            &json!({ "name": "codegraph_search", "arguments": { "query": "after" } }),
+            &json!({ "name": "structurely_search", "arguments": { "query": "after" } }),
         )
         .unwrap();
         assert_eq!(updated["structuredContent"][0]["symbol"]["name"], "after");
@@ -876,7 +876,7 @@ mod tests {
         let cross_project = call_tool(
             &mut engine,
             &json!({
-                "name": "codegraph_search",
+                "name": "structurely_search",
                 "arguments": {
                     "query": "elsewhere",
                     "projectPath": other.path()
@@ -905,7 +905,7 @@ mod tests {
         let stale = call_tool(
             &mut engine,
             &json!({
-                "name": "codegraph_search",
+                "name": "structurely_search",
                 "arguments": { "query": "committedSymbol" }
             }),
         )
@@ -928,7 +928,7 @@ mod tests {
         let current = call_tool(
             &mut engine,
             &json!({
-                "name": "codegraph_search",
+                "name": "structurely_search",
                 "arguments": { "query": "committedSymbol" }
             }),
         )
@@ -951,7 +951,7 @@ mod tests {
             "id": 7,
             "method": "tools/call",
             "params": {
-                "name": "codegraph_search",
+                "name": "structurely_search",
                 "arguments": {
                     "query": "main",
                     "projectPath": temp.path().join("missing")
@@ -1072,7 +1072,7 @@ mod tests {
                     "id": 10,
                     "method": "tools/call",
                     "params": {
-                        "name": "codegraph_search",
+                        "name": "structurely_search",
                         "arguments": arguments
                     }
                 }),
@@ -1095,7 +1095,7 @@ mod tests {
                     "id": 11,
                     "method": "tools/call",
                     "params": {
-                        "name": "codegraph_node",
+                        "name": "structurely_node",
                         "arguments": arguments
                     }
                 }),
@@ -1107,7 +1107,7 @@ mod tests {
 
         let schema = tool_definitions()
             .into_iter()
-            .find(|tool| tool["name"] == "codegraph_search")
+            .find(|tool| tool["name"] == "structurely_search")
             .unwrap();
         assert_eq!(
             schema["inputSchema"]["properties"]["limit"]["maximum"],
@@ -1127,16 +1127,20 @@ mod tests {
     fn upstream_compatible_tool_listing_defaults_to_explore_only() {
         let defaults = enabled_tool_definitions(None);
         assert_eq!(defaults.len(), 1);
-        assert_eq!(defaults[0]["name"], "codegraph_explore");
+        assert_eq!(defaults[0]["name"], "structurely_explore");
 
-        let selected = enabled_tool_definitions(Some("explore,node,codegraph_search"));
+        let selected = enabled_tool_definitions(Some("explore,node,structurely_search"));
         let names = selected
             .iter()
             .filter_map(|tool| tool["name"].as_str())
             .collect::<Vec<_>>();
         assert_eq!(
             names,
-            ["codegraph_search", "codegraph_explore", "codegraph_node"]
+            [
+                "structurely_search",
+                "structurely_explore",
+                "structurely_node"
+            ]
         );
     }
 
@@ -1148,9 +1152,15 @@ mod tests {
         .unwrap();
         let definitions = tool_definitions();
         for (name, expected) in contract["tools"].as_object().unwrap() {
+            let native_name = format!(
+                "structurely_{}",
+                name.split_once('_')
+                    .map(|(_, suffix)| suffix)
+                    .unwrap_or(name)
+            );
             let definition = definitions
                 .iter()
-                .find(|tool| tool["name"] == *name)
+                .find(|tool| tool["name"] == native_name)
                 .unwrap_or_else(|| panic!("missing upstream tool {name}"));
             let properties = definition["inputSchema"]["properties"].as_object().unwrap();
             for property in expected["properties"].as_array().unwrap() {
@@ -1170,12 +1180,27 @@ mod tests {
             );
         }
         let defaults = enabled_tool_definitions(None);
+        let expected_defaults = contract["defaultTools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|name| {
+                Value::String(format!(
+                    "structurely_{}",
+                    name.as_str()
+                        .unwrap()
+                        .split_once('_')
+                        .map(|(_, suffix)| suffix)
+                        .unwrap_or_default()
+                ))
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
             defaults
                 .iter()
                 .map(|tool| tool["name"].clone())
                 .collect::<Vec<_>>(),
-            *contract["defaultTools"].as_array().unwrap()
+            expected_defaults
         );
     }
 

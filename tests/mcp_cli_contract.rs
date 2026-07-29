@@ -7,18 +7,18 @@ use std::{
 };
 
 const EXPECTED_TOOLS: [&str; 8] = [
-    "codegraph_explore",
-    "codegraph_node",
-    "codegraph_search",
-    "codegraph_callers",
-    "codegraph_callees",
-    "codegraph_impact",
-    "codegraph_status",
-    "codegraph_files",
+    "structurely_explore",
+    "structurely_node",
+    "structurely_search",
+    "structurely_callers",
+    "structurely_callees",
+    "structurely_impact",
+    "structurely_status",
+    "structurely_files",
 ];
 
 #[test]
-fn mcp_stdio_preserves_the_codegraph_agent_contract() {
+fn mcp_stdio_preserves_the_structurely_agent_contract() {
     let temp = tempfile::tempdir().unwrap();
     copy_fixture(&fixture_root(), temp.path());
     run(temp.path(), &["init", temp.path().to_str().unwrap()]);
@@ -36,7 +36,7 @@ fn mcp_stdio_preserves_the_codegraph_agent_contract() {
     assert!(initialized["result"]["instructions"]
         .as_str()
         .unwrap()
-        .contains("codegraph_explore"));
+        .contains("structurely_explore"));
 
     let tools = session.request("tools/list", json!({}));
     let names = tools["result"]["tools"]
@@ -62,11 +62,11 @@ fn mcp_stdio_preserves_the_codegraph_agent_contract() {
         json!({ "prompts": [] })
     );
 
-    let exact = session.call("codegraph_search", json!({"query": "showUser"}));
+    let exact = session.call("structurely_search", json!({"query": "showUser"}));
     assert!(text(&exact).contains("showUser"));
     assert!(exact["result"]["structuredContent"].is_array());
 
-    let ambiguous = session.call("codegraph_search", json!({"query": "duplicate"}));
+    let ambiguous = session.call("structurely_search", json!({"query": "duplicate"}));
     assert!(
         text(&ambiguous).matches("duplicate").count() >= 2,
         "ambiguous definitions were collapsed: {}",
@@ -74,20 +74,20 @@ fn mcp_stdio_preserves_the_codegraph_agent_contract() {
     );
 
     let callers = session.call(
-        "codegraph_callers",
+        "structurely_callers",
         json!({"symbol": "showUser", "limit": 20}),
     );
     assert!(text(&callers).contains("showUser"));
 
     let node = session.call(
-        "codegraph_node",
+        "structurely_node",
         json!({"file": "handlers.ts", "offset": 1, "limit": 6}),
     );
     assert!(text(&node).contains("showUser"));
     assert!(!text(&node).contains("export function duplicate"));
 
     let explore = session.call(
-        "codegraph_explore",
+        "structurely_explore",
         json!({"query": "registerRoutes showUser", "maxFiles": 5}),
     );
     assert!(text(&explore).contains("registerRoutes"));
@@ -98,16 +98,16 @@ fn mcp_stdio_preserves_the_codegraph_agent_contract() {
     assert!(!text(&explore).contains("api.py"));
 
     let files = session.call(
-        "codegraph_files",
+        "structurely_files",
         json!({"pattern": "*.ts", "includeMetadata": true}),
     );
     assert!(text(&files).contains("handlers.ts"));
     assert!(text(&files).contains("routes.ts"));
 
-    let missing = session.call("codegraph_search", json!({}));
+    let missing = session.call("structurely_search", json!({}));
     assert_eq!(missing["result"]["isError"], true);
     let invalid = session.call(
-        "codegraph_search",
+        "structurely_search",
         json!({"query": "showUser", "limit": 1_000_000}),
     );
     assert_eq!(invalid["result"]["isError"], true);
@@ -157,7 +157,7 @@ impl McpSession {
         let mut child = Command::new(env!("CARGO_BIN_EXE_structurely"))
             .args(["serve", "--mcp", "--path", project.to_str().unwrap()])
             .env(
-                "CODEGRAPH_MCP_TOOLS",
+                "STRUCTURELY_MCP_TOOLS",
                 "explore,node,search,callers,callees,impact,status,files",
             )
             .current_dir(project)

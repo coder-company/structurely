@@ -21,6 +21,5 @@
   relationships, and atomically publishes a graph epoch.
 - **Resolver adapter** — language or framework-specific relationship logic
   operating on extracted facts.
-- **Compatibility surface** — the CodeGraph-compatible CLI commands and MCP
-  tools presented to coding agents. It does not include CodeGraph's database
-  format.
+- **Agent surface** — Structurely's CLI commands and `structurely_*` MCP tools
+  presented to coding agents.

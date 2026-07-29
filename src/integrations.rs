@@ -85,21 +85,21 @@ pub fn replace_codegraph(
         AgentClient::Claude | AgentClient::Cursor => json_has_server(&path, CODEGRAPH_SERVER_NAME)?,
     };
     let installed = match client {
-        AgentClient::Codex => install_codex(&path, CODEGRAPH_SERVER_NAME, &project, &executable)?,
+        AgentClient::Codex => install_codex(&path, SERVER_NAME, &project, &executable)?,
         AgentClient::Claude | AgentClient::Cursor => {
-            install_json(&path, CODEGRAPH_SERVER_NAME, &project, &executable)?
+            install_json(&path, SERVER_NAME, &project, &executable)?
         }
     };
-    let removed_duplicate = match client {
-        AgentClient::Codex => uninstall_codex(&path, SERVER_NAME)?,
-        AgentClient::Claude | AgentClient::Cursor => uninstall_json(&path, SERVER_NAME)?,
+    let removed_codegraph = match client {
+        AgentClient::Codex => uninstall_codex(&path, CODEGRAPH_SERVER_NAME)?,
+        AgentClient::Claude | AgentClient::Cursor => uninstall_json(&path, CODEGRAPH_SERVER_NAME)?,
     };
     Ok(report(
         client,
         path,
-        CODEGRAPH_SERVER_NAME,
+        SERVER_NAME,
         true,
-        installed || removed_duplicate,
+        installed || removed_codegraph,
         had_codegraph,
     ))
 }
@@ -129,30 +129,6 @@ pub fn status(
         }
     };
     Ok(report(client, path, SERVER_NAME, installed, false, false))
-}
-
-pub fn status_codegraph_replacement(
-    project: impl AsRef<Path>,
-    client: AgentClient,
-    executable: impl AsRef<Path>,
-) -> Result<IntegrationReport> {
-    let project = canonical_project(project.as_ref())?;
-    let executable = absolute_executable(executable.as_ref())?;
-    let path = client.config_path(&project);
-    let installed = match client {
-        AgentClient::Codex => codex_matches(&path, CODEGRAPH_SERVER_NAME, &project, &executable)?,
-        AgentClient::Claude | AgentClient::Cursor => {
-            json_matches(&path, CODEGRAPH_SERVER_NAME, &project, &executable)?
-        }
-    };
-    Ok(report(
-        client,
-        path,
-        CODEGRAPH_SERVER_NAME,
-        installed,
-        false,
-        installed,
-    ))
 }
 
 fn install_json(path: &Path, server_name: &str, project: &Path, executable: &Path) -> Result<bool> {
@@ -459,7 +435,7 @@ mod tests {
     }
 
     #[test]
-    fn replacement_preserves_the_codegraph_server_name_and_removes_duplicates() {
+    fn replacement_removes_codegraph_and_installs_structurely() {
         for client in [AgentClient::Codex, AgentClient::Claude, AgentClient::Cursor] {
             let temp = tempfile::tempdir().unwrap();
             let executable = temp.path().join("bin/structurely");
@@ -487,15 +463,11 @@ command = "old-structurely"
             let report = replace_codegraph(temp.path(), client, &executable).unwrap();
             assert!(report.installed);
             assert!(report.replaced_codegraph);
-            assert_eq!(report.server, CODEGRAPH_SERVER_NAME);
-            assert!(
-                status_codegraph_replacement(temp.path(), client, &executable)
-                    .unwrap()
-                    .installed
-            );
+            assert_eq!(report.server, SERVER_NAME);
+            assert!(status(temp.path(), client, &executable).unwrap().installed);
             let content = fs::read_to_string(path).unwrap();
-            assert!(!content.contains("old-structurely"));
-            assert!(content.contains("codegraph"));
+            assert!(!content.contains("codegraph"));
+            assert!(content.contains("structurely"));
         }
     }
 }

@@ -48,11 +48,7 @@ pub fn run(
             return Err(error).context("configure coding agent");
         }
     };
-    let verified = if replace_codegraph {
-        integrations::status_codegraph_replacement(&project, client, executable)?
-    } else {
-        integrations::status(&project, client, executable)?
-    };
+    let verified = integrations::status(&project, client, executable)?;
     if !verified.installed {
         let _ = daemon::stop(&project);
         bail!("coding-agent configuration did not pass post-install verification");
