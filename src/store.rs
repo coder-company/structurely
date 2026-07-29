@@ -171,6 +171,25 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS unresolved_calls_name_idx
                 ON unresolved_calls(callee_name);
+            CREATE TABLE IF NOT EXISTS callback_parameter_invocations (
+                file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                owner_public_id TEXT NOT NULL,
+                parameter_index INTEGER NOT NULL,
+                PRIMARY KEY(file_id,owner_public_id,parameter_index)
+            );
+            CREATE TABLE IF NOT EXISTS callback_arguments (
+                id INTEGER PRIMARY KEY,
+                file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                caller_public_id TEXT NOT NULL,
+                callee_name TEXT NOT NULL,
+                argument_index INTEGER NOT NULL,
+                target_name TEXT NOT NULL,
+                target_qualified_hint TEXT,
+                evidence_file TEXT NOT NULL,
+                evidence_line INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS callback_arguments_call_idx
+                ON callback_arguments(caller_public_id,callee_name,evidence_file,evidence_line);
             CREATE TABLE IF NOT EXISTS dynamic_events (
                 id INTEGER PRIMARY KEY,
                 file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
@@ -534,6 +553,7 @@ impl Store {
 
     fn finish_epoch(tx: &Transaction<'_>, next_epoch: u64) -> Result<usize> {
         let mut relationships_resolved = Self::resolve_calls(tx)?;
+        relationships_resolved += Self::resolve_callback_arguments(tx)?;
         relationships_resolved += Self::resolve_interface_dispatch(tx)?;
         relationships_resolved += Self::resolve_dynamic_events(tx)?;
         tx.execute(
@@ -650,6 +670,36 @@ impl Store {
                 call.resolvable,
                 call.file,
                 call.line as i64
+            ])?;
+        }
+        for invocation in &file.callback_parameter_invocations {
+            tx.prepare_cached(
+                "INSERT INTO callback_parameter_invocations(
+                    file_id,owner_public_id,parameter_index
+                 ) VALUES (?1,?2,?3)",
+            )?
+            .execute(params![
+                file_id,
+                invocation.owner_id,
+                invocation.parameter_index as i64
+            ])?;
+        }
+        for argument in &file.callback_arguments {
+            tx.prepare_cached(
+                "INSERT INTO callback_arguments(
+                    file_id,caller_public_id,callee_name,argument_index,target_name,
+                    target_qualified_hint,evidence_file,evidence_line
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            )?
+            .execute(params![
+                file_id,
+                argument.caller_id,
+                argument.callee_name,
+                argument.argument_index as i64,
+                argument.target_name,
+                argument.target_qualified_hint,
+                argument.file,
+                argument.line as i64
             ])?;
         }
         for event in &file.dynamic_events {
@@ -1045,6 +1095,135 @@ impl Store {
                 )?;
                 resolved += 1;
             }
+        }
+        Ok(resolved)
+    }
+
+    fn resolve_callback_arguments(tx: &Transaction<'_>) -> Result<usize> {
+        tx.execute(
+            "DELETE FROM relationships WHERE provenance='dynamic/callback-argument'",
+            [],
+        )?;
+        let mut statement = tx.prepare(
+            "SELECT a.file_id,a.caller_public_id,a.callee_name,a.argument_index,
+                    a.target_name,a.target_qualified_hint,a.evidence_file,a.evidence_line
+             FROM callback_arguments a
+             ORDER BY a.evidence_file,a.evidence_line,a.id",
+        )?;
+        let arguments = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)? as usize,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+
+        let mut resolved = 0;
+        for (
+            file_id,
+            caller_id,
+            callee_name,
+            argument_index,
+            target_name,
+            target_qualified_hint,
+            file,
+            line,
+        ) in arguments
+        {
+            let mut callee_statement = tx.prepare(
+                "SELECT DISTINCT r.target_public_id,s.qualified_name
+                 FROM relationships r
+                 JOIN symbols s ON s.public_id=r.target_public_id
+                 WHERE r.source_public_id=?1 AND r.evidence_file=?2 AND r.evidence_line=?3
+                   AND s.name=?4 AND r.provenance!='dynamic/callback-argument'
+                 ORDER BY s.qualified_name,r.target_public_id",
+            )?;
+            let callees = callee_statement
+                .query_map(params![caller_id, file, line as i64, callee_name], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            if callees.len() != 1 {
+                continue;
+            }
+            let (callee_id, callee_qualified) = &callees[0];
+            let invokes_parameter = tx.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM callback_parameter_invocations
+                    WHERE owner_public_id=?1 AND parameter_index=?2
+                 )",
+                params![callee_id, argument_index],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if !invokes_parameter {
+                continue;
+            }
+
+            let mut targets = if let Some(qualified_hint) = target_qualified_hint.as_deref() {
+                let mut target_statement = tx.prepare(
+                    "SELECT public_id,qualified_name FROM symbols
+                     WHERE file_id=?1 AND name=?2 AND qualified_name=?3
+                     ORDER BY public_id",
+                )?;
+                let targets = target_statement
+                    .query_map(params![file_id, target_name, qualified_hint], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                targets
+            } else {
+                let mut target_statement = tx.prepare(
+                    "SELECT s.public_id,s.qualified_name
+                     FROM symbols s
+                     WHERE s.file_id=?1 AND s.name=?2
+                     UNION
+                     SELECT s.public_id,s.qualified_name
+                     FROM import_bindings b
+                     JOIN symbols s ON s.public_id=b.target_public_id
+                     WHERE b.file_id=?1 AND b.binding_name=?2
+                     ORDER BY 2,1",
+                )?;
+                let targets = target_statement
+                    .query_map(params![file_id, target_name], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                targets
+            };
+            targets.sort();
+            targets.dedup();
+            if targets.len() != 1 {
+                continue;
+            }
+            let (target_id, target_qualified) = targets.pop().expect("one callback target");
+            Self::insert_relationship(
+                tx,
+                &Relationship {
+                    source_id: callee_id.clone(),
+                    target_id,
+                    kind: RelationshipKind::Calls,
+                    evidence: Evidence::new(
+                        "dynamic/callback-argument",
+                        0.96,
+                        format!(
+                            "{callee_qualified} directly invokes callback parameter {}; \
+                             registration resolves it to {target_qualified}",
+                            argument_index + 1
+                        ),
+                        &file,
+                        line,
+                    ),
+                },
+            )?;
+            resolved += 1;
         }
         Ok(resolved)
     }

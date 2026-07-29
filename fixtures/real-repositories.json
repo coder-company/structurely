@@ -372,6 +372,22 @@
             "\"confidence\": 0.97",
             "\"line\": 99"
           ]
+        },
+        {
+          "command": "callees",
+          "query": "ResourceManager.getAppIconWithCache",
+          "file": "code/SystemFeature/ApplicationModels/Launcher/base/src/main/ets/default/manager/ResourceManager.ts",
+          "contains": [
+            "\"qualified_name\": \"DeleteDialog.iconLoadCallback\"",
+            "\"provenance\": \"dynamic/callback-argument\""
+          ],
+          "recordContains": [
+            "\"qualified_name\": \"DeleteDialog.iconLoadCallback\"",
+            "code/SystemFeature/ApplicationModels/Launcher/base/src/main/ets/default/components/DeleteDialog.ets",
+            "\"provenance\": \"dynamic/callback-argument\"",
+            "\"confidence\": 0.96",
+            "\"line\": 41"
+          ]
         }
       ]
     }

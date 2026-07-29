@@ -1,6 +1,6 @@
 use crate::model::{
-    Evidence, FileFacts, Language, Relationship, RelationshipKind, SourceSpan, Symbol, SymbolKind,
-    UnresolvedCall, UnresolvedReference,
+    CallbackArgumentFact, CallbackParameterInvocation, Evidence, FileFacts, Language, Relationship,
+    RelationshipKind, SourceSpan, Symbol, SymbolKind, UnresolvedCall, UnresolvedReference,
 };
 use crate::semantic::enrich_file_facts;
 use anyhow::{anyhow, Context, Result};
@@ -71,6 +71,8 @@ pub(crate) fn parse_file_as(
     }
 
     let mut unresolved_calls = Vec::new();
+    let mut callback_parameter_invocations = Vec::new();
+    let mut callback_arguments = Vec::new();
     let mut symbol_owners = symbols
         .iter()
         .skip(1)
@@ -90,7 +92,13 @@ pub(crate) fn parse_file_as(
         module_bindings: &module_bindings,
         file_symbol_id: &file_symbol.id,
     };
-    collect_calls(tree.root_node(), &call_context, &mut unresolved_calls);
+    collect_calls(
+        tree.root_node(),
+        &call_context,
+        &mut unresolved_calls,
+        &mut callback_parameter_invocations,
+        &mut callback_arguments,
+    );
     let mut unresolved_references = Vec::new();
     collect_structural_references(
         tree.root_node(),
@@ -107,6 +115,8 @@ pub(crate) fn parse_file_as(
         symbols,
         relationships,
         unresolved_calls,
+        callback_parameter_invocations,
+        callback_arguments,
         unresolved_references,
         dynamic_events: Vec::new(),
         literal_bindings: Vec::new(),
@@ -766,6 +776,8 @@ fn collect_calls(
     node: Node<'_>,
     context: &CallCollectionContext<'_>,
     output: &mut Vec<UnresolvedCall>,
+    callback_invocations: &mut Vec<CallbackParameterInvocation>,
+    callback_arguments: &mut Vec<CallbackArgumentFact>,
 ) {
     if matches!(
         node.kind(),
@@ -784,7 +796,9 @@ fn collect_calls(
     ) {
         if let Some(function) = call_target_node(node) {
             if let Some(name) = call_name(function, context.source) {
-                let resolvable = !is_parameter_invocation(node, &name, context.source);
+                let parameter_invocation =
+                    invoked_parameter(node, &name, context.source, context.symbol_owners);
+                let resolvable = parameter_invocation.is_none();
                 let mut owner = node.parent();
                 let mut caller_id = None;
                 while let Some(ancestor) = owner {
@@ -799,7 +813,7 @@ fn collect_calls(
                 }
                 output.push(UnresolvedCall {
                     caller_id: caller_id.unwrap_or(context.file_symbol_id).to_owned(),
-                    callee_name: name,
+                    callee_name: name.clone(),
                     receiver_type: receiver_type_hint(
                         function,
                         node,
@@ -815,12 +829,34 @@ fn collect_calls(
                     file: context.file.to_owned(),
                     line: node.start_position().row + 1,
                 });
+                if let Some(invocation) = parameter_invocation {
+                    if !callback_invocations.iter().any(|candidate| {
+                        candidate.owner_id == invocation.owner_id
+                            && candidate.parameter_index == invocation.parameter_index
+                    }) {
+                        callback_invocations.push(invocation);
+                    }
+                } else {
+                    collect_callback_arguments(
+                        node,
+                        &name,
+                        caller_id.unwrap_or(context.file_symbol_id),
+                        context,
+                        callback_arguments,
+                    );
+                }
             }
         }
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        collect_calls(child, context, output);
+        collect_calls(
+            child,
+            context,
+            output,
+            callback_invocations,
+            callback_arguments,
+        );
     }
 }
 
@@ -869,7 +905,12 @@ fn call_receiver_name(function: Node<'_>, source: &[u8]) -> Option<String> {
         .then(|| node_text(receiver, source))
 }
 
-fn is_parameter_invocation(call: Node<'_>, name: &str, source: &[u8]) -> bool {
+fn invoked_parameter(
+    call: Node<'_>,
+    name: &str,
+    source: &[u8],
+    symbol_owners: &HashMap<(usize, usize), String>,
+) -> Option<CallbackParameterInvocation> {
     let mut ancestor = call.parent();
     while let Some(node) = ancestor {
         if matches!(
@@ -880,17 +921,164 @@ fn is_parameter_invocation(call: Node<'_>, name: &str, source: &[u8]) -> bool {
                 | "method_definition"
                 | "function_definition"
         ) {
-            return node
-                .child_by_field_name("parameters")
-                .is_some_and(|parameters| {
-                    let mut identifiers = Vec::new();
-                    collect_identifier_nodes(parameters, source, &mut identifiers);
-                    identifiers
-                        .iter()
-                        .any(|(parameter, _, _)| parameter == name)
-                });
+            let parameters = node.child_by_field_name("parameters")?;
+            let parameter_index = direct_parameter_names(parameters, source)
+                .iter()
+                .position(|parameter| parameter.as_deref() == Some(name))?;
+            let owner_id = symbol_owners
+                .get(&(node.start_byte(), node.end_byte()))
+                .cloned()?;
+            return Some(CallbackParameterInvocation {
+                owner_id,
+                parameter_index,
+            });
         }
         ancestor = node.parent();
+    }
+    None
+}
+
+fn direct_parameter_names(parameters: Node<'_>, source: &[u8]) -> Vec<Option<String>> {
+    let mut cursor = parameters.walk();
+    parameters
+        .named_children(&mut cursor)
+        .map(|parameter| {
+            let raw = node_text(parameter, source);
+            if raw.contains("...")
+                || raw.replace("=>", "").contains('=')
+                || raw.trim_start().starts_with(['{', '['])
+            {
+                return None;
+            }
+            if parameter.kind() == "identifier" {
+                return Some(raw);
+            }
+            parameter
+                .child_by_field_name("pattern")
+                .or_else(|| parameter.child_by_field_name("name"))
+                .filter(|name| name.kind() == "identifier")
+                .map(|name| node_text(name, source))
+                .or_else(|| {
+                    let mut children = parameter.walk();
+                    let name = parameter
+                        .named_children(&mut children)
+                        .find(|child| child.kind() == "identifier")
+                        .map(|name| node_text(name, source));
+                    name
+                })
+        })
+        .collect()
+}
+
+fn collect_callback_arguments(
+    call: Node<'_>,
+    callee_name: &str,
+    caller_id: &str,
+    context: &CallCollectionContext<'_>,
+    output: &mut Vec<CallbackArgumentFact>,
+) {
+    let Some(arguments) = call.child_by_field_name("arguments") else {
+        return;
+    };
+    let mut cursor = arguments.walk();
+    for (argument_index, argument) in arguments.named_children(&mut cursor).enumerate() {
+        if is_parameter_reference(call, argument, context.source) {
+            continue;
+        }
+        let (target_name, target_qualified_hint) = match argument.kind() {
+            "identifier" => (node_text(argument, context.source), None),
+            "member_expression"
+                if argument
+                    .child_by_field_name("object")
+                    .is_some_and(|object| node_text(object, context.source) == "this") =>
+            {
+                let Some(property) = argument.child_by_field_name("property") else {
+                    continue;
+                };
+                if property.kind() != "property_identifier" && property.kind() != "identifier" {
+                    continue;
+                }
+                let Some(_) = owning_symbol_id(call, context.symbol_owners) else {
+                    continue;
+                };
+                let owner_name = enclosing_container_name(call, context.source);
+                (
+                    node_text(property, context.source),
+                    owner_name
+                        .map(|owner| format!("{owner}.{}", node_text(property, context.source))),
+                )
+            }
+            _ => continue,
+        };
+        if target_name.is_empty() {
+            continue;
+        }
+        output.push(CallbackArgumentFact {
+            caller_id: caller_id.to_owned(),
+            callee_name: callee_name.to_owned(),
+            argument_index,
+            target_name,
+            target_qualified_hint,
+            file: context.file.to_owned(),
+            line: call.start_position().row + 1,
+        });
+    }
+}
+
+fn owning_symbol_id<'a>(
+    node: Node<'_>,
+    owners: &'a HashMap<(usize, usize), String>,
+) -> Option<&'a String> {
+    let mut ancestor = Some(node);
+    while let Some(current) = ancestor {
+        if let Some(id) = owners.get(&(current.start_byte(), current.end_byte())) {
+            return Some(id);
+        }
+        ancestor = current.parent();
+    }
+    None
+}
+
+fn enclosing_container_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut ancestor = node.parent();
+    while let Some(current) = ancestor {
+        if matches!(
+            current.kind(),
+            "class_declaration" | "class_definition" | "struct_declaration"
+        ) {
+            return current
+                .child_by_field_name("name")
+                .map(|name| node_text(name, source));
+        }
+        ancestor = current.parent();
+    }
+    None
+}
+
+fn is_parameter_reference(call: Node<'_>, argument: Node<'_>, source: &[u8]) -> bool {
+    if argument.kind() != "identifier" {
+        return false;
+    }
+    let name = node_text(argument, source);
+    let mut ancestor = call.parent();
+    while let Some(current) = ancestor {
+        if matches!(
+            current.kind(),
+            "function_declaration"
+                | "function_expression"
+                | "arrow_function"
+                | "method_definition"
+                | "function_definition"
+        ) {
+            return current
+                .child_by_field_name("parameters")
+                .is_some_and(|parameters| {
+                    direct_parameter_names(parameters, source)
+                        .iter()
+                        .any(|parameter| parameter.as_deref() == Some(name.as_str()))
+                });
+        }
+        ancestor = current.parent();
     }
     false
 }
@@ -1128,6 +1316,32 @@ fn span(node: Node<'_>) -> SourceSpan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn callback_argument_facts_preserve_exact_positions() {
+        let facts = parse_file(
+            "main.ts",
+            "function selected() {}\nfunction invoke(value: number, callback: () => void) { callback(); }\nfunction caller() { invoke(1, selected); }\n",
+        )
+        .unwrap();
+        assert_eq!(facts.callback_parameter_invocations.len(), 1);
+        assert_eq!(facts.callback_parameter_invocations[0].parameter_index, 1);
+        assert!(facts.callback_arguments.iter().any(|argument| {
+            argument.callee_name == "invoke"
+                && argument.argument_index == 1
+                && argument.target_name == "selected"
+        }));
+        let member_facts = parse_file(
+            "member.ts",
+            "class Invoker { invoke(callback: () => void) { callback(); } }\nclass Page { selected = () => {}; run() { new Invoker().invoke(this.selected); } }\n",
+        )
+        .unwrap();
+        assert!(member_facts.callback_arguments.iter().any(|argument| {
+            argument.callee_name == "invoke"
+                && argument.target_name == "selected"
+                && argument.target_qualified_hint.as_deref() == Some("Page.selected")
+        }));
+    }
 
     #[test]
     fn extracts_typescript_symbols_and_calls() {

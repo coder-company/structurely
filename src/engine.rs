@@ -1945,6 +1945,233 @@ mod tests {
     }
 
     #[test]
+    fn direct_callback_arguments_propagate_by_exact_parameter_position() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("main.ts"),
+            "function selected() {}\n\
+             function decoy() {}\n\
+             function invoke(value: number, callback: () => void) { callback(); }\n\
+             function caller() { invoke(1, selected); }\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let invoke = engine
+            .search("invoke", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.name == "invoke")
+            .unwrap()
+            .symbol;
+        let callbacks = engine
+            .callees(&invoke.id)
+            .unwrap()
+            .into_iter()
+            .filter(|(_, evidence)| evidence.provenance == "dynamic/callback-argument")
+            .collect::<Vec<_>>();
+        assert_eq!(callbacks.len(), 1);
+        assert_eq!(callbacks[0].0.name, "selected");
+        assert_eq!(callbacks[0].1.confidence, 0.96);
+        assert_eq!(callbacks[0].1.line, 4);
+    }
+
+    #[test]
+    fn callback_arguments_resolve_verified_imported_callables() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("callbacks.ts"),
+            "export function selected() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("main.ts"),
+            "import { selected } from './callbacks'\n\
+             function invoke(callback: () => void) { callback() }\n\
+             export function caller() { invoke(selected) }\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let invoke = engine
+            .search("invoke", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.name == "invoke")
+            .unwrap()
+            .symbol;
+        let callbacks = engine
+            .callees(&invoke.id)
+            .unwrap()
+            .into_iter()
+            .filter(|(_, evidence)| evidence.provenance == "dynamic/callback-argument")
+            .collect::<Vec<_>>();
+        assert_eq!(callbacks.len(), 1);
+        assert_eq!(callbacks[0].0.file, "callbacks.ts");
+        assert_eq!(callbacks[0].0.qualified_name, "selected");
+    }
+
+    #[test]
+    fn callback_argument_members_require_exact_owner_and_unique_callee() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("main.ts"),
+            "class Invoker { invoke(callback: () => void) { callback(); } }\n\
+             class Page {\n\
+               selected() {}\n\
+               run() { new Invoker().invoke(this.selected); }\n\
+             }\n\
+             class Other { selected() {} }\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let invoke = engine
+            .search("invoke", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.qualified_name == "Invoker.invoke")
+            .unwrap()
+            .symbol;
+        let run = engine
+            .search("run", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.qualified_name == "Page.run")
+            .unwrap()
+            .symbol;
+        assert!(engine
+            .callees(&run.id)
+            .unwrap()
+            .iter()
+            .any(|(target, _)| target.qualified_name == "Invoker.invoke"));
+        let callbacks = engine
+            .callees(&invoke.id)
+            .unwrap()
+            .into_iter()
+            .filter(|(_, evidence)| evidence.provenance == "dynamic/callback-argument")
+            .collect::<Vec<_>>();
+        assert_eq!(callbacks.len(), 1);
+        assert_eq!(callbacks[0].0.qualified_name, "Page.selected");
+    }
+
+    #[test]
+    fn arkts_callback_argument_fields_resolve_through_typed_receivers() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("main.ets"),
+            "class ResourceManager {\n\
+               getAppIconWithCache(id: number, callback: Function) { callback(id) }\n\
+             }\n\
+             @Component\n\
+             struct DeleteDialog {\n\
+               private manager: ResourceManager = new ResourceManager()\n\
+               iconLoadCallback = (image: number): void => {}\n\
+               updateIcon(): void {\n\
+                 this.manager.getAppIconWithCache(1, this.iconLoadCallback)\n\
+               }\n\
+               build() { Column() }\n\
+             }\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let invoke = engine
+            .search("ResourceManager.getAppIconWithCache", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.qualified_name == "ResourceManager.getAppIconWithCache")
+            .unwrap()
+            .symbol;
+        let callbacks = engine
+            .callees(&invoke.id)
+            .unwrap()
+            .into_iter()
+            .filter(|(_, evidence)| evidence.provenance == "dynamic/callback-argument")
+            .collect::<Vec<_>>();
+        assert_eq!(callbacks.len(), 1);
+        assert_eq!(
+            callbacks[0].0.qualified_name,
+            "DeleteDialog.iconLoadCallback"
+        );
+        assert_eq!(callbacks[0].1.line, 9);
+    }
+
+    #[test]
+    fn callback_argument_propagation_fails_closed_for_unsafe_shapes_and_ambiguity() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("main.ts"),
+            "function selected() {}\n\
+             function callback() {}\n\
+             function invoke(callback: () => void) { callback(); }\n\
+             function never(callback: () => void) {}\n\
+             function defaulted(callback = selected) { callback(); }\n\
+             function forwarding(callback: () => void) { invoke(callback); }\n\
+             function caller() {\n\
+               never(selected);\n\
+               defaulted(selected);\n\
+               invoke(() => selected());\n\
+             }\n\
+             class First { ambiguous(callback: () => void) { callback(); } }\n\
+             class Second { ambiguous(callback: () => void) { callback(); } }\n\
+             function unknown(value: any) { value.ambiguous(selected); }\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        for name in ["invoke", "never", "defaulted", "ambiguous"] {
+            for symbol in engine
+                .search(name, 20)
+                .unwrap()
+                .into_iter()
+                .filter(|hit| hit.symbol.name == name)
+            {
+                assert!(engine
+                    .callees(&symbol.symbol.id)
+                    .unwrap()
+                    .iter()
+                    .all(|(_, evidence)| evidence.provenance != "dynamic/callback-argument"));
+            }
+        }
+    }
+
+    #[test]
+    fn callback_argument_relationships_are_removed_incrementally() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("main.ts");
+        fs::write(
+            &path,
+            "function selected() {}\n\
+             function invoke(callback: () => void) { callback(); }\n\
+             function caller() { invoke(selected); }\n",
+        )
+        .unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let invoke = engine
+            .search("invoke", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.name == "invoke")
+            .unwrap()
+            .symbol;
+        assert!(engine
+            .callees(&invoke.id)
+            .unwrap()
+            .iter()
+            .any(|(_, evidence)| evidence.provenance == "dynamic/callback-argument"));
+
+        fs::write(
+            &path,
+            "function selected() {}\n\
+             function invoke(callback: () => void) { callback(); }\n\
+             function caller() {}\n",
+        )
+        .unwrap();
+        engine.sync().unwrap();
+        assert!(engine
+            .callees(&invoke.id)
+            .unwrap()
+            .iter()
+            .all(|(_, evidence)| evidence.provenance != "dynamic/callback-argument"));
+    }
+
+    #[test]
     fn call_resolution_refuses_unbounded_ambiguous_fanout() {
         let temp = tempfile::tempdir().unwrap();
         let candidates = "def shared():\n    return 1\n".repeat(7);
