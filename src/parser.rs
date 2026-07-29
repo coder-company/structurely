@@ -1,7 +1,7 @@
 use crate::model::{
-    CallbackArgumentFact, CallbackParameterDelegationFact, CallbackParameterInvocation, Evidence,
-    FileFacts, Language, Relationship, RelationshipKind, SourceSpan, Symbol, SymbolKind,
-    UnresolvedCall, UnresolvedReference,
+    CallableReturnFact, CallbackArgumentFact, CallbackParameterDelegationFact,
+    CallbackParameterInvocation, Evidence, FileFacts, Language, Relationship, RelationshipKind,
+    SourceSpan, Symbol, SymbolKind, UnresolvedCall, UnresolvedReference,
 };
 use crate::semantic::enrich_file_facts;
 use anyhow::{anyhow, Context, Result};
@@ -54,6 +54,22 @@ pub(crate) fn parse_file_as(
         &mut symbols,
     );
     disambiguate_duplicate_symbols(&mut symbols);
+    let mut callable_returns = Vec::new();
+    if matches!(
+        language,
+        Language::TypeScript | Language::Tsx | Language::ArkTs
+    ) {
+        let symbols_by_span = symbols
+            .iter()
+            .map(|symbol| ((symbol.start_byte, symbol.end_byte), symbol.id.as_str()))
+            .collect::<HashMap<_, _>>();
+        collect_callable_returns(
+            tree.root_node(),
+            source_bytes,
+            &symbols_by_span,
+            &mut callable_returns,
+        );
+    }
 
     let mut relationships = Vec::new();
     for symbol in symbols.iter().skip(1) {
@@ -135,6 +151,7 @@ pub(crate) fn parse_file_as(
         callback_parameter_invocations,
         callback_parameter_delegations,
         callback_arguments,
+        callable_returns,
         arkui_builder_flow: Default::default(),
         unresolved_references,
         dynamic_events: Vec::new(),
@@ -143,6 +160,60 @@ pub(crate) fn parse_file_as(
     };
     enrich_file_facts(tree.root_node(), source_bytes, &mut facts);
     Ok(facts)
+}
+
+fn collect_callable_returns(
+    node: Node<'_>,
+    source: &[u8],
+    symbols_by_span: &HashMap<(usize, usize), &str>,
+    output: &mut Vec<CallableReturnFact>,
+) {
+    if matches!(node.kind(), "function_declaration" | "method_definition") {
+        if let (Some(owner_id), Some(return_type)) = (
+            symbols_by_span.get(&(node.start_byte(), node.end_byte())),
+            node.child_by_field_name("return_type")
+                .and_then(|annotation| simple_nominal_return_type(annotation, source)),
+        ) {
+            output.push(CallableReturnFact {
+                owner_id: (*owner_id).to_owned(),
+                type_name: return_type,
+            });
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_callable_returns(child, source, symbols_by_span, output);
+    }
+}
+
+fn simple_nominal_return_type(annotation: Node<'_>, source: &[u8]) -> Option<String> {
+    let raw = node_text(annotation, source);
+    let name = raw.trim().trim_start_matches(':').trim();
+    let mut chars = name.chars();
+    let first = chars.next()?;
+    (first == '_' || first == '$' || first.is_ascii_alphabetic())
+        .then_some(())
+        .filter(|_| {
+            chars.all(|character| {
+                character == '_' || character == '$' || character.is_ascii_alphanumeric()
+            })
+        })?;
+    (!matches!(
+        name,
+        "any"
+            | "unknown"
+            | "never"
+            | "void"
+            | "undefined"
+            | "null"
+            | "string"
+            | "number"
+            | "boolean"
+            | "bigint"
+            | "symbol"
+            | "object"
+    ))
+    .then(|| name.to_owned())
 }
 
 fn collect_dart_body_owners(
@@ -971,6 +1042,7 @@ fn collect_calls(
                         context.source,
                         context.receiver_bindings,
                     ),
+                    receiver_call_start_byte: call_result_receiver(function),
                     target_file_hint: call_receiver_name(function, context.source)
                         .and_then(|receiver| context.module_bindings.get(&receiver).cloned()),
                     provenance: "tree-sitter/name-resolution".to_owned(),
@@ -1012,6 +1084,18 @@ fn collect_calls(
             callback_arguments,
         );
     }
+}
+
+fn call_result_receiver(function: Node<'_>) -> Option<usize> {
+    let receiver = function
+        .child_by_field_name("object")
+        .or_else(|| function.child_by_field_name("operand"))
+        .or_else(|| function.child_by_field_name("value"))?;
+    matches!(
+        receiver.kind(),
+        "call_expression" | "arkui_component_expression"
+    )
+    .then(|| receiver.start_byte())
 }
 
 fn collect_module_bindings(

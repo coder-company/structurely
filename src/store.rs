@@ -15,6 +15,7 @@ const SCHEMA_VERSION: u32 = 1;
 const WAL_AUTOCHECKPOINT_PAGES: u32 = 256;
 const JOURNAL_SIZE_LIMIT_BYTES: u64 = 16 * 1024 * 1024;
 const INLINE_CALLBACK_DEPTH_CAP: usize = 16;
+const CALL_RESULT_DEPENDENT_CAP: usize = 100_000;
 
 pub struct Store {
     connection: Connection,
@@ -164,6 +165,7 @@ impl Store {
                 callee_name TEXT NOT NULL,
                 receiver_binding TEXT,
                 receiver_type TEXT,
+                receiver_call_start_byte INTEGER,
                 target_file_hint TEXT,
                 provenance TEXT NOT NULL DEFAULT 'tree-sitter/name-resolution',
                 confidence REAL NOT NULL DEFAULT 1.0,
@@ -175,6 +177,13 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS unresolved_calls_name_idx
                 ON unresolved_calls(callee_name);
+            CREATE TABLE IF NOT EXISTS callable_return_types (
+                owner_public_id TEXT PRIMARY KEY,
+                file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                type_name TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS callable_return_types_file_idx
+                ON callable_return_types(file_id);
             CREATE TABLE IF NOT EXISTS callback_parameter_invocations (
                 file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
                 owner_public_id TEXT NOT NULL,
@@ -281,6 +290,12 @@ impl Store {
         Self::ensure_column(
             &self.connection,
             "unresolved_calls",
+            "receiver_call_start_byte",
+            "INTEGER",
+        )?;
+        Self::ensure_column(
+            &self.connection,
+            "unresolved_calls",
             "receiver_binding",
             "TEXT",
         )?;
@@ -378,6 +393,7 @@ impl Store {
                 target_qualified_name TEXT NOT NULL,
                 resolution_confidence REAL NOT NULL,
                 resolution_scope TEXT NOT NULL,
+                relationship_explanation TEXT NOT NULL,
                 PRIMARY KEY(call_id,target_public_id)
             ) WITHOUT ROWID;
             ",
@@ -746,10 +762,10 @@ impl Store {
             tx.prepare_cached(
                 "INSERT INTO unresolved_calls(
                     file_id,caller_public_id,fallback_caller_public_id,
-                    callee_name,receiver_binding,receiver_type,
+                    callee_name,receiver_binding,receiver_type,receiver_call_start_byte,
                     target_file_hint,provenance,confidence,explanation,resolvable,
                     evidence_file,evidence_line,start_byte
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             )?
             .execute(params![
                 file_id,
@@ -758,6 +774,7 @@ impl Store {
                 call.callee_name,
                 call.receiver_binding,
                 call.receiver_type,
+                call.receiver_call_start_byte.map(|value| value as i64),
                 call.target_file_hint,
                 call.provenance,
                 call.confidence,
@@ -766,6 +783,17 @@ impl Store {
                 call.file,
                 call.line as i64,
                 call.start_byte as i64
+            ])?;
+        }
+        for callable_return in &file.callable_returns {
+            tx.prepare_cached(
+                "INSERT INTO callable_return_types(owner_public_id,file_id,type_name)
+                 VALUES (?1,?2,?3)",
+            )?
+            .execute(params![
+                callable_return.owner_id,
+                file_id,
+                callable_return.type_name
             ])?;
         }
         for invocation in &file.callback_parameter_invocations {
@@ -954,7 +982,8 @@ impl Store {
                     u.target_file_hint,u.provenance,u.confidence,u.explanation,
                     u.evidence_file,u.evidence_line,
                     COALESCE(primary_symbol.language,fallback_symbol.language),
-                    u.file_id,u.resolvable,u.start_byte,u.fallback_caller_public_id
+                    u.file_id,u.resolvable,u.start_byte,u.fallback_caller_public_id,
+                    u.receiver_call_start_byte
              FROM unresolved_calls u
              LEFT JOIN symbols primary_symbol
                     ON primary_symbol.public_id=u.caller_public_id
@@ -964,7 +993,7 @@ impl Store {
                 OR fallback_symbol.public_id IS NOT NULL
              ORDER BY u.evidence_file,u.evidence_line,u.id",
         )?;
-        let calls = calls_statement
+        let mut calls = calls_statement
             .query_map([], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
@@ -983,10 +1012,21 @@ impl Store {
                     row.get::<_, bool>(13)?,
                     row.get::<_, i64>(14)? as usize,
                     row.get::<_, Option<String>>(15)?,
+                    row.get::<_, Option<i64>>(16)?.map(|value| value as usize),
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(calls_statement);
+        calls.sort_by_key(|call| call.16.is_some());
+        let receiver_callsite_keys = calls
+            .iter()
+            .filter_map(|call| {
+                call.16
+                    .map(|receiver_start| (call.12, call.1.clone(), receiver_start))
+            })
+            .collect::<HashSet<_>>();
+        let resolve_call_results =
+            call_result_resolution_enabled(calls.iter().filter(|call| call.16.is_some()).count());
 
         type Candidate = (String, String, i64, String);
         let mut direct_candidates = HashMap::<(String, String), Vec<Candidate>>::new();
@@ -1099,6 +1139,82 @@ impl Store {
                 .collect::<rusqlite::Result<HashSet<_>>>()?;
             bindings
         };
+        let return_summaries = {
+            let mut statement = tx.prepare(
+                "SELECT owner_public_id,file_id,type_name
+                 FROM callable_return_types
+                 ORDER BY owner_public_id",
+            )?;
+            let summaries = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        (row.get::<_, i64>(1)?, row.get::<_, String>(2)?),
+                    ))
+                })?
+                .collect::<rusqlite::Result<HashMap<_, _>>>()?;
+            summaries
+        };
+        type NominalType = (String, i64, String);
+        let mut local_nominal_types = HashMap::<(i64, String), Vec<NominalType>>::new();
+        {
+            let mut statement = tx.prepare(
+                "SELECT s.file_id,s.name,s.qualified_name,f.path
+                 FROM symbols s
+                 JOIN files f ON f.id=s.file_id
+                 WHERE s.kind IN ('class','struct','interface')
+                 ORDER BY s.file_id,s.name,s.qualified_name,s.public_id",
+            )?;
+            for row in statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+            {
+                local_nominal_types
+                    .entry((row.0, row.1))
+                    .or_default()
+                    .push((row.2, row.0, row.3));
+            }
+        }
+        let mut imported_nominal_types = HashMap::<(i64, String), Vec<NominalType>>::new();
+        {
+            let mut statement = tx.prepare(
+                "SELECT b.file_id,b.binding_name,s.qualified_name,s.file_id,f.path
+                 FROM import_bindings b
+                 JOIN symbols s ON s.public_id=b.target_public_id
+                 JOIN files f ON f.id=s.file_id
+                 WHERE s.kind IN ('class','struct','interface')
+                 ORDER BY b.file_id,b.binding_name,s.qualified_name,s.public_id",
+            )?;
+            for row in statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+            {
+                imported_nominal_types
+                    .entry((row.0, row.1))
+                    .or_default()
+                    .push((row.2, row.3, row.4));
+            }
+        }
+        type ResolvedCallsiteTarget = (String, String, f64, String);
+        let mut resolved_callsite_targets =
+            HashMap::<(i64, String, usize), Vec<ResolvedCallsiteTarget>>::new();
+        let mut nominal_result_cache = HashMap::<(i64, String), Option<(NominalType, f64)>>::new();
+        let mut imported_receiver_cache = HashMap::<(i64, String), Option<NominalType>>::new();
         for (
             call_id,
             caller_id,
@@ -1114,16 +1230,108 @@ impl Store {
             language,
             file_id,
             resolvable,
-            _start_byte,
+            start_byte,
             fallback_caller_id,
+            receiver_call_start_byte,
         ) in calls
         {
             if !resolvable {
                 continue;
             }
             let receiver_binding = receiver_binding.unwrap_or_default();
-            let receiver_type = receiver_type.unwrap_or_default();
-            let target_file_hint = target_file_hint.unwrap_or_default();
+            let mut receiver_type = receiver_type.unwrap_or_default();
+            let mut target_file_hint = target_file_hint.unwrap_or_default();
+            let mut inferred_factory = None::<(String, String)>;
+            let mut inferred_confidence = 1.0_f64;
+            if receiver_type.is_empty() && !receiver_binding.is_empty() {
+                let receiver_key = (file_id, receiver_binding.clone());
+                if !imported_receiver_cache.contains_key(&receiver_key) {
+                    let mut imported_receivers = imported_nominal_types
+                        .get(&receiver_key)
+                        .cloned()
+                        .unwrap_or_default();
+                    imported_receivers.sort();
+                    imported_receivers.dedup();
+                    let unique = if imported_receivers.len() == 1 {
+                        imported_receivers.pop()
+                    } else {
+                        None
+                    };
+                    imported_receiver_cache.insert(receiver_key.clone(), unique);
+                }
+                if let Some(imported_receiver) = imported_receiver_cache[&receiver_key].as_ref() {
+                    receiver_type = imported_receiver.0.clone();
+                    target_file_hint = imported_receiver.2.clone();
+                    inferred_confidence = 0.97;
+                }
+            }
+            if let Some(receiver_call_start_byte) = receiver_call_start_byte {
+                if !resolve_call_results {
+                    continue;
+                }
+                let Some(receiver_targets) = resolved_callsite_targets.get(&(
+                    file_id,
+                    caller_id.clone(),
+                    receiver_call_start_byte,
+                )) else {
+                    continue;
+                };
+                if receiver_targets.len() != 1 {
+                    continue;
+                }
+                let (factory_id, factory_qualified, factory_confidence, factory_scope) =
+                    &receiver_targets[0];
+                let Some((factory_file_id, return_type)) = return_summaries.get(factory_id) else {
+                    continue;
+                };
+                let nominal_key = (*factory_file_id, return_type.clone());
+                if !nominal_result_cache.contains_key(&nominal_key) {
+                    let mut nominal_targets = local_nominal_types
+                        .get(&nominal_key)
+                        .cloned()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|target| (target, 0.995_f64))
+                        .collect::<Vec<_>>();
+                    nominal_targets.extend(
+                        imported_nominal_types
+                            .get(&nominal_key)
+                            .cloned()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|target| (target, 0.97_f64)),
+                    );
+                    nominal_targets.sort_by(|left, right| left.0.cmp(&right.0));
+                    nominal_targets.dedup_by(|left, right| {
+                        if left.0 == right.0 {
+                            left.1 = left.1.max(right.1);
+                            true
+                        } else {
+                            false
+                        }
+                    });
+                    let unique = if nominal_targets.len() == 1 {
+                        nominal_targets.pop()
+                    } else {
+                        None
+                    };
+                    nominal_result_cache.insert(nominal_key.clone(), unique);
+                }
+                let Some((nominal_target, nominal_confidence)) =
+                    nominal_result_cache[&nominal_key].as_ref()
+                else {
+                    continue;
+                };
+                receiver_type = nominal_target.0.clone();
+                target_file_hint = nominal_target.2.clone();
+                inferred_factory = Some((factory_qualified.clone(), factory_scope.clone()));
+                inferred_confidence = inferred_confidence
+                    .min(*factory_confidence)
+                    .min(*nominal_confidence);
+                if factory_scope.is_empty() {
+                    continue;
+                }
+            }
             let cache_key = (
                 callee_name.clone(),
                 language.clone(),
@@ -1239,6 +1447,9 @@ impl Store {
             if target_count > CALL_FANOUT_CAP {
                 continue;
             }
+            if inferred_factory.is_some() && target_count != 1 {
+                continue;
+            }
             let resolution_confidence: f64 = match (best_rank, target_count) {
                 (0, 1) => 0.995,
                 (1, 1) => 0.99,
@@ -1257,22 +1468,56 @@ impl Store {
                 (false, 3) => "verified Harmony project import scope",
                 _ => "language-wide fallback",
             };
+            let relationship_explanation = inferred_factory
+                .as_ref()
+                .map(|(factory, factory_scope)| {
+                    format!(
+                        "{explanation}; receiver resolves from {factory}'s explicit return \
+                         annotation after the factory resolved through {factory_scope}"
+                    )
+                })
+                .unwrap_or_else(|| explanation.clone());
+            let effective_confidence = fact_confidence
+                .min(resolution_confidence)
+                .min(inferred_confidence);
             for (target_id, qualified_name, _) in
                 targets.iter().take_while(|target| target.2 == best_rank)
             {
                 tx.prepare_cached(
                     "INSERT OR REPLACE INTO resolved_call_targets(
                         call_id,target_public_id,target_qualified_name,
-                        resolution_confidence,resolution_scope
-                     ) VALUES (?1,?2,?3,?4,?5)",
+                        resolution_confidence,resolution_scope,relationship_explanation
+                     ) VALUES (?1,?2,?3,?4,?5,?6)",
                 )?
                 .execute(params![
                     call_id,
                     target_id,
                     qualified_name,
-                    resolution_confidence,
-                    scope
+                    effective_confidence,
+                    scope,
+                    relationship_explanation
                 ])?;
+                let callsite_key = (file_id, caller_id.clone(), start_byte);
+                if receiver_callsite_keys.contains(&callsite_key) {
+                    let callsite_targets =
+                        resolved_callsite_targets.entry(callsite_key).or_default();
+                    let correlated = (
+                        target_id.clone(),
+                        qualified_name.clone(),
+                        effective_confidence,
+                        scope.to_owned(),
+                    );
+                    if let Some(existing) = callsite_targets
+                        .iter_mut()
+                        .find(|existing| existing.0 == *target_id)
+                    {
+                        if correlated.2 < existing.2 {
+                            *existing = correlated;
+                        }
+                    } else {
+                        callsite_targets.push(correlated);
+                    }
+                }
                 if fallback_caller_id.is_some() {
                     continue;
                 }
@@ -1284,14 +1529,15 @@ impl Store {
                         kind: RelationshipKind::Calls,
                         evidence: Evidence::new(
                             &provenance,
-                            fact_confidence.min(resolution_confidence),
-                            if resolution_confidence >= 0.75 {
+                            effective_confidence,
+                            if effective_confidence >= 0.75 {
                                 format!(
-                                    "{explanation}; target resolves to {qualified_name} through {scope}"
+                                    "{relationship_explanation}; target resolves to \
+                                     {qualified_name} through {scope}"
                                 )
                             } else {
                                 format!(
-                                    "{explanation}; {scope} has multiple candidates; \
+                                    "{relationship_explanation}; {scope} has multiple candidates; \
                                      {qualified_name} is a possible target"
                                 )
                             },
@@ -1309,9 +1555,9 @@ impl Store {
     fn publish_deferred_inline_calls(tx: &Transaction<'_>) -> Result<usize> {
         let mut statement = tx.prepare(
             "SELECT COALESCE(primary_symbol.public_id,fallback_symbol.public_id),
-                    u.provenance,u.confidence,u.explanation,u.evidence_file,u.evidence_line,
+                    u.provenance,u.confidence,u.evidence_file,u.evidence_line,
                     t.target_public_id,t.target_qualified_name,
-                    t.resolution_confidence,t.resolution_scope
+                    t.resolution_confidence,t.resolution_scope,t.relationship_explanation
              FROM unresolved_calls u
              JOIN resolved_call_targets t ON t.call_id=u.id
              LEFT JOIN symbols primary_symbol
@@ -1330,11 +1576,11 @@ impl Store {
                     row.get::<_, String>(1)?,
                     row.get::<_, f64>(2)?,
                     row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, i64>(5)? as usize,
+                    row.get::<_, i64>(4)? as usize,
+                    row.get::<_, String>(5)?,
                     row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, f64>(8)?,
+                    row.get::<_, f64>(7)?,
+                    row.get::<_, String>(8)?,
                     row.get::<_, String>(9)?,
                 ))
             })?
@@ -1345,13 +1591,13 @@ impl Store {
             caller_id,
             provenance,
             fact_confidence,
-            explanation,
             file,
             line,
             target_id,
             qualified_name,
             resolution_confidence,
             scope,
+            relationship_explanation,
         ) in rows
         {
             Self::insert_relationship(
@@ -1365,11 +1611,12 @@ impl Store {
                         fact_confidence.min(resolution_confidence),
                         if resolution_confidence >= 0.75 {
                             format!(
-                                "{explanation}; target resolves to {qualified_name} through {scope}"
+                                "{relationship_explanation}; target resolves to {qualified_name} \
+                                 through {scope}"
                             )
                         } else {
                             format!(
-                                "{explanation}; {scope} has multiple candidates; \
+                                "{relationship_explanation}; {scope} has multiple candidates; \
                                  {qualified_name} is a possible target"
                             )
                         },
@@ -3260,6 +3507,10 @@ fn search_terms(query: &str) -> Vec<String> {
     }
 }
 
+fn call_result_resolution_enabled(dependent_calls: usize) -> bool {
+    dependent_calls <= CALL_RESULT_DEPENDENT_CAP
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3287,6 +3538,14 @@ mod tests {
             search_terms("How does AuthService login_user work?"),
             ["authservice", "auth", "service", "login", "user"]
         );
+    }
+
+    #[test]
+    fn call_result_resolution_cap_is_inclusive_and_fail_closed() {
+        assert!(call_result_resolution_enabled(CALL_RESULT_DEPENDENT_CAP));
+        assert!(!call_result_resolution_enabled(
+            CALL_RESULT_DEPENDENT_CAP + 1
+        ));
     }
 
     #[test]
@@ -3351,6 +3610,17 @@ mod tests {
         assert!(call_columns.contains(&"explanation".to_owned()));
         assert!(call_columns.contains(&"resolvable".to_owned()));
         assert!(call_columns.contains(&"start_byte".to_owned()));
+        assert!(call_columns.contains(&"receiver_call_start_byte".to_owned()));
+        let callable_returns_exist = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type='table' AND name='callable_return_types'",
+                [],
+                |row| row.get::<_, usize>(0),
+            )
+            .unwrap();
+        assert_eq!(callable_returns_exist, 1);
         let delegations_exist = store
             .connection
             .query_row(

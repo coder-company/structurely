@@ -1102,7 +1102,7 @@ mod tests {
         let connection = rusqlite::Connection::open(database).unwrap();
         connection
             .execute(
-                "UPDATE metadata SET value='45' WHERE key='graph_model_version'",
+                "UPDATE metadata SET value='46' WHERE key='graph_model_version'",
                 [],
             )
             .unwrap();
@@ -1409,6 +1409,259 @@ mod tests {
         assert_eq!(callees[0].0.qualified_name, "UserService.save");
         assert_eq!(callees[0].1.confidence, 0.995);
         assert!(callees[0].1.explanation.contains("receiver type"));
+    }
+
+    #[test]
+    fn explicit_return_types_resolve_immediate_call_result_receivers() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("client.ts"),
+            "export class Client { send() {} }\n\
+             export class Other { send() {} }\n",
+        )
+        .unwrap();
+        let factory = temp.path().join("factory.ts");
+        let factory_source = |first_return: &str| {
+            format!(
+                "import {{ Client, Other }} from './client'\n\
+                 export function makeClient(): {first_return} {{ return new Client() }}\n\
+                 export function makeOther(): Other {{ return new Other() }}\n\
+                 export function inferred() {{ return new Client() }}\n\
+                 export function promised(): Promise<Client> {{ return Promise.resolve(new Client()) }}\n\
+                 export function unioned(): Client | Other {{ return new Client() }}\n"
+            )
+        };
+        fs::write(&factory, factory_source("Client")).unwrap();
+        let caller = temp.path().join("caller.ts");
+        let source =
+            "import { makeClient, makeOther, inferred, promised, unioned } from './factory'\n\
+                      export function run() {\n\
+                        makeClient().send(); makeOther().send();\n\
+                        inferred().send(); promised().send(); unioned().send();\n\
+                      }\n";
+        fs::write(&caller, source).unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let run = engine
+            .search("run", 20)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.qualified_name == "run")
+            .unwrap()
+            .symbol;
+        let result_edges = |engine: &Engine, caller_id: &str| {
+            engine
+                .callees(caller_id)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, evidence)| evidence.explanation.contains("receiver resolves from"))
+                .collect::<Vec<_>>()
+        };
+        let edges = result_edges(&engine, &run.id);
+        assert_eq!(edges.len(), 2);
+        assert!(edges.iter().any(|(target, evidence)| {
+            target.qualified_name == "Client.send"
+                && evidence.explanation.contains("makeClient")
+                && evidence.explanation.contains("explicit return annotation")
+        }));
+        assert!(edges.iter().any(|(target, evidence)| {
+            target.qualified_name == "Other.send" && evidence.explanation.contains("makeOther")
+        }));
+        assert!(edges
+            .iter()
+            .all(|(_, evidence)| evidence.confidence >= 0.97));
+
+        let moved = format!("// comment-only position edit\n{source}");
+        fs::write(&caller, &moved).unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 1);
+        assert_eq!(result_edges(&engine, &run.id).len(), 2);
+
+        fs::write(&factory, factory_source("Other")).unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 1);
+        let retargeted = result_edges(&engine, &run.id);
+        assert_eq!(
+            retargeted
+                .iter()
+                .filter(|(target, _)| target.qualified_name == "Other.send")
+                .count(),
+            1
+        );
+        assert!(retargeted
+            .iter()
+            .all(|(target, _)| target.qualified_name != "Client.send"));
+
+        let clean_temp = tempfile::tempdir().unwrap();
+        fs::write(
+            clean_temp.path().join("client.ts"),
+            "export class Client { send() {} }\n\
+             export class Other { send() {} }\n",
+        )
+        .unwrap();
+        fs::write(
+            clean_temp.path().join("factory.ts"),
+            factory_source("Other"),
+        )
+        .unwrap();
+        fs::write(clean_temp.path().join("caller.ts"), &moved).unwrap();
+        let (clean, _) = Engine::init(clean_temp.path()).unwrap();
+        assert_eq!(
+            serde_json::to_string(&engine.snapshot().unwrap()).unwrap(),
+            serde_json::to_string(&clean.snapshot().unwrap()).unwrap()
+        );
+
+        fs::remove_file(&factory).unwrap();
+        assert_eq!(engine.sync().unwrap().files_deleted, 1);
+        assert!(result_edges(&engine, &run.id).is_empty());
+    }
+
+    #[test]
+    fn arkts_imported_singleton_return_type_resolves_project_methods() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("InputHandler.ets"),
+            "export class InputHandler {\n\
+               static getInstance(): InputHandler { return new InputHandler() }\n\
+               insertText(value: string): void {}\n\
+             }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("KeyItem.ets"),
+            "import { InputHandler } from './InputHandler'\n\
+             export function tap(): void {\n\
+               InputHandler.getInstance().insertText('a')\n\
+             }\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let tap = engine
+            .search("tap", 20)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.qualified_name == "tap")
+            .unwrap()
+            .symbol;
+        let callees = engine.callees(&tap.id).unwrap();
+        assert!(
+            callees.iter().any(|(target, evidence)| {
+                target.qualified_name == "InputHandler.insertText"
+                    && evidence.confidence == 0.97
+                    && evidence
+                        .explanation
+                        .contains("InputHandler.getInstance's explicit return annotation")
+                    && evidence
+                        .explanation
+                        .contains("factory resolved through imported package")
+            }),
+            "{callees:#?}"
+        );
+    }
+
+    #[test]
+    fn call_result_resolution_is_fail_closed_for_ambiguous_generators_and_deep_chains() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("types.ts"),
+            "export class Client { send() {} }\n\
+             export class Unique { next(): Client { return new Client() } }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("factory.ts"),
+            "import { Client, Unique } from './types'\n\
+             interface Client { send(): void }\n\
+             export function ambiguousType(): Client { throw new Error() }\n\
+             export function* generated(): Client { yield new Client() }\n\
+             export function make(): Unique { return new Unique() }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("caller.ts"),
+            "import { ambiguousType, generated, make } from './factory'\n\
+             export function run() {\n\
+               ambiguousType().send()\n\
+               generated().send()\n\
+               make().next().send()\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let run = engine
+            .search("run", 20)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.qualified_name == "run")
+            .unwrap()
+            .symbol;
+        let callees = engine.callees(&run.id).unwrap();
+        assert!(callees.iter().any(|(target, evidence)| {
+            target.qualified_name == "Unique.next"
+                && evidence.explanation.contains("explicit return annotation")
+        }));
+        assert!(callees.iter().all(|(target, evidence)| {
+            target.qualified_name != "Client.send"
+                || !evidence.explanation.contains("explicit return annotation")
+        }));
+    }
+
+    #[test]
+    fn call_result_evidence_survives_accepted_and_fallback_inline_callbacks() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("client.ts"),
+            "export class Client { send() {} }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("factory.ts"),
+            "import { Client } from './client'\n\
+             export function makeClient(): Client { return new Client() }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("caller.ts"),
+            "import { makeClient } from './factory'\n\
+             function invoke(callback: () => void) { callback() }\n\
+             function never(callback: () => void) {}\n\
+             export function caller() {\n\
+               invoke(() => makeClient().send())\n\
+               never(() => makeClient().send())\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let callback = engine
+            .search("<callback invoke argument 1 #1>", 20)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.name == "<callback invoke argument 1 #1>")
+            .unwrap()
+            .symbol;
+        let caller = engine
+            .search("caller", 20)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.qualified_name == "caller")
+            .unwrap()
+            .symbol;
+        for source in [&callback, &caller] {
+            let edges = engine
+                .callees(&source.id)
+                .unwrap()
+                .into_iter()
+                .filter(|(target, evidence)| {
+                    target.qualified_name == "Client.send"
+                        && evidence.explanation.contains("explicit return annotation")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(edges.len(), 1, "source={} edges={edges:#?}", source.name);
+            assert_eq!(edges[0].1.confidence, 0.97);
+            assert!(edges[0]
+                .1
+                .explanation
+                .contains("factory resolved through explicit import scope"));
+        }
     }
 
     #[test]

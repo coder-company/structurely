@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path};
 
-pub const GRAPH_MODEL_VERSION: u32 = 46;
+pub const GRAPH_MODEL_VERSION: u32 = 47;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -268,6 +268,7 @@ pub(crate) struct UnresolvedCall {
     pub callee_name: String,
     pub receiver_binding: Option<String>,
     pub receiver_type: Option<String>,
+    pub receiver_call_start_byte: Option<usize>,
     pub target_file_hint: Option<String>,
     pub provenance: String,
     pub confidence: f64,
@@ -276,6 +277,12 @@ pub(crate) struct UnresolvedCall {
     pub file: String,
     pub line: usize,
     pub start_byte: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CallableReturnFact {
+    pub owner_id: String,
+    pub type_name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -423,6 +430,7 @@ pub(crate) struct FileFacts {
     pub callback_parameter_invocations: Vec<CallbackParameterInvocation>,
     pub callback_parameter_delegations: Vec<CallbackParameterDelegationFact>,
     pub callback_arguments: Vec<CallbackArgumentFact>,
+    pub callable_returns: Vec<CallableReturnFact>,
     pub arkui_builder_flow: ArkuiBuilderFlowFacts,
     pub unresolved_references: Vec<UnresolvedReference>,
     pub dynamic_events: Vec<DynamicEventFact>,
