@@ -1,4 +1,4 @@
-use crate::model::{CIncludeResolution, EventChannel, FileFacts};
+use crate::model::{CCompilerMacroAction, CIncludeResolution, EventChannel, FileFacts};
 use globset::{Glob, GlobSetBuilder};
 use ignore::WalkBuilder;
 use std::{
@@ -31,10 +31,16 @@ struct CppIncludePaths {
     general: Vec<PathBuf>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct CppTranslationUnitContext {
+    includes: CppIncludePaths,
+    compiler_macros: Vec<CCompilerMacroAction>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct CppCompileContext {
-    by_source: HashMap<String, Vec<CppIncludePaths>>,
-    shared: Option<CppIncludePaths>,
+    by_source: HashMap<String, Vec<CppTranslationUnitContext>>,
+    shared_includes: Option<CppIncludePaths>,
     database_present: bool,
     fingerprint: String,
 }
@@ -144,6 +150,17 @@ impl ProjectResolutionContext {
             facts.language,
             crate::model::Language::C | crate::model::Language::Cpp
         ) {
+            facts.c_function_pointers.compiler_macro_contexts = self
+                .cpp
+                .by_source
+                .get(&facts.path)
+                .map(|contexts| {
+                    contexts
+                        .iter()
+                        .map(|context| context.compiler_macros.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
             for include in &mut facts.c_function_pointers.includes {
                 match self.resolve_cpp_include(&facts.path, &include.path, include.angled) {
                     CppIncludeResolution::Unmanaged => {}
@@ -312,18 +329,32 @@ impl ProjectResolutionContext {
             }
             roots.clear();
         }
-        let contexts = self.cpp.by_source.get(source_file);
-        let inherited = self.cpp.shared.as_ref().map(std::slice::from_ref);
-        let Some(contexts) = contexts.map(Vec::as_slice).or(inherited) else {
+        let contexts = self
+            .cpp
+            .by_source
+            .get(source_file)
+            .map(|contexts| {
+                contexts
+                    .iter()
+                    .map(|context| &context.includes)
+                    .collect::<Vec<_>>()
+            })
+            .or_else(|| {
+                self.cpp
+                    .shared_includes
+                    .as_ref()
+                    .map(|includes| vec![includes])
+            });
+        let Some(contexts) = contexts else {
             return CppIncludeResolution::Rejected;
         };
         let mut resolved = Vec::new();
-        for paths in contexts {
+        for context in contexts {
             roots.clear();
             if !angled {
-                roots.extend(paths.quote.iter().cloned());
+                roots.extend(context.quote.iter().cloned());
             }
-            roots.extend(paths.general.iter().cloned());
+            roots.extend(context.general.iter().cloned());
             let Some(candidate) = self.resolve_cpp_include_from_roots(include, &roots) else {
                 return CppIncludeResolution::Rejected;
             };
@@ -1030,6 +1061,8 @@ fn load_cpp_compile_context(root: &Path) -> CppCompileContext {
     const MAX_ARGUMENTS: usize = 4_096;
     const MAX_TOKEN_BYTES: usize = 4_096;
     const MAX_INCLUDE_DIRS: usize = 8_192;
+    const MAX_COMPILER_MACRO_ACTIONS: usize = 256;
+    const MAX_COMPILER_MACRO_BYTES: usize = 64 * 1024;
     const CANDIDATES: &[&str] = &[
         "compile_commands.json",
         "build/compile_commands.json",
@@ -1142,8 +1175,17 @@ fn load_cpp_compile_context(root: &Path) -> CppCompileContext {
             ..CppCompileContext::default()
         };
     };
-    let mut by_source = HashMap::<String, Vec<CppIncludePaths>>::new();
-    for entry in entries.into_iter().take(MAX_ENTRIES) {
+    if entries.len() > MAX_ENTRIES {
+        return CppCompileContext {
+            database_present: true,
+            fingerprint: format!("{database_fingerprint}:entry-overflow:v1"),
+            ..CppCompileContext::default()
+        };
+    }
+    let mut by_source = HashMap::<String, Vec<CppTranslationUnitContext>>::new();
+    let mut response_fingerprints = Vec::<String>::new();
+    let mut rejected_sources = HashSet::<String>::new();
+    for entry in entries {
         let directory = entry
             .get("directory")
             .and_then(serde_json::Value::as_str)
@@ -1157,33 +1199,68 @@ fn load_cpp_compile_context(root: &Path) -> CppCompileContext {
                 }
             })
             .unwrap_or_else(|| root.to_owned());
-        let arguments =
-            if let Some(arguments) = entry.get("arguments").and_then(serde_json::Value::as_array) {
-                arguments
-                    .iter()
-                    .take(MAX_ARGUMENTS)
-                    .filter_map(serde_json::Value::as_str)
-                    .filter(|argument| argument.len() <= MAX_TOKEN_BYTES)
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>()
-            } else {
-                entry
-                    .get("command")
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|command| command.len() <= MAX_ARGUMENTS * MAX_TOKEN_BYTES)
-                    .and_then(split_compiler_command)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .take(MAX_ARGUMENTS)
-                    .collect()
-            };
+        let source = entry
+            .get("file")
+            .and_then(serde_json::Value::as_str)
+            .filter(|file| !file.is_empty() && file.len() <= MAX_TOKEN_BYTES)
+            .and_then(|file| {
+                let file = Path::new(file);
+                let absolute = if file.is_absolute() {
+                    file.to_owned()
+                } else {
+                    directory.join(file)
+                };
+                fs::canonicalize(absolute).ok()
+            })
+            .filter(|source| source.is_file())
+            .and_then(|source| {
+                source
+                    .strip_prefix(&canonical_root)
+                    .ok()
+                    .map(normalize_path)
+            });
+        let Some(source) = source else {
+            continue;
+        };
+        let Some(arguments) = compilation_entry_arguments(&entry, MAX_ARGUMENTS, MAX_TOKEN_BYTES)
+        else {
+            rejected_sources.insert(source);
+            continue;
+        };
+        let (arguments, entry_response_fingerprints) = expand_compiler_response_arguments(
+            &arguments,
+            &directory,
+            &canonical_root,
+            MAX_ARGUMENTS,
+            MAX_TOKEN_BYTES,
+        );
+        response_fingerprints.extend(entry_response_fingerprints);
+        let Some(arguments) = arguments else {
+            rejected_sources.insert(source);
+            continue;
+        };
         let mut quote = Vec::new();
         let mut ordinary = Vec::new();
         let mut system = Vec::new();
         let mut after = Vec::new();
-        let mut index = 0usize;
+        let mut compiler_macros = Vec::new();
+        let mut compiler_macro_bytes = 0usize;
+        let mut context_valid = true;
+        let compiler_index = compiler_driver(&arguments).map_or(0, |(_, index)| index);
+        let allow_slash_macros = is_msvc_compiler_driver(&arguments);
+        let mut options_enabled = true;
+        let mut index = compiler_index.saturating_add(1);
         while index < arguments.len() {
             let argument = &arguments[index];
+            if !options_enabled {
+                index += 1;
+                continue;
+            }
+            if argument == "--" {
+                options_enabled = false;
+                index += 1;
+                continue;
+            }
             let (bucket, attached) = if argument == "-iquote" {
                 (Some(&mut quote), None)
             } else if let Some(value) = argument.strip_prefix("-iquote") {
@@ -1203,6 +1280,25 @@ fn load_cpp_compile_context(root: &Path) -> CppCompileContext {
                 .or_else(|| argument.strip_prefix("/I"))
             {
                 (Some(&mut ordinary), (!value.is_empty()).then_some(value))
+            } else if is_compiler_macro_option(argument, allow_slash_macros) {
+                if let Some((action, consumed_next)) =
+                    parse_compiler_macro_action(&arguments, index, allow_slash_macros)
+                {
+                    compiler_macro_bytes =
+                        compiler_macro_bytes.saturating_add(c_compiler_macro_action_bytes(&action));
+                    compiler_macros.push(action);
+                    if compiler_macros.len() > MAX_COMPILER_MACRO_ACTIONS
+                        || compiler_macro_bytes > MAX_COMPILER_MACRO_BYTES
+                    {
+                        context_valid = false;
+                    }
+                    if consumed_next {
+                        index += 1;
+                    }
+                } else {
+                    context_valid = false;
+                }
+                (None, None)
             } else {
                 (None, None)
             };
@@ -1238,40 +1334,26 @@ fn load_cpp_compile_context(root: &Path) -> CppCompileContext {
             }
             index += 1;
         }
+        if !context_valid {
+            rejected_sources.insert(source);
+            continue;
+        }
         let mut general = ordinary;
         general.extend(system);
         general.extend(after);
         quote.truncate(MAX_INCLUDE_DIRS);
         general.truncate(MAX_INCLUDE_DIRS);
-        let source = entry
-            .get("file")
-            .and_then(serde_json::Value::as_str)
-            .filter(|file| !file.is_empty() && file.len() <= MAX_TOKEN_BYTES)
-            .and_then(|file| {
-                let file = Path::new(file);
-                let absolute = if file.is_absolute() {
-                    file.to_owned()
-                } else {
-                    directory.join(file)
-                };
-                fs::canonicalize(absolute).ok()
-            })
-            .filter(|source| source.is_file())
-            .and_then(|source| {
-                source
-                    .strip_prefix(&canonical_root)
-                    .ok()
-                    .map(normalize_path)
+        by_source
+            .entry(source)
+            .or_default()
+            .push(CppTranslationUnitContext {
+                includes: CppIncludePaths { quote, general },
+                compiler_macros,
             });
-        if let Some(source) = source {
-            by_source
-                .entry(source)
-                .or_default()
-                .push(CppIncludePaths { quote, general });
-        }
     }
     for contexts in by_source.values_mut() {
-        for paths in contexts.iter_mut() {
+        for context in contexts.iter_mut() {
+            let paths = &mut context.includes;
             let mut quote_seen = HashSet::new();
             paths
                 .quote
@@ -1284,21 +1366,40 @@ fn load_cpp_compile_context(root: &Path) -> CppCompileContext {
             paths.general.truncate(MAX_INCLUDE_DIRS);
         }
         contexts.sort_by(|left, right| {
-            left.quote
-                .cmp(&right.quote)
-                .then_with(|| left.general.cmp(&right.general))
+            left.includes
+                .quote
+                .cmp(&right.includes.quote)
+                .then_with(|| left.includes.general.cmp(&right.includes.general))
+                .then_with(|| left.compiler_macros.cmp(&right.compiler_macros))
         });
         contexts.dedup();
     }
-    let mut all_contexts = by_source.values().flatten();
-    let shared = all_contexts
-        .next()
-        .cloned()
-        .filter(|first| all_contexts.all(|candidate| candidate == first));
-    let fingerprint = cpp_context_fingerprint(&database_fingerprint, &by_source);
+    for source in &rejected_sources {
+        by_source.remove(source);
+    }
+    let mut context_overflow = false;
+    by_source.retain(|_, contexts| {
+        let accepted = contexts.len() <= 32;
+        context_overflow |= !accepted;
+        accepted
+    });
+    let mut all_includes = by_source
+        .values()
+        .flatten()
+        .map(|context| &context.includes);
+    let shared_includes = (rejected_sources.is_empty() && !context_overflow)
+        .then(|| {
+            all_includes
+                .next()
+                .cloned()
+                .filter(|first| all_includes.all(|candidate| candidate == first))
+        })
+        .flatten();
+    let fingerprint =
+        cpp_context_fingerprint(&database_fingerprint, &by_source, &response_fingerprints);
     CppCompileContext {
         by_source,
-        shared,
+        shared_includes,
         database_present: true,
         fingerprint,
     }
@@ -1306,7 +1407,8 @@ fn load_cpp_compile_context(root: &Path) -> CppCompileContext {
 
 fn cpp_context_fingerprint(
     database_fingerprint: &str,
-    by_source: &HashMap<String, Vec<CppIncludePaths>>,
+    by_source: &HashMap<String, Vec<CppTranslationUnitContext>>,
+    response_fingerprints: &[String],
 ) -> String {
     let mut sources = by_source.iter().collect::<Vec<_>>();
     sources.sort_by(|left, right| left.0.cmp(right.0));
@@ -1317,17 +1419,546 @@ fn cpp_context_fingerprint(
         hasher.update(source.as_bytes());
         for context in contexts {
             hasher.update(&[1]);
-            for directory in &context.quote {
+            for directory in &context.includes.quote {
                 hasher.update(&[2]);
                 hasher.update(normalize_path(directory).as_bytes());
             }
-            for directory in &context.general {
+            for directory in &context.includes.general {
                 hasher.update(&[3]);
                 hasher.update(normalize_path(directory).as_bytes());
             }
+            for action in &context.compiler_macros {
+                hasher.update(&[4]);
+                hasher.update(format!("{action:?}").as_bytes());
+            }
         }
     }
-    format!("cpp-context:{}:v1", hasher.finalize().to_hex())
+    for response in response_fingerprints {
+        hasher.update(&[5]);
+        hasher.update(response.as_bytes());
+    }
+    format!("cpp-context:{}:v2", hasher.finalize().to_hex())
+}
+
+fn compilation_entry_arguments(
+    entry: &serde_json::Value,
+    max_arguments: usize,
+    max_token_bytes: usize,
+) -> Option<Vec<String>> {
+    let arguments =
+        if let Some(arguments) = entry.get("arguments").and_then(serde_json::Value::as_array) {
+            if arguments.len() > max_arguments {
+                return None;
+            }
+            arguments
+                .iter()
+                .map(serde_json::Value::as_str)
+                .collect::<Option<Vec<_>>>()?
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        } else {
+            let command = entry.get("command")?.as_str()?;
+            if command.len() > max_arguments.saturating_mul(max_token_bytes) {
+                return None;
+            }
+            split_compiler_command(command)?
+        };
+    (arguments.len() <= max_arguments
+        && arguments
+            .iter()
+            .all(|argument| argument.len() <= max_token_bytes))
+    .then_some(arguments)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CompilerResponseDialect {
+    Gnu,
+    Unsupported,
+}
+
+fn compiler_response_dialect(arguments: &[String]) -> CompilerResponseDialect {
+    let driver = compiler_driver_name(arguments).unwrap_or_default();
+    if matches!(
+        driver.as_str(),
+        "cc" | "c++"
+            | "gcc"
+            | "g++"
+            | "clang"
+            | "clang++"
+            | "gcc.exe"
+            | "g++.exe"
+            | "clang.exe"
+            | "clang++.exe"
+    ) {
+        CompilerResponseDialect::Gnu
+    } else {
+        CompilerResponseDialect::Unsupported
+    }
+}
+
+struct CompilerResponseExpansion {
+    arguments: Vec<String>,
+    fingerprints: Vec<String>,
+    active: HashSet<PathBuf>,
+    files: usize,
+    bytes: u64,
+    valid: bool,
+}
+
+fn expand_compiler_response_arguments(
+    arguments: &[String],
+    directory: &Path,
+    canonical_root: &Path,
+    max_arguments: usize,
+    max_token_bytes: usize,
+) -> (Option<Vec<String>>, Vec<String>) {
+    let mut expansion = CompilerResponseExpansion {
+        arguments: Vec::new(),
+        fingerprints: Vec::new(),
+        active: HashSet::new(),
+        files: 0,
+        bytes: 0,
+        valid: true,
+    };
+    let dialect = compiler_response_dialect(arguments);
+    expand_compiler_response_tokens(
+        arguments,
+        directory,
+        canonical_root,
+        dialect,
+        0,
+        max_arguments,
+        max_token_bytes,
+        &mut expansion,
+    );
+    let arguments = (expansion.valid && expansion.arguments.len() <= max_arguments)
+        .then_some(expansion.arguments);
+    (arguments, expansion.fingerprints)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn expand_compiler_response_tokens(
+    tokens: &[String],
+    directory: &Path,
+    canonical_root: &Path,
+    dialect: CompilerResponseDialect,
+    depth: usize,
+    max_arguments: usize,
+    max_token_bytes: usize,
+    expansion: &mut CompilerResponseExpansion,
+) {
+    const MAX_RESPONSE_DEPTH: usize = 8;
+    const MAX_RESPONSE_FILES: usize = 32;
+    const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
+    if !expansion.valid {
+        return;
+    }
+    for token in tokens {
+        let Some(response) = token.strip_prefix('@').filter(|path| !path.is_empty()) else {
+            if token.len() > max_token_bytes || expansion.arguments.len() >= max_arguments {
+                expansion.valid = false;
+                return;
+            }
+            expansion.arguments.push(token.clone());
+            continue;
+        };
+        if dialect != CompilerResponseDialect::Gnu
+            || depth >= MAX_RESPONSE_DEPTH
+            || expansion.files >= MAX_RESPONSE_FILES
+        {
+            expansion
+                .fingerprints
+                .push(format!("rejected:{response}:dialect-or-cap"));
+            expansion.valid = false;
+            return;
+        }
+        let candidate = directory.join(response);
+        let Some((canonical, bytes)) = read_project_response_file(
+            &candidate,
+            canonical_root,
+            MAX_RESPONSE_BYTES.saturating_sub(expansion.bytes),
+        ) else {
+            expansion
+                .fingerprints
+                .push(format!("rejected:{response}:unreadable"));
+            expansion.valid = false;
+            return;
+        };
+        let relative = canonical
+            .strip_prefix(canonical_root)
+            .map(normalize_path)
+            .unwrap_or_else(|_| canonical.display().to_string());
+        expansion
+            .fingerprints
+            .push(format!("{}:{}", relative, blake3::hash(&bytes).to_hex()));
+        if !expansion.active.insert(canonical.clone()) {
+            expansion.fingerprints.push(format!("cycle:{relative}"));
+            expansion.valid = false;
+            return;
+        }
+        expansion.files += 1;
+        expansion.bytes = expansion.bytes.saturating_add(bytes.len() as u64);
+        let Some(source) = std::str::from_utf8(&bytes).ok() else {
+            expansion.valid = false;
+            return;
+        };
+        let Some(nested) = split_gnu_response_file(source) else {
+            expansion.valid = false;
+            return;
+        };
+        if nested.len() > max_arguments
+            || nested
+                .iter()
+                .any(|argument| argument.len() > max_token_bytes)
+        {
+            expansion.valid = false;
+            return;
+        }
+        expand_compiler_response_tokens(
+            &nested,
+            directory,
+            canonical_root,
+            dialect,
+            depth + 1,
+            max_arguments,
+            max_token_bytes,
+            expansion,
+        );
+        expansion.active.remove(&canonical);
+        if !expansion.valid {
+            return;
+        }
+    }
+}
+
+fn read_project_response_file(
+    candidate: &Path,
+    canonical_root: &Path,
+    max_bytes: u64,
+) -> Option<(PathBuf, Vec<u8>)> {
+    let mut file = fs::File::open(candidate).ok()?;
+    let canonical = fs::canonicalize(candidate).ok()?;
+    if !canonical.starts_with(canonical_root) {
+        return None;
+    }
+    let opened = file
+        .try_clone()
+        .and_then(same_file::Handle::from_file)
+        .ok()?;
+    let path_identity = same_file::Handle::from_path(&canonical).ok()?;
+    if opened != path_identity {
+        return None;
+    }
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() > max_bytes {
+        return None;
+    }
+    let modified = metadata.modified().ok()?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    (&mut file)
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let after_metadata = file.metadata().ok()?;
+    if bytes.len() as u64 > max_bytes
+        || after_metadata.len() != metadata.len()
+        || after_metadata.modified().ok()? != modified
+        || fs::canonicalize(candidate).ok().as_ref() != Some(&canonical)
+        || same_file::Handle::from_path(candidate).ok()? != path_identity
+    {
+        return None;
+    }
+    let mut verification_file = fs::File::open(candidate).ok()?;
+    if same_file::Handle::from_file(verification_file.try_clone().ok()?).ok()? != path_identity {
+        return None;
+    }
+    let verification_metadata = verification_file.metadata().ok()?;
+    if verification_metadata.len() != metadata.len()
+        || verification_metadata.modified().ok()? != modified
+    {
+        return None;
+    }
+    let mut verification = Vec::with_capacity(bytes.len());
+    (&mut verification_file)
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut verification)
+        .ok()?;
+    if verification != bytes
+        || verification_file.metadata().ok()?.len() != metadata.len()
+        || verification_file.metadata().ok()?.modified().ok()? != modified
+    {
+        return None;
+    }
+    Some((canonical, bytes))
+}
+
+fn parse_compiler_macro_action(
+    arguments: &[String],
+    index: usize,
+    allow_slash: bool,
+) -> Option<(CCompilerMacroAction, bool)> {
+    let argument = arguments.get(index)?;
+    let (kind, attached) = if argument == "-D" || (allow_slash && argument == "/D") {
+        ('D', None)
+    } else if argument == "-U" || (allow_slash && argument == "/U") {
+        ('U', None)
+    } else if let Some(value) = argument
+        .strip_prefix("-D")
+        .or_else(|| allow_slash.then(|| argument.strip_prefix("/D")).flatten())
+    {
+        ('D', Some(value))
+    } else if let Some(value) = argument
+        .strip_prefix("-U")
+        .or_else(|| allow_slash.then(|| argument.strip_prefix("/U")).flatten())
+    {
+        ('U', Some(value))
+    } else {
+        return None;
+    };
+    let (value, consumed_next) = if let Some(value) = attached.filter(|value| !value.is_empty()) {
+        (value, false)
+    } else {
+        (arguments.get(index + 1)?.as_str(), true)
+    };
+    let action = if kind == 'U' {
+        is_cpp_macro_identifier(value).then(|| CCompilerMacroAction::Undef {
+            name: value.to_owned(),
+        })?
+    } else {
+        parse_compiler_define(value)?
+    };
+    Some((action, consumed_next))
+}
+
+fn is_compiler_macro_option(argument: &str, allow_slash: bool) -> bool {
+    matches!(argument, "-D" | "-U")
+        || argument.starts_with("-D")
+        || argument.starts_with("-U")
+        || (allow_slash
+            && (matches!(argument, "/D" | "/U")
+                || argument.starts_with("/D")
+                || argument.starts_with("/U")))
+}
+
+fn is_msvc_compiler_driver(arguments: &[String]) -> bool {
+    matches!(
+        compiler_driver_name(arguments).as_deref(),
+        Some("cl" | "cl.exe" | "clang-cl" | "clang-cl.exe")
+    )
+}
+
+fn compiler_driver_name(arguments: &[String]) -> Option<String> {
+    compiler_driver(arguments).map(|(name, _)| name)
+}
+
+fn compiler_driver(arguments: &[String]) -> Option<(String, usize)> {
+    const DRIVERS: &[&str] = &[
+        "cc",
+        "c++",
+        "gcc",
+        "g++",
+        "clang",
+        "clang++",
+        "gcc.exe",
+        "g++.exe",
+        "clang.exe",
+        "clang++.exe",
+        "cl",
+        "cl.exe",
+        "clang-cl",
+        "clang-cl.exe",
+    ];
+    const LAUNCHERS: &[&str] = &["ccache", "sccache", "distcc", "icecc"];
+    const MAX_LAUNCHER_DEPTH: usize = 4;
+
+    fn basename(argument: &str) -> Option<String> {
+        Path::new(argument)
+            .file_name()?
+            .to_str()
+            .map(str::to_ascii_lowercase)
+    }
+
+    fn is_environment_assignment(argument: &str) -> bool {
+        let Some((name, _)) = argument.split_once('=') else {
+            return false;
+        };
+        let mut characters = name.chars();
+        matches!(characters.next(), Some(first) if first == '_' || first.is_ascii_alphabetic())
+            && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
+    }
+
+    fn resolve(
+        arguments: &[String],
+        index: usize,
+        depth: usize,
+        drivers: &[&str],
+        launchers: &[&str],
+    ) -> Option<(String, usize)> {
+        if depth > MAX_LAUNCHER_DEPTH {
+            return None;
+        }
+        let name = basename(arguments.get(index)?)?;
+        if drivers.contains(&name.as_str()) {
+            return Some((name, index));
+        }
+        if launchers.contains(&name.as_str()) {
+            return resolve(arguments, index + 1, depth + 1, drivers, launchers);
+        }
+        if name != "env" {
+            return None;
+        }
+
+        let mut command_index = index + 1;
+        while let Some(argument) = arguments.get(command_index) {
+            if argument == "--" {
+                command_index += 1;
+                break;
+            }
+            if is_environment_assignment(argument)
+                || matches!(
+                    argument.as_str(),
+                    "-i" | "--ignore-environment" | "-0" | "--null"
+                )
+                || argument.starts_with("--unset=")
+                || argument.starts_with("--chdir=")
+            {
+                command_index += 1;
+                continue;
+            }
+            if matches!(argument.as_str(), "-u" | "--unset" | "-C" | "--chdir") {
+                arguments.get(command_index + 1)?;
+                command_index += 2;
+                continue;
+            }
+            if argument.starts_with('-') {
+                return None;
+            }
+            break;
+        }
+        resolve(arguments, command_index, depth + 1, drivers, launchers)
+    }
+
+    resolve(arguments, 0, 0, DRIVERS, LAUNCHERS)
+}
+
+fn parse_compiler_define(value: &str) -> Option<CCompilerMacroAction> {
+    const MAX_NAME_BYTES: usize = 256;
+    const MAX_PARAMETERS: usize = 64;
+    const MAX_REPLACEMENT_BYTES: usize = 8 * 1024;
+    let (declaration, replacement) = value.split_once('=').unwrap_or((value, "1"));
+    if declaration.len() > MAX_NAME_BYTES + 1 + MAX_PARAMETERS * (MAX_NAME_BYTES + 1)
+        || replacement.len() > MAX_REPLACEMENT_BYTES
+        || replacement.contains("##")
+        || replacement.contains('#')
+    {
+        return None;
+    }
+    let (name, parameters) = if let Some(open) = declaration.find('(') {
+        if !declaration.ends_with(')') {
+            return None;
+        }
+        let name = &declaration[..open];
+        let raw_parameters = &declaration[open + 1..declaration.len() - 1];
+        let parameters = if raw_parameters.trim().is_empty() {
+            Vec::new()
+        } else {
+            raw_parameters
+                .split(',')
+                .map(str::trim)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        if parameters.len() > MAX_PARAMETERS
+            || parameters
+                .iter()
+                .any(|parameter| !is_cpp_macro_identifier(parameter))
+            || parameters.iter().collect::<HashSet<_>>().len() != parameters.len()
+        {
+            return None;
+        }
+        (name, Some(parameters))
+    } else {
+        (declaration, None)
+    };
+    if name.len() > MAX_NAME_BYTES || !is_cpp_macro_identifier(name) {
+        return None;
+    }
+    Some(CCompilerMacroAction::Define {
+        name: name.to_owned(),
+        parameters,
+        replacement: replacement.to_owned(),
+    })
+}
+
+fn is_cpp_macro_identifier(value: &str) -> bool {
+    let mut characters = value.chars();
+    characters
+        .next()
+        .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+        && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
+}
+
+fn c_compiler_macro_action_bytes(action: &CCompilerMacroAction) -> usize {
+    match action {
+        CCompilerMacroAction::Define {
+            name,
+            parameters,
+            replacement,
+        } => name.len().saturating_add(replacement.len()).saturating_add(
+            parameters
+                .iter()
+                .flatten()
+                .map(String::len)
+                .fold(0usize, usize::saturating_add),
+        ),
+        CCompilerMacroAction::Undef { name } => name.len(),
+    }
+}
+
+fn split_gnu_response_file(source: &str) -> Option<Vec<String>> {
+    let mut output = Vec::new();
+    let mut token = String::new();
+    let mut quote = None::<char>;
+    let mut escaped = false;
+    for character in source.chars() {
+        if escaped {
+            token.push(character);
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if character == delimiter {
+                quote = None;
+            } else {
+                token.push(character);
+            }
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            quote = Some(character);
+        } else if character.is_whitespace() {
+            if !token.is_empty() {
+                output.push(std::mem::take(&mut token));
+            }
+        } else {
+            token.push(character);
+        }
+    }
+    if escaped {
+        return None;
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if !token.is_empty() {
+        output.push(token);
+    }
+    Some(output)
 }
 
 fn split_compiler_command(command: &str) -> Option<Vec<String>> {
@@ -1614,6 +2245,309 @@ mod tests {
             context.resolve_cpp_include("src/shared.h", "config.h", true),
             CppIncludeResolution::Rejected
         );
+    }
+
+    #[test]
+    fn compilation_database_preserves_ordered_macro_variants_and_response_fingerprints() {
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("src")).unwrap();
+        for file in ["src/main.c", "src/shared.h"] {
+            fs::write(root.path().join(file), "int value;\n").unwrap();
+        }
+        fs::write(
+            root.path().join("flags.rsp"),
+            "-DWRAP(x)=x -DSELECT=second\n",
+        )
+        .unwrap();
+        let write_database = || {
+            fs::write(
+                root.path().join("compile_commands.json"),
+                serde_json::to_vec(&serde_json::json!([
+                    {
+                        "directory": root.path(),
+                        "file": "src/main.c",
+                        "arguments": [
+                            "cc",
+                            "-DSELECT=first",
+                            "-USELECT",
+                            "-DSELECT=final",
+                            "src/main.c"
+                        ]
+                    },
+                    {
+                        "directory": root.path(),
+                        "file": "src/main.c",
+                        "arguments": ["cc", "@flags.rsp", "src/main.c"]
+                    }
+                ]))
+                .unwrap(),
+            )
+            .unwrap();
+        };
+        write_database();
+
+        let first = ProjectResolutionContext::load(root.path());
+        let contexts = &first.cpp.by_source["src/main.c"];
+        assert_eq!(contexts.len(), 2);
+        assert!(contexts.iter().any(|context| {
+            context.compiler_macros
+                == [
+                    CCompilerMacroAction::Define {
+                        name: "SELECT".to_owned(),
+                        parameters: None,
+                        replacement: "first".to_owned(),
+                    },
+                    CCompilerMacroAction::Undef {
+                        name: "SELECT".to_owned(),
+                    },
+                    CCompilerMacroAction::Define {
+                        name: "SELECT".to_owned(),
+                        parameters: None,
+                        replacement: "final".to_owned(),
+                    },
+                ]
+        }));
+        assert!(contexts.iter().any(|context| {
+            context.compiler_macros
+                == [
+                    CCompilerMacroAction::Define {
+                        name: "WRAP".to_owned(),
+                        parameters: Some(vec!["x".to_owned()]),
+                        replacement: "x".to_owned(),
+                    },
+                    CCompilerMacroAction::Define {
+                        name: "SELECT".to_owned(),
+                        parameters: None,
+                        replacement: "second".to_owned(),
+                    },
+                ]
+        }));
+        let mut header = crate::parser::parse_file("src/shared.h", "int value;\n").unwrap();
+        first.apply(&mut header);
+        assert!(
+            header
+                .c_function_pointers
+                .compiler_macro_contexts
+                .is_empty(),
+            "divergent TU macro contexts must not be projected onto headers"
+        );
+        let first_fingerprint = first.fingerprint().to_owned();
+        fs::write(
+            root.path().join("flags.rsp"),
+            "-DWRAP(x)=x -DSELECT=changed\n",
+        )
+        .unwrap();
+        let second = ProjectResolutionContext::load(root.path());
+        assert_ne!(second.fingerprint(), first_fingerprint);
+    }
+
+    #[test]
+    fn response_files_fail_closed_on_cycles_unknown_dialects_and_outside_roots() {
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("src")).unwrap();
+        for file in ["src/cycle.c", "src/unknown.c", "src/outside.c"] {
+            fs::write(root.path().join(file), "int value;\n").unwrap();
+        }
+        fs::write(root.path().join("a.rsp"), "@b.rsp\n").unwrap();
+        fs::write(root.path().join("b.rsp"), "@a.rsp\n").unwrap();
+        let outside = tempdir().unwrap();
+        fs::write(outside.path().join("outside.rsp"), "-DOUTSIDE=1\n").unwrap();
+        fs::write(
+            root.path().join("compile_commands.json"),
+            serde_json::to_vec(&serde_json::json!([
+                {
+                    "directory": root.path(),
+                    "file": "src/cycle.c",
+                    "arguments": ["cc", "@a.rsp", "src/cycle.c"]
+                },
+                {
+                    "directory": root.path(),
+                    "file": "src/unknown.c",
+                    "arguments": ["mystery-cc", "@a.rsp", "src/unknown.c"]
+                },
+                {
+                    "directory": root.path(),
+                    "file": "src/outside.c",
+                    "arguments": [
+                        "cc",
+                        format!("@{}", outside.path().join("outside.rsp").display()),
+                        "src/outside.c"
+                    ]
+                }
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let context = ProjectResolutionContext::load(root.path());
+        assert!(context.cpp.by_source.is_empty());
+    }
+
+    #[test]
+    fn compiler_driver_detection_accepts_only_explicit_launcher_chains() {
+        let strings = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            compiler_driver_name(&strings(&["clang", "-c", "src/main.c"])).as_deref(),
+            Some("clang")
+        );
+        assert_eq!(
+            compiler_driver_name(&strings(&["ccache", "clang++", "-c", "src/main.cc"])).as_deref(),
+            Some("clang++")
+        );
+        assert_eq!(
+            compiler_driver_name(&strings(&[
+                "env",
+                "-i",
+                "MODE=release",
+                "--unset",
+                "FLAGS",
+                "sccache",
+                "gcc",
+                "-c",
+                "src/main.c"
+            ]))
+            .as_deref(),
+            Some("gcc")
+        );
+        assert_eq!(
+            compiler_driver_name(&strings(&[
+                "mystery-build",
+                "--tool-name",
+                "clang",
+                "@flags.rsp"
+            ])),
+            None,
+            "an arbitrary operand named clang must not select GNU response syntax"
+        );
+        assert_eq!(
+            compiler_driver_name(&strings(&["env", "--split-string=clang -c", "src/main.c"])),
+            None,
+            "unsupported env options must fail closed"
+        );
+    }
+
+    #[test]
+    fn clang_option_terminator_prevents_operand_macro_parsing() {
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("src")).unwrap();
+        for file in ["src/main.c", "src/env.c"] {
+            fs::write(root.path().join(file), "int value;\n").unwrap();
+        }
+        fs::write(
+            root.path().join("compile_commands.json"),
+            serde_json::to_vec(&serde_json::json!([
+                {
+                    "directory": root.path(),
+                    "file": "src/main.c",
+                    "arguments": ["clang", "-DREAL=target", "--", "-DOPERAND=wrong"]
+                },
+                {
+                    "directory": root.path(),
+                    "file": "src/env.c",
+                    "arguments": ["env", "--", "clang", "-DENV_REAL=target", "src/env.c"]
+                }
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let context = ProjectResolutionContext::load(root.path());
+        let contexts = &context.cpp.by_source["src/main.c"];
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(
+            contexts[0].compiler_macros,
+            [CCompilerMacroAction::Define {
+                name: "REAL".to_owned(),
+                parameters: None,
+                replacement: "target".to_owned(),
+            }]
+        );
+        assert_eq!(
+            context.cpp.by_source["src/env.c"][0].compiler_macros,
+            [CCompilerMacroAction::Define {
+                name: "ENV_REAL".to_owned(),
+                parameters: None,
+                replacement: "target".to_owned(),
+            }],
+            "a launcher delimiter before the compiler must not terminate compiler options"
+        );
+    }
+
+    #[test]
+    fn response_expansion_never_executes_tokens_and_macro_caps_reject_the_tu() {
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("src")).unwrap();
+        fs::write(root.path().join("src/main.c"), "int value;\n").unwrap();
+        let marker = root.path().join("must-not-exist");
+        fs::write(
+            root.path().join("flags.rsp"),
+            format!("-DSELECT=target $(touch {})\n", marker.display()),
+        )
+        .unwrap();
+        let canonical_root = fs::canonicalize(root.path()).unwrap();
+        let (expanded, _) = expand_compiler_response_arguments(
+            &["cc".to_owned(), "@flags.rsp".to_owned()],
+            root.path(),
+            &canonical_root,
+            4_096,
+            4_096,
+        );
+        assert!(expanded.is_some());
+        assert!(!marker.exists(), "response tokens must never be executed");
+
+        let mut arguments = vec!["cc".to_owned()];
+        arguments.extend((0..257).map(|index| format!("-DMACRO_{index}=1")));
+        arguments.push("src/main.c".to_owned());
+        fs::write(
+            root.path().join("compile_commands.json"),
+            serde_json::to_vec(&serde_json::json!([{
+                "directory": root.path(),
+                "file": "src/main.c",
+                "arguments": arguments
+            }]))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            ProjectResolutionContext::load(root.path())
+                .cpp
+                .by_source
+                .is_empty(),
+            "overflow must reject the whole TU context instead of truncating actions"
+        );
+    }
+
+    #[test]
+    fn one_malformed_compile_variant_rejects_all_macro_contexts_for_the_source() {
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("src")).unwrap();
+        fs::write(root.path().join("src/main.c"), "int value;\n").unwrap();
+        fs::write(
+            root.path().join("compile_commands.json"),
+            serde_json::to_vec(&serde_json::json!([
+                {
+                    "directory": root.path(),
+                    "file": "src/main.c",
+                    "arguments": ["cc", "-DSELECT=valid", "src/main.c"]
+                },
+                {
+                    "directory": root.path(),
+                    "file": "src/main.c",
+                    "arguments": ["cc", "-D1INVALID=value", "src/main.c"]
+                }
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        let context = ProjectResolutionContext::load(root.path());
+        assert!(!context.cpp.by_source.contains_key("src/main.c"));
+        assert!(context.cpp.shared_includes.is_none());
     }
 
     #[test]

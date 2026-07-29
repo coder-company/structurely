@@ -1,8 +1,9 @@
 use crate::model::{
-    ArkuiBuilderFlowFacts, CFunctionPointerBindingFact, CFunctionPointerFacts,
-    CMacroInitializerRole, CPreprocessorEventFact, CPreprocessorEventKind, CPreprocessorGuardFact,
-    CPreprocessorGuardKind, EventChannel, Evidence, FastApiFacts, FastApiRouterRef, FileFacts,
-    Language, Relationship, RelationshipKind, SourceSpan, Symbol, SymbolKind, GRAPH_MODEL_VERSION,
+    ArkuiBuilderFlowFacts, CCompilerMacroAction, CFunctionPointerBindingFact,
+    CFunctionPointerFacts, CMacroInitializerRole, CPreprocessorEventFact, CPreprocessorEventKind,
+    CPreprocessorGuardFact, CPreprocessorGuardKind, EventChannel, Evidence, FastApiFacts,
+    FastApiRouterRef, FileFacts, Language, Relationship, RelationshipKind, SourceSpan, Symbol,
+    SymbolKind, GRAPH_MODEL_VERSION,
 };
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -1039,6 +1040,7 @@ impl Store {
             || !file.c_function_pointers.preprocessor_guards.is_empty()
             || !file.c_function_pointers.preprocessor_events.is_empty()
             || !file.c_function_pointers.macro_initializers.is_empty()
+            || !file.c_function_pointers.compiler_macro_contexts.is_empty()
         {
             let payload = serde_json::to_string(&file.c_function_pointers)?;
             tx.prepare_cached(
@@ -4876,9 +4878,41 @@ impl<'a> CMacroResolver<'a> {
         if self.replay_work.get() >= C_MACRO_REPLAY_WORK_CAP {
             return Vec::new();
         }
-        let mut states = vec![CMacroState::default()];
+        let Some(facts) = self.files.get(file) else {
+            return Vec::new();
+        };
+        let initial_work = facts
+            .compiler_macro_contexts
+            .iter()
+            .flatten()
+            .map(|action| {
+                c_compiler_macro_action_weight(action)
+                    .saturating_add(63)
+                    .saturating_div(64)
+                    .saturating_add(1)
+            })
+            .fold(0usize, usize::saturating_add);
+        if self.replay_work.get().saturating_add(initial_work) > C_MACRO_REPLAY_WORK_CAP {
+            return Vec::new();
+        }
+        let mut states = if facts.compiler_macro_contexts.is_empty() {
+            vec![CMacroState::default()]
+        } else {
+            facts
+                .compiler_macro_contexts
+                .iter()
+                .map(|actions| {
+                    let mut state = CMacroState::default();
+                    for action in actions {
+                        apply_c_compiler_macro_action(&mut state, action);
+                    }
+                    state
+                })
+                .collect()
+        };
+        dedup_c_macro_states(&mut states);
         let mut visiting = HashSet::new();
-        let mut work = 0usize;
+        let mut work = initial_work;
         if !self.replay_file(file, site, file, 0, &mut visiting, &mut states, &mut work) {
             self.replay_work
                 .set(self.replay_work.get().saturating_add(work));
@@ -5491,6 +5525,63 @@ fn strip_c_preprocessor_comments(expression: &str) -> String {
         index += 1;
     }
     output
+}
+
+fn apply_c_compiler_macro_action(state: &mut CMacroState, action: &CCompilerMacroAction) {
+    let event = match action {
+        CCompilerMacroAction::Define {
+            name,
+            parameters,
+            replacement,
+        } => CPreprocessorEventFact {
+            kind: if parameters.is_some() {
+                CPreprocessorEventKind::DefineFunction
+            } else {
+                CPreprocessorEventKind::DefineObject
+            },
+            name: name.clone(),
+            parameters: parameters.clone().unwrap_or_default(),
+            replacement: replacement.clone(),
+            variadic: false,
+            uses_stringification: false,
+            uses_token_pasting: false,
+            guard_path: Vec::new(),
+            line: 0,
+            site_start_byte: 0,
+            site_end_byte: 0,
+        },
+        CCompilerMacroAction::Undef { name } => CPreprocessorEventFact {
+            kind: CPreprocessorEventKind::Undef,
+            name: name.clone(),
+            parameters: Vec::new(),
+            replacement: String::new(),
+            variadic: false,
+            uses_stringification: false,
+            uses_token_pasting: false,
+            guard_path: Vec::new(),
+            line: 0,
+            site_start_byte: 0,
+            site_end_byte: 0,
+        },
+    };
+    apply_c_preprocessor_event(state, &event);
+}
+
+fn c_compiler_macro_action_weight(action: &CCompilerMacroAction) -> usize {
+    match action {
+        CCompilerMacroAction::Define {
+            name,
+            parameters,
+            replacement,
+        } => name.len().saturating_add(replacement.len()).saturating_add(
+            parameters
+                .iter()
+                .flatten()
+                .map(String::len)
+                .fold(0usize, usize::saturating_add),
+        ),
+        CCompilerMacroAction::Undef { name } => name.len(),
+    }
 }
 
 fn apply_c_preprocessor_event(state: &mut CMacroState, event: &CPreprocessorEventFact) {

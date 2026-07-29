@@ -8671,6 +8671,96 @@ def outer():
     }
 
     #[test]
+    fn compilation_database_macros_are_per_tu_ordered_and_response_incremental() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join("src")).unwrap();
+        fs::write(
+            temp.path().join("src/a.c"),
+            "typedef struct AOps { int (*run)(int); } AOps;\n\
+             static int alpha(int v) { return v + 1; }\n\
+             static int decoy(int v) { return v - 1; }\n\
+             static AOps table = { SELECT };\n\
+             int dispatch_a(AOps *ops) { return ops->run(1); }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("src/b.c"),
+            "typedef struct BOps { int (*run)(int); } BOps;\n\
+             static int beta(int v) { return v + 2; }\n\
+             static int beta_second(int v) { return v + 3; }\n\
+             static BOps table = { WRAP(SELECT) };\n\
+             int dispatch_b(BOps *ops) { return ops->run(1); }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("nested.rsp"),
+            "-DWRAP(x)=x -DSELECT=beta\n",
+        )
+        .unwrap();
+        fs::write(temp.path().join("b.rsp"), "@nested.rsp\n").unwrap();
+        fs::write(
+            temp.path().join("compile_commands.json"),
+            serde_json::to_vec_pretty(&serde_json::json!([
+                {
+                    "directory": temp.path(),
+                    "file": "src/a.c",
+                    "arguments": [
+                        "cc",
+                        "-DSELECT=decoy",
+                        "-U",
+                        "SELECT",
+                        "-D",
+                        "SELECT=alpha",
+                        "src/a.c"
+                    ]
+                },
+                {
+                    "directory": temp.path(),
+                    "file": "src/b.c",
+                    "arguments": ["ccache", "clang", "@b.rsp", "src/b.c"]
+                }
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let targets = |engine: &Engine, caller: &str| {
+            let symbol = engine
+                .search(caller, 10)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.name == caller)
+                .unwrap()
+                .symbol;
+            engine
+                .callees(&symbol.id)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, evidence)| {
+                    evidence.provenance == "dynamic/c-function-pointer-dispatch"
+                })
+                .map(|(target, _)| target.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(targets(&engine, "dispatch_a"), ["alpha"]);
+        assert_eq!(targets(&engine, "dispatch_b"), ["beta"]);
+
+        fs::write(
+            temp.path().join("nested.rsp"),
+            "-DWRAP(x)=x -DSELECT=beta_second\n",
+        )
+        .unwrap();
+        assert!(
+            engine.sync().unwrap().files_changed >= 2,
+            "a response-only edit must invalidate affected preprocessing context"
+        );
+        assert_eq!(targets(&engine, "dispatch_a"), ["alpha"]);
+        assert_eq!(targets(&engine, "dispatch_b"), ["beta_second"]);
+        assert_eq!(engine.sync().unwrap().files_changed, 0);
+    }
+
+    #[test]
     fn c_macro_tables_and_preprocessor_guards_are_bounded_exact_and_incremental() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path};
 
-pub const GRAPH_MODEL_VERSION: u32 = 67;
+pub const GRAPH_MODEL_VERSION: u32 = 68;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -443,6 +443,7 @@ pub(crate) struct CFunctionPointerFacts {
     pub preprocessor_guards: Vec<CPreprocessorGuardFact>,
     pub preprocessor_events: Vec<CPreprocessorEventFact>,
     pub macro_initializers: Vec<CMacroInitializerFact>,
+    pub compiler_macro_contexts: Vec<Vec<CCompilerMacroAction>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -618,6 +619,18 @@ pub(crate) enum CPreprocessorEventKind {
     DefineObject,
     DefineFunction,
     Undef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub(crate) enum CCompilerMacroAction {
+    Define {
+        name: String,
+        parameters: Option<Vec<String>>,
+        replacement: String,
+    },
+    Undef {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
