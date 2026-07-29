@@ -14,6 +14,7 @@ use std::{
 const SCHEMA_VERSION: u32 = 1;
 const WAL_AUTOCHECKPOINT_PAGES: u32 = 256;
 const JOURNAL_SIZE_LIMIT_BYTES: u64 = 16 * 1024 * 1024;
+const INLINE_CALLBACK_DEPTH_CAP: usize = 16;
 
 pub struct Store {
     connection: Connection,
@@ -159,6 +160,7 @@ impl Store {
                 id INTEGER PRIMARY KEY,
                 file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
                 caller_public_id TEXT NOT NULL,
+                fallback_caller_public_id TEXT,
                 callee_name TEXT NOT NULL,
                 receiver_binding TEXT,
                 receiver_type TEXT,
@@ -196,6 +198,12 @@ impl Store {
                 file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
                 payload TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS callback_inline_symbols (
+                public_id TEXT PRIMARY KEY,
+                file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS callback_inline_symbols_file_idx
+                ON callback_inline_symbols(file_id);
             CREATE TABLE IF NOT EXISTS arkui_builder_flow_batches (
                 file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
                 payload TEXT NOT NULL
@@ -263,6 +271,12 @@ impl Store {
             INSERT OR IGNORE INTO metadata(key, value) VALUES ('graph_epoch', '0');
             COMMIT;
             ",
+        )?;
+        Self::ensure_column(
+            &self.connection,
+            "unresolved_calls",
+            "fallback_caller_public_id",
+            "TEXT",
         )?;
         Self::ensure_column(
             &self.connection,
@@ -588,8 +602,25 @@ impl Store {
     }
 
     fn finish_epoch(tx: &Transaction<'_>, next_epoch: u64) -> Result<usize> {
+        Self::clear_inline_callback_symbols(tx)?;
         let mut relationships_resolved = Self::resolve_calls(tx)?;
-        relationships_resolved += Self::resolve_callback_arguments(tx)?;
+        for _ in 0..INLINE_CALLBACK_DEPTH_CAP {
+            let (_, inline_symbols) = Self::resolve_callback_arguments(tx)?;
+            if inline_symbols == 0 {
+                break;
+            }
+            relationships_resolved = Self::resolve_calls(tx)?;
+        }
+        relationships_resolved += tx.query_row(
+            "SELECT COUNT(*) FROM relationships
+             WHERE provenance IN (
+                 'dynamic/callback-argument',
+                 'dynamic/callback-delegation',
+                 'dynamic/callback-inline'
+             )",
+            [],
+            |row| row.get::<_, usize>(0),
+        )?;
         relationships_resolved += Self::resolve_arkui_builder_flows(tx)?;
         relationships_resolved += Self::resolve_interface_dispatch(tx)?;
         relationships_resolved += Self::resolve_dynamic_events(tx)?;
@@ -603,6 +634,32 @@ impl Store {
             [GRAPH_MODEL_VERSION.to_string()],
         )?;
         Ok(relationships_resolved)
+    }
+
+    fn clear_inline_callback_symbols(tx: &Transaction<'_>) -> Result<()> {
+        tx.execute(
+            "DELETE FROM relationships
+             WHERE source_public_id IN (SELECT public_id FROM callback_inline_symbols)
+                OR target_public_id IN (SELECT public_id FROM callback_inline_symbols)
+                OR provenance IN (
+                    'dynamic/callback-argument',
+                    'dynamic/callback-delegation',
+                    'dynamic/callback-inline'
+                )",
+            [],
+        )?;
+        tx.execute(
+            "DELETE FROM symbol_search
+             WHERE public_id IN (SELECT public_id FROM callback_inline_symbols)",
+            [],
+        )?;
+        tx.execute(
+            "DELETE FROM symbols
+             WHERE public_id IN (SELECT public_id FROM callback_inline_symbols)",
+            [],
+        )?;
+        tx.execute("DELETE FROM callback_inline_symbols", [])?;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -691,14 +748,16 @@ impl Store {
         for call in &file.unresolved_calls {
             tx.prepare_cached(
                 "INSERT INTO unresolved_calls(
-                    file_id,caller_public_id,callee_name,receiver_binding,receiver_type,
+                    file_id,caller_public_id,fallback_caller_public_id,
+                    callee_name,receiver_binding,receiver_type,
                     target_file_hint,provenance,confidence,explanation,resolvable,
                     evidence_file,evidence_line,start_byte
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
             )?
             .execute(params![
                 file_id,
                 call.caller_id,
+                call.fallback_caller_id,
                 call.callee_name,
                 call.receiver_binding,
                 call.receiver_type,
@@ -752,6 +811,7 @@ impl Store {
                         argument.argument_index,
                         argument.target_name.as_str(),
                         argument.target_qualified_hint.as_deref(),
+                        argument.target_symbol.as_ref(),
                         argument.line,
                         argument.call_start_byte,
                     )
@@ -880,11 +940,19 @@ impl Store {
             [],
         )?;
         let mut calls_statement = tx.prepare(
-            "SELECT u.id,u.caller_public_id,u.callee_name,u.receiver_binding,u.receiver_type,
+            "SELECT u.id,COALESCE(primary_symbol.public_id,fallback_symbol.public_id),
+                    u.callee_name,u.receiver_binding,u.receiver_type,
                     u.target_file_hint,u.provenance,u.confidence,u.explanation,
-                    u.evidence_file,u.evidence_line,s.language,u.file_id,u.resolvable,u.start_byte
+                    u.evidence_file,u.evidence_line,
+                    COALESCE(primary_symbol.language,fallback_symbol.language),
+                    u.file_id,u.resolvable,u.start_byte
              FROM unresolved_calls u
-             JOIN symbols s ON s.public_id=u.caller_public_id
+             LEFT JOIN symbols primary_symbol
+                    ON primary_symbol.public_id=u.caller_public_id
+             LEFT JOIN symbols fallback_symbol
+                    ON fallback_symbol.public_id=u.fallback_caller_public_id
+             WHERE primary_symbol.public_id IS NOT NULL
+                OR fallback_symbol.public_id IS NOT NULL
              ORDER BY u.evidence_file,u.evidence_line,u.id",
         )?;
         let calls = calls_statement
@@ -1217,16 +1285,17 @@ impl Store {
         Ok(resolved)
     }
 
-    fn resolve_callback_arguments(tx: &Transaction<'_>) -> Result<usize> {
-        tx.execute(
-            "DELETE FROM relationships
-             WHERE provenance IN (
-                 'dynamic/callback-argument',
-                 'dynamic/callback-delegation'
-             )",
-            [],
-        )?;
-        type StoredCallbackArgument = (String, String, usize, String, Option<String>, usize, usize);
+    fn resolve_callback_arguments(tx: &Transaction<'_>) -> Result<(usize, usize)> {
+        type StoredCallbackArgument = (
+            String,
+            String,
+            usize,
+            String,
+            Option<String>,
+            Option<Symbol>,
+            usize,
+            usize,
+        );
         let mut arguments = Vec::new();
         let mut statement = tx.prepare(
             "SELECT b.file_id,f.path,b.payload
@@ -1247,7 +1316,7 @@ impl Store {
             let payload = serde_json::from_str::<Vec<StoredCallbackArgument>>(&row.2)
                 .with_context(|| format!("decode callback argument observations for {}", row.1))?;
             arguments.extend(payload.into_iter().map(
-                |(caller, callee, index, target, hint, line, start_byte)| {
+                |(caller, callee, index, target, hint, symbol, line, start_byte)| {
                     (
                         row.0,
                         caller,
@@ -1255,6 +1324,7 @@ impl Store {
                         index,
                         target,
                         hint,
+                        symbol,
                         row.1.clone(),
                         line,
                         start_byte,
@@ -1267,10 +1337,18 @@ impl Store {
         type CallsiteKey = (i64, String, String, usize, usize);
         let mut resolved_callees = HashMap::<CallsiteKey, Vec<(String, String)>>::new();
         let mut statement = tx.prepare(
-            "SELECT u.file_id,u.caller_public_id,u.callee_name,u.evidence_line,
+            "SELECT u.file_id,
+                    COALESCE(primary_symbol.public_id,fallback_symbol.public_id),
+                    u.callee_name,u.evidence_line,
                     u.start_byte,t.target_public_id,t.target_qualified_name
              FROM unresolved_calls u
              JOIN resolved_call_targets t ON t.call_id=u.id
+             LEFT JOIN symbols primary_symbol
+                    ON primary_symbol.public_id=u.caller_public_id
+             LEFT JOIN symbols fallback_symbol
+                    ON fallback_symbol.public_id=u.fallback_caller_public_id
+             WHERE primary_symbol.public_id IS NOT NULL
+                OR fallback_symbol.public_id IS NOT NULL
              ORDER BY u.file_id,u.caller_public_id,u.callee_name,u.evidence_line,
                       u.start_byte,t.target_qualified_name,t.target_public_id",
         )?;
@@ -1355,6 +1433,7 @@ impl Store {
         }
 
         let mut resolved = 0;
+        let mut materialized = 0;
         for (
             file_id,
             caller_id,
@@ -1362,13 +1441,20 @@ impl Store {
             argument_index,
             target_name,
             target_qualified_hint,
+            target_symbol,
             file,
             line,
             call_start_byte,
         ) in arguments
         {
             let callees = resolved_callees
-                .get(&(file_id, caller_id, callee_name, line, call_start_byte))
+                .get(&(
+                    file_id,
+                    caller_id.clone(),
+                    callee_name.clone(),
+                    line,
+                    call_start_byte,
+                ))
                 .map(Vec::as_slice)
                 .unwrap_or_default();
             if callees.len() != 1 {
@@ -1400,7 +1486,9 @@ impl Store {
                 continue;
             }
 
-            let mut targets = if let Some(qualified_hint) = target_qualified_hint.as_deref() {
+            let mut targets = if let Some(target) = target_symbol.as_ref() {
+                vec![(target.id.clone(), target.qualified_name.clone())]
+            } else if let Some(qualified_hint) = target_qualified_hint.as_deref() {
                 let mut target_statement = tx.prepare(
                     "SELECT public_id,qualified_name FROM symbols
                      WHERE file_id=?1 AND name=?2 AND qualified_name=?3
@@ -1437,6 +1525,70 @@ impl Store {
                 continue;
             }
             let (target_id, target_qualified) = targets.pop().expect("one callback target");
+            if let Some(target) = target_symbol.as_ref() {
+                let inserted = tx
+                    .prepare_cached(
+                        "INSERT OR IGNORE INTO symbols(
+                            public_id,semantic_key,file_id,language,kind,name,
+                            qualified_name,start_byte,end_byte,start_line,end_line
+                         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                    )?
+                    .execute(params![
+                        target.id,
+                        target.semantic_key,
+                        file_id,
+                        target.language.to_string(),
+                        target.kind.to_string(),
+                        target.name,
+                        target.qualified_name,
+                        target.start_byte as i64,
+                        target.end_byte as i64,
+                        target.start_line as i64,
+                        target.end_line as i64
+                    ])?;
+                if inserted == 1 {
+                    tx.prepare_cached(
+                        "INSERT INTO symbol_search(
+                            public_id,name,qualified_name,file,segments
+                         ) VALUES (?1,?2,?3,?4,?5)",
+                    )?
+                    .execute(params![
+                        target.id,
+                        target.name,
+                        target.qualified_name,
+                        target.file,
+                        identifier_segments(&format!("{} {}", target.name, target.qualified_name))
+                            .join(" ")
+                    ])?;
+                    tx.prepare_cached(
+                        "INSERT INTO callback_inline_symbols(public_id,file_id)
+                         VALUES (?1,?2)",
+                    )?
+                    .execute(params![target.id, file_id])?;
+                    Self::insert_relationship(
+                        tx,
+                        &Relationship {
+                            source_id: caller_id.clone(),
+                            target_id: target.id.clone(),
+                            kind: RelationshipKind::Contains,
+                            evidence: Evidence::new(
+                                "dynamic/callback-inline",
+                                1.0,
+                                format!(
+                                    "{} contains an inline callback passed to {} argument {}",
+                                    caller_id,
+                                    callee_qualified,
+                                    argument_index + 1
+                                ),
+                                &file,
+                                line,
+                            ),
+                        },
+                    )?;
+                    materialized += 1;
+                    resolved += 1;
+                }
+            }
             let mut terminal_consumers = terminal_consumers.into_iter().collect::<Vec<_>>();
             terminal_consumers.sort_by(|left, right| left.0.cmp(&right.0));
             for ((consumer_id, consumer_index), path) in terminal_consumers {
@@ -1477,7 +1629,7 @@ impl Store {
                 resolved += 1;
             }
         }
-        Ok(resolved)
+        Ok((resolved, materialized))
     }
 
     fn resolve_arkui_builder_flows(tx: &Transaction<'_>) -> Result<usize> {

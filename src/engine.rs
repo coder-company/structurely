@@ -1102,14 +1102,14 @@ mod tests {
         let connection = rusqlite::Connection::open(database).unwrap();
         connection
             .execute(
-                "UPDATE metadata SET value='43' WHERE key='graph_model_version'",
+                "UPDATE metadata SET value='44' WHERE key='graph_model_version'",
                 [],
             )
             .unwrap();
         connection
             .execute(
                 "UPDATE callback_argument_batches
-                 SET payload='[[\"legacy\",\"invoke\",0,\"selected\",null,3]]'",
+                 SET payload='[[\"legacy\",\"invoke\",0,\"selected\",null,3,42]]'",
                 [],
             )
             .unwrap();
@@ -2239,7 +2239,6 @@ mod tests {
              function caller() {\n\
                never(selected);\n\
                defaulted(selected);\n\
-               invoke(() => selected());\n\
                shadowed(selected);\n\
              }\n\
              class First { ambiguous(callback: () => void) { callback(); } }\n\
@@ -2302,6 +2301,338 @@ mod tests {
             .unwrap()
             .iter()
             .all(|(_, evidence)| evidence.provenance != "dynamic/callback-argument"));
+    }
+
+    #[test]
+    fn inline_callback_arguments_materialize_stable_callable_flows() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("main.ts");
+        let initial = "function selected() {}\n\
+                       function other() {}\n\
+                       function invoke(/* formal */ callback: () => void) { callback(); }\n\
+                       function invokeSecond(value: number, callback: () => void) { callback(); }\n\
+                       function never(callback: () => void) {}\n\
+                       class First { ambiguous(callback: () => void) { callback(); } }\n\
+                       class Second { ambiguous(callback: () => void) { callback(); } }\n\
+                       function unknown(value: any) { value.ambiguous(() => selected()); }\n\
+                       function caller() { invoke(/* registration */ () => selected()); invoke(function () { other(); }); invokeSecond(1, /* between */ () => selected()); never(() => selected()); }\n";
+        fs::write(&path, initial).unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let symbol = |engine: &Engine, qualified_name: &str| {
+            engine
+                .search(qualified_name, 20)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.qualified_name == qualified_name)
+                .unwrap()
+                .symbol
+        };
+        let invoke = symbol(&engine, "invoke");
+        let callbacks = engine
+            .callees(&invoke.id)
+            .unwrap()
+            .into_iter()
+            .filter(|(_, evidence)| evidence.provenance == "dynamic/callback-argument")
+            .collect::<Vec<_>>();
+        assert_eq!(callbacks.len(), 2);
+        assert!(callbacks
+            .iter()
+            .all(|(_, evidence)| { evidence.confidence == 0.96 && evidence.line == 9 }));
+        let arrow = callbacks
+            .iter()
+            .find(|(target, _)| target.name == "<callback invoke argument 1 #1>")
+            .map(|(target, _)| target.clone())
+            .unwrap();
+        let function = callbacks
+            .iter()
+            .find(|(target, _)| target.name == "<callback invoke argument 1 #2>")
+            .map(|(target, _)| target.clone())
+            .unwrap();
+        let invoke_second = symbol(&engine, "invokeSecond");
+        let second_argument = engine
+            .callees(&invoke_second.id)
+            .unwrap()
+            .into_iter()
+            .find(|(target, evidence)| {
+                target.name == "<callback invokeSecond argument 2 #1>"
+                    && evidence.provenance == "dynamic/callback-argument"
+            })
+            .map(|(target, _)| target)
+            .unwrap();
+        assert!(engine
+            .callees(&arrow.id)
+            .unwrap()
+            .iter()
+            .any(|(target, evidence)| {
+                target.qualified_name == "selected"
+                    && evidence.provenance == "tree-sitter/name-resolution"
+            }));
+        assert!(engine
+            .callees(&function.id)
+            .unwrap()
+            .iter()
+            .any(|(target, evidence)| {
+                target.qualified_name == "other"
+                    && evidence.provenance == "tree-sitter/name-resolution"
+            }));
+        let caller = symbol(&engine, "caller");
+        assert_eq!(
+            engine
+                .snapshot()
+                .unwrap()
+                .relationships
+                .into_iter()
+                .filter(|relationship| {
+                    relationship.source_id == caller.id
+                        && relationship.kind == RelationshipKind::Contains
+                        && relationship.evidence.provenance == "dynamic/callback-inline"
+                })
+                .count(),
+            3
+        );
+        assert!(engine
+            .search("<callback never argument 1 #1>", 20)
+            .unwrap()
+            .into_iter()
+            .all(|hit| hit.symbol.name != "<callback never argument 1 #1>"));
+        assert!(engine
+            .search("<callback ambiguous argument 1 #1>", 20)
+            .unwrap()
+            .into_iter()
+            .all(|hit| hit.symbol.name != "<callback ambiguous argument 1 #1>"));
+        assert!(engine
+            .callees(&caller.id)
+            .unwrap()
+            .iter()
+            .any(|(target, evidence)| {
+                target.qualified_name == "selected"
+                    && evidence.provenance == "tree-sitter/name-resolution"
+            }));
+        let unknown = symbol(&engine, "unknown");
+        assert!(engine
+            .callees(&unknown.id)
+            .unwrap()
+            .iter()
+            .any(|(target, evidence)| {
+                target.qualified_name == "selected"
+                    && evidence.provenance == "tree-sitter/name-resolution"
+            }));
+
+        let comment_changed = initial
+            .replace("/* registration */", "/* registration changed */")
+            .replace("/* between */", "/* between changed */");
+        fs::write(&path, &comment_changed).unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 1);
+        assert_eq!(symbol(&engine, &arrow.qualified_name).id, arrow.id);
+        assert_eq!(
+            symbol(&engine, &second_argument.qualified_name).id,
+            second_argument.id
+        );
+
+        let moved = format!("// position-only edit\n{comment_changed}");
+        fs::write(&path, &moved).unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 1);
+        assert_eq!(symbol(&engine, &arrow.qualified_name).id, arrow.id);
+        assert_eq!(symbol(&engine, &function.qualified_name).id, function.id);
+
+        let body_changed = moved.replace(
+            "invoke(/* registration changed */ () => selected())",
+            "invoke(/* registration changed */ () => { selected(); other(); })",
+        );
+        fs::write(&path, &body_changed).unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 1);
+        let stable_arrow = symbol(&engine, &arrow.qualified_name);
+        assert_eq!(stable_arrow.id, arrow.id);
+        let body_callees = engine.callees(&stable_arrow.id).unwrap();
+        assert!(body_callees
+            .iter()
+            .any(|(target, _)| target.qualified_name == "selected"));
+        assert!(body_callees
+            .iter()
+            .any(|(target, _)| target.qualified_name == "other"));
+
+        let removed = "function selected() {}\n\
+                       function invoke(callback: () => void) { callback(); }\n\
+                       function caller() {}\n";
+        let before_rollback = serde_json::to_string(&engine.snapshot().unwrap()).unwrap();
+        let replacement = parse_file("main.ts", removed).unwrap();
+        engine
+            .store
+            .inject_rolled_back_publish(&[replacement], &[])
+            .unwrap();
+        assert_eq!(
+            serde_json::to_string(&engine.snapshot().unwrap()).unwrap(),
+            before_rollback
+        );
+        assert_eq!(symbol(&engine, &arrow.qualified_name).id, arrow.id);
+
+        fs::write(&path, removed).unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 1);
+        assert!(engine
+            .search(&arrow.qualified_name, 20)
+            .unwrap()
+            .into_iter()
+            .all(|hit| hit.symbol.id != arrow.id));
+        assert!(engine
+            .search(&function.qualified_name, 20)
+            .unwrap()
+            .into_iter()
+            .all(|hit| hit.symbol.id != function.id));
+        assert!(engine
+            .search(&second_argument.qualified_name, 20)
+            .unwrap()
+            .into_iter()
+            .all(|hit| hit.symbol.id != second_argument.id));
+    }
+
+    #[test]
+    fn inline_callbacks_resolve_nested_and_delegated_flows_to_a_bounded_fixed_point() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("main.ts");
+        let source = "function selected() {}\n\
+                      function invoke(callback: () => void) { callback(); }\n\
+                      function leaf(callback: () => void) { callback(); }\n\
+                      function outer(callback: () => void) { leaf(callback); }\n\
+                      function caller() { invoke(() => invoke(() => selected())); outer(() => selected()); }\n";
+        fs::write(&path, source).unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let symbol = |engine: &Engine, qualified_name: &str| {
+            engine
+                .search(qualified_name, 50)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.qualified_name == qualified_name)
+                .unwrap()
+                .symbol
+        };
+        let caller = symbol(&engine, "caller");
+        let invoke = symbol(&engine, "invoke");
+        let leaf = symbol(&engine, "leaf");
+        let snapshot = engine.snapshot().unwrap();
+        let inline_relationships = snapshot
+            .relationships
+            .iter()
+            .filter(|relationship| {
+                relationship.kind == RelationshipKind::Contains
+                    && relationship.evidence.provenance == "dynamic/callback-inline"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(inline_relationships.len(), 3);
+        let outer_nested_id = inline_relationships
+            .iter()
+            .find(|relationship| {
+                relationship.source_id == caller.id
+                    && snapshot.symbols.iter().any(|symbol| {
+                        symbol.id == relationship.target_id
+                            && symbol.name == "<callback invoke argument 1 #1>"
+                    })
+            })
+            .map(|relationship| relationship.target_id.clone())
+            .unwrap();
+        let inner_nested_id = inline_relationships
+            .iter()
+            .find(|relationship| relationship.source_id == outer_nested_id)
+            .map(|relationship| relationship.target_id.clone())
+            .unwrap();
+        assert!(engine
+            .callees(&invoke.id)
+            .unwrap()
+            .iter()
+            .any(|(target, evidence)| {
+                target.id == inner_nested_id && evidence.provenance == "dynamic/callback-argument"
+            }));
+        assert!(engine
+            .callees(&outer_nested_id)
+            .unwrap()
+            .iter()
+            .any(|(target, evidence)| {
+                target.id == invoke.id && evidence.provenance == "tree-sitter/name-resolution"
+            }));
+        assert!(engine
+            .callees(&inner_nested_id)
+            .unwrap()
+            .iter()
+            .any(|(target, evidence)| {
+                target.qualified_name == "selected"
+                    && evidence.provenance == "tree-sitter/name-resolution"
+            }));
+        let delegated = engine
+            .callees(&leaf.id)
+            .unwrap()
+            .into_iter()
+            .find(|(_, evidence)| evidence.provenance == "dynamic/callback-delegation")
+            .unwrap();
+        assert_eq!(delegated.1.confidence, 0.94);
+        assert!(engine
+            .callees(&delegated.0.id)
+            .unwrap()
+            .iter()
+            .any(|(target, _)| target.qualified_name == "selected"));
+
+        let moved = format!("// stable edit\n{source}");
+        fs::write(&path, &moved).unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 1);
+        let incremental = serde_json::to_string(&engine.snapshot().unwrap()).unwrap();
+        let clean_temp = tempfile::tempdir().unwrap();
+        fs::write(clean_temp.path().join("main.ts"), &moved).unwrap();
+        let (clean, _) = Engine::init(clean_temp.path()).unwrap();
+        assert_eq!(
+            incremental,
+            serde_json::to_string(&clean.snapshot().unwrap()).unwrap()
+        );
+
+        fs::remove_file(&path).unwrap();
+        assert_eq!(engine.sync().unwrap().files_deleted, 1);
+        assert!(engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .iter()
+            .all(|symbol| !symbol.name.starts_with("<callback ")));
+        assert!(engine
+            .search("<callback", 50)
+            .unwrap()
+            .into_iter()
+            .all(|hit| !hit.symbol.name.starts_with("<callback ")));
+    }
+
+    #[test]
+    fn inline_callback_nesting_stops_at_the_materialization_depth_cap() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut expression = "selected()".to_owned();
+        for _ in 0..17 {
+            expression = format!("invoke(() => {expression})");
+        }
+        fs::write(
+            temp.path().join("main.ts"),
+            format!(
+                "function selected() {{}}\n\
+                 function invoke(callback: () => void) {{ callback(); }}\n\
+                 function caller() {{ {expression}; }}\n"
+            ),
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let snapshot = engine.snapshot().unwrap();
+        assert_eq!(
+            snapshot
+                .relationships
+                .iter()
+                .filter(|relationship| {
+                    relationship.kind == RelationshipKind::Contains
+                        && relationship.evidence.provenance == "dynamic/callback-inline"
+                })
+                .count(),
+            16
+        );
+        assert_eq!(
+            snapshot
+                .symbols
+                .iter()
+                .filter(|symbol| symbol.name.starts_with("<callback invoke argument"))
+                .count(),
+            16
+        );
     }
 
     #[test]

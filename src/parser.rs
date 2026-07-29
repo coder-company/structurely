@@ -83,6 +83,18 @@ pub(crate) fn parse_file_as(
     if language == Language::Dart {
         collect_dart_body_owners(tree.root_node(), &symbols, &mut symbol_owners);
     }
+    let inline_callback_symbols = collect_inline_callback_symbols(
+        tree.root_node(),
+        source_bytes,
+        language,
+        relative_path,
+        &symbols,
+        &mut symbol_owners,
+    );
+    let inline_callback_ids = inline_callback_symbols
+        .values()
+        .map(|symbol| symbol.id.clone())
+        .collect::<std::collections::HashSet<_>>();
     let mut receiver_bindings = HashMap::<String, Vec<(usize, String)>>::new();
     collect_receiver_bindings(tree.root_node(), source_bytes, &mut receiver_bindings);
     let module_bindings = collect_module_bindings(tree.root_node(), source_bytes, language);
@@ -92,6 +104,8 @@ pub(crate) fn parse_file_as(
         symbol_owners: &symbol_owners,
         receiver_bindings: &receiver_bindings,
         module_bindings: &module_bindings,
+        inline_callback_symbols: &inline_callback_symbols,
+        inline_callback_ids: &inline_callback_ids,
         file_symbol_id: &file_symbol.id,
     };
     collect_calls(
@@ -774,7 +788,127 @@ struct CallCollectionContext<'a> {
     symbol_owners: &'a HashMap<(usize, usize), String>,
     receiver_bindings: &'a HashMap<String, Vec<(usize, String)>>,
     module_bindings: &'a HashMap<String, String>,
+    inline_callback_symbols: &'a HashMap<(usize, usize), Symbol>,
+    inline_callback_ids: &'a std::collections::HashSet<String>,
     file_symbol_id: &'a str,
+}
+
+struct InlineCallbackCollection<'a> {
+    source: &'a [u8],
+    language: Language,
+    file: &'a str,
+    symbol_owners: &'a mut HashMap<(usize, usize), String>,
+    known_symbols: HashMap<String, Symbol>,
+    ordinals: HashMap<(String, String, usize), usize>,
+    output: HashMap<(usize, usize), Symbol>,
+}
+
+impl InlineCallbackCollection<'_> {
+    fn visit(&mut self, node: Node<'_>) {
+        if matches!(
+            node.kind(),
+            "call_expression"
+                | "call"
+                | "method_invocation"
+                | "invocation_expression"
+                | "function_call_expression"
+                | "member_call_expression"
+                | "nullsafe_member_call_expression"
+                | "scoped_call_expression"
+                | "function_call"
+                | "object_creation_expression"
+                | "new_expression"
+                | "arkui_component_expression"
+        ) {
+            if let Some(callee_name) =
+                call_target_node(node).and_then(|target| call_name(target, self.source))
+            {
+                let selector = call_target_node(node)
+                    .map(|target| {
+                        node_text(target, self.source)
+                            .split_whitespace()
+                            .collect::<String>()
+                    })
+                    .unwrap_or_else(|| callee_name.clone());
+                let caller = owning_symbol_id(node, self.symbol_owners)
+                    .and_then(|id| self.known_symbols.get(id))
+                    .cloned();
+                if let (Some(caller), Some(arguments)) =
+                    (caller, node.child_by_field_name("arguments"))
+                {
+                    let mut cursor = arguments.walk();
+                    for (argument_index, argument) in arguments
+                        .named_children(&mut cursor)
+                        .filter(|argument| !argument.is_extra())
+                        .enumerate()
+                    {
+                        if !matches!(argument.kind(), "arrow_function" | "function_expression") {
+                            continue;
+                        }
+                        let ordinal = self
+                            .ordinals
+                            .entry((caller.id.clone(), selector.clone(), argument_index))
+                            .and_modify(|value| *value += 1)
+                            .or_insert(1);
+                        let name = format!(
+                            "<callback {callee_name} argument {} #{}>",
+                            argument_index + 1,
+                            *ordinal
+                        );
+                        let qualified_name = format!("{}.{}", caller.qualified_name, name);
+                        let symbol = Symbol::new_disambiguated(
+                            self.language,
+                            SymbolKind::Function,
+                            &name,
+                            &qualified_name,
+                            self.file,
+                            span(argument),
+                            &format!(
+                                "inline-callback|{}|{}|{}|{}",
+                                caller.semantic_key, selector, argument_index, *ordinal
+                            ),
+                        );
+                        self.symbol_owners.insert(
+                            (argument.start_byte(), argument.end_byte()),
+                            symbol.id.clone(),
+                        );
+                        self.known_symbols.insert(symbol.id.clone(), symbol.clone());
+                        self.output
+                            .insert((argument.start_byte(), argument.end_byte()), symbol);
+                    }
+                }
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            self.visit(child);
+        }
+    }
+}
+
+fn collect_inline_callback_symbols(
+    root: Node<'_>,
+    source: &[u8],
+    language: Language,
+    file: &str,
+    symbols: &[Symbol],
+    symbol_owners: &mut HashMap<(usize, usize), String>,
+) -> HashMap<(usize, usize), Symbol> {
+    let mut collection = InlineCallbackCollection {
+        source,
+        language,
+        file,
+        symbol_owners,
+        known_symbols: symbols
+            .iter()
+            .cloned()
+            .map(|symbol| (symbol.id.clone(), symbol))
+            .collect(),
+        ordinals: HashMap::new(),
+        output: HashMap::new(),
+    };
+    collection.visit(root);
+    collection.output
 }
 
 fn collect_calls(
@@ -806,19 +940,29 @@ fn collect_calls(
                     invoked_parameter(node, &name, context.source, context.symbol_owners);
                 let resolvable = parameter_invocation.is_none();
                 let mut owner = node.parent();
-                let mut caller_id = None;
+                let mut caller_id = None::<String>;
+                let mut declared_fallback = None::<String>;
                 while let Some(ancestor) = owner {
                     if let Some(symbol_id) = context
                         .symbol_owners
                         .get(&(ancestor.start_byte(), ancestor.end_byte()))
                     {
-                        caller_id = Some(symbol_id.as_str());
-                        break;
+                        caller_id.get_or_insert_with(|| symbol_id.clone());
+                        if !context.inline_callback_ids.contains(symbol_id) {
+                            declared_fallback = Some(symbol_id.clone());
+                            break;
+                        }
                     }
                     owner = ancestor.parent();
                 }
+                let caller_id = caller_id.unwrap_or_else(|| context.file_symbol_id.to_owned());
+                let fallback_caller_id =
+                    context.inline_callback_ids.contains(&caller_id).then(|| {
+                        declared_fallback.unwrap_or_else(|| context.file_symbol_id.to_owned())
+                    });
                 output.push(UnresolvedCall {
-                    caller_id: caller_id.unwrap_or(context.file_symbol_id).to_owned(),
+                    caller_id: caller_id.clone(),
+                    fallback_caller_id,
                     callee_name: name.clone(),
                     receiver_binding: call_receiver_name(function, context.source),
                     receiver_type: receiver_type_hint(
@@ -848,7 +992,7 @@ fn collect_calls(
                     collect_callback_arguments(
                         node,
                         &name,
-                        caller_id.unwrap_or(context.file_symbol_id),
+                        &caller_id,
                         context,
                         callback_delegations,
                         callback_arguments,
@@ -955,6 +1099,7 @@ fn direct_parameter_names(parameters: Node<'_>, source: &[u8]) -> Vec<Option<Str
     let mut cursor = parameters.walk();
     parameters
         .named_children(&mut cursor)
+        .filter(|parameter| !parameter.is_extra())
         .map(|parameter| {
             let raw = node_text(parameter, source);
             if raw.contains("...")
@@ -995,7 +1140,11 @@ fn collect_callback_arguments(
         return;
     };
     let mut cursor = arguments.walk();
-    for (argument_index, argument) in arguments.named_children(&mut cursor).enumerate() {
+    for (argument_index, argument) in arguments
+        .named_children(&mut cursor)
+        .filter(|argument| !argument.is_extra())
+        .enumerate()
+    {
         match referenced_parameter(call, argument, context.source, context.symbol_owners) {
             ParameterReference::Exact {
                 owner_id,
@@ -1014,8 +1163,8 @@ fn collect_callback_arguments(
             ParameterReference::Unsafe => continue,
             ParameterReference::NotFormal => {}
         }
-        let (target_name, target_qualified_hint) = match argument.kind() {
-            "identifier" => (node_text(argument, context.source), None),
+        let (target_name, target_qualified_hint, target_symbol) = match argument.kind() {
+            "identifier" => (node_text(argument, context.source), None, None),
             "member_expression"
                 if argument
                     .child_by_field_name("object")
@@ -1035,7 +1184,18 @@ fn collect_callback_arguments(
                     node_text(property, context.source),
                     owner_name
                         .map(|owner| format!("{owner}.{}", node_text(property, context.source))),
+                    None,
                 )
+            }
+            "arrow_function" | "function_expression" => {
+                let Some(symbol) = context
+                    .inline_callback_symbols
+                    .get(&(argument.start_byte(), argument.end_byte()))
+                    .cloned()
+                else {
+                    continue;
+                };
+                (symbol.name.clone(), None, Some(symbol))
             }
             _ => continue,
         };
@@ -1048,6 +1208,7 @@ fn collect_callback_arguments(
             argument_index,
             target_name,
             target_qualified_hint,
+            target_symbol,
             line: call.start_position().row + 1,
             call_start_byte: call.start_byte(),
         });
@@ -1489,6 +1650,29 @@ mod tests {
             .callback_arguments
             .iter()
             .all(|argument| argument.target_name != "callback"));
+
+        let inline = parse_file(
+            "inline.ts",
+            "function selected() {}\n\
+             function invoke(callback: () => void) { callback(); }\n\
+             function caller() { invoke(() => selected()); }\n",
+        )
+        .unwrap();
+        let inline_argument = inline
+            .callback_arguments
+            .iter()
+            .find(|argument| argument.callee_name == "invoke")
+            .unwrap();
+        let inline_symbol = inline_argument.target_symbol.as_ref().unwrap();
+        assert_eq!(inline_symbol.name, "<callback invoke argument 1 #1>");
+        assert!(inline
+            .unresolved_calls
+            .iter()
+            .any(|call| { call.caller_id == inline_symbol.id && call.callee_name == "selected" }));
+        assert!(inline
+            .symbols
+            .iter()
+            .all(|symbol| symbol.id != inline_symbol.id));
     }
 
     #[test]

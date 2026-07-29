@@ -727,6 +727,7 @@ fn enrich_ohos_emitter_parts(
                 .filter(|receiver| !receiver.is_empty());
                 facts.unresolved_calls.push(UnresolvedCall {
                     caller_id: owner.id.clone(),
+                    fallback_caller_id: None,
                     callee_name: name.clone(),
                     receiver_binding: None,
                     receiver_type,
@@ -1746,6 +1747,7 @@ fn enrich_arkui_component(component: Node<'_>, source: &[u8], facts: &mut FileFa
         };
         facts.unresolved_calls.push(UnresolvedCall {
             caller_id: owner.id.clone(),
+            fallback_caller_id: None,
             callee_name: "build".to_owned(),
             receiver_binding: None,
             receiver_type: Some(component_name.clone()),
@@ -1946,6 +1948,7 @@ fn collect_arkui_route_call(
     };
     facts.unresolved_calls.push(UnresolvedCall {
         caller_id: owner.id.clone(),
+        fallback_caller_id: None,
         callee_name: url
             .trim_end_matches(".ets")
             .rsplit('/')
@@ -2286,6 +2289,7 @@ fn append_arkui_call(
     }
     facts.unresolved_calls.push(UnresolvedCall {
         caller_id: owner.id.clone(),
+        fallback_caller_id: None,
         callee_name: target.clone(),
         receiver_binding: None,
         receiver_type: (provenance == "framework/arkui-event").then(|| component_name.to_owned()),
@@ -2465,6 +2469,7 @@ fn collect_component_template_edges(root: Node<'_>, source: &[u8], facts: &mut F
             .or_else(|| Some(facts.path.clone()));
         facts.unresolved_calls.push(UnresolvedCall {
             caller_id: component.id.clone(),
+            fallback_caller_id: None,
             callee_name: target.clone(),
             receiver_binding: None,
             receiver_type: None,
@@ -2707,6 +2712,7 @@ fn enrich_nestjs_controller(class: Node<'_>, source: &[u8], facts: &mut FileFact
                     });
                     facts.unresolved_calls.push(UnresolvedCall {
                         caller_id: route.id.clone(),
+                        fallback_caller_id: None,
                         callee_name: handler.clone(),
                         receiver_binding: None,
                         receiver_type: None,
@@ -2958,6 +2964,7 @@ fn enrich_fastapi_definition(definition: Node<'_>, source: &[u8], facts: &mut Fi
         });
         facts.unresolved_calls.push(UnresolvedCall {
             caller_id: route.id.clone(),
+            fallback_caller_id: None,
             callee_name: handler_name.clone(),
             receiver_binding: None,
             receiver_type: None,
@@ -3067,6 +3074,7 @@ fn enrich_django_call(call: Node<'_>, source: &[u8], facts: &mut FileFacts) {
     });
     facts.unresolved_calls.push(UnresolvedCall {
         caller_id: route.id.clone(),
+        fallback_caller_id: None,
         callee_name: handler.clone(),
         receiver_binding: None,
         receiver_type: None,
@@ -3240,6 +3248,7 @@ fn enrich_javascript_call(call: Node<'_>, source: &[u8], facts: &mut FileFacts) 
         };
         facts.unresolved_calls.push(UnresolvedCall {
             caller_id,
+            fallback_caller_id: None,
             callee_name: target_name,
             receiver_binding: None,
             receiver_type: None,
@@ -3298,6 +3307,7 @@ fn collect_react_class_rerenders(node: Node<'_>, source: &[u8], facts: &mut File
                 };
                 facts.unresolved_calls.push(UnresolvedCall {
                     caller_id: owner.id.clone(),
+                    fallback_caller_id: None,
                     callee_name: "render".to_owned(),
                     receiver_binding: None,
                     receiver_type: Some(class_name.clone()),
@@ -3407,6 +3417,7 @@ fn append_jsx_child_render(element: Node<'_>, source: &[u8], facts: &mut FileFac
         .and_then(|reference| reference.target_file_hint.clone());
     facts.unresolved_calls.push(UnresolvedCall {
         caller_id: owner.id.clone(),
+        fallback_caller_id: None,
         callee_name: child.clone(),
         receiver_binding: None,
         receiver_type: None,
@@ -3559,6 +3570,7 @@ fn append_react_route(
     });
     facts.unresolved_calls.push(UnresolvedCall {
         caller_id: route.id.clone(),
+        fallback_caller_id: None,
         callee_name: component.clone(),
         receiver_binding: None,
         receiver_type: None,

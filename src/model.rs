@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path};
 
-pub const GRAPH_MODEL_VERSION: u32 = 44;
+pub const GRAPH_MODEL_VERSION: u32 = 45;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -264,6 +264,7 @@ pub struct Relationship {
 #[derive(Debug, Clone)]
 pub(crate) struct UnresolvedCall {
     pub caller_id: String,
+    pub fallback_caller_id: Option<String>,
     pub callee_name: String,
     pub receiver_binding: Option<String>,
     pub receiver_type: Option<String>,
@@ -290,6 +291,7 @@ pub(crate) struct CallbackArgumentFact {
     pub argument_index: usize,
     pub target_name: String,
     pub target_qualified_hint: Option<String>,
+    pub target_symbol: Option<Symbol>,
     pub line: usize,
     pub call_start_byte: usize,
 }
