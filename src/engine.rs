@@ -8808,14 +8808,43 @@ def outer():
         )
         .unwrap();
         fs::write(
+            temp.path().join("first-branch.h"),
+            "#if 1\n#define FIRST_HEADER good_target\n#endif\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("second-branch.h"),
+            "#if 0\n#define COLLIDING_HEADER_BAD impossible_target\n#endif\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("repeated.h"),
+            "#ifdef REPEAT_SWITCH\n#define REPEATED repeated_second\n#else\n#define REPEATED repeated_first\n#endif\n",
+        )
+        .unwrap();
+        fs::write(
             temp.path().join("main.c"),
             r#"
+#include "first-branch.h"
+#include "second-branch.h"
+#undef REPEAT_SWITCH
+#include "repeated.h"
+#define REPEAT_SWITCH 1
+#include "repeated.h"
+
 typedef int (*Callback)(int);
 typedef struct InactiveOps { int (*run)(int); } InactiveOps;
 typedef struct ImpossibleOps { int (*run)(int); } ImpossibleOps;
 typedef struct UndefOps { int (*run)(int); } UndefOps;
 typedef struct EmptyOps { int (*run)(int); } EmptyOps;
 typedef struct RowOps { int (*run)(int); } RowOps;
+typedef struct CollisionOps { int (*run)(int); } CollisionOps;
+typedef struct RepeatedOps { int (*run)(int); } RepeatedOps;
+typedef struct ConstantOps { int (*run)(int); } ConstantOps;
+typedef struct BooleanOps { int (*run)(int); } BooleanOps;
+typedef struct FactoryTextOps { int (*run)(int); } FactoryTextOps;
+typedef struct ConvergedOps { int (*run)(int); } ConvergedOps;
+typedef struct MutatedConditionOps { int (*run)(int); } MutatedConditionOps;
 
 static int good_target(int v) { return v + 1; }
 static int impossible_target(int v) { return v + 2; }
@@ -8824,6 +8853,86 @@ static int array_first(int v) { return v + 4; }
 static int array_second(int v) { return v + 5; }
 static int row_first(int v) { return v + 6; }
 static int row_second(int v) { return v + 7; }
+static int repeated_first(int v) { return v + 8; }
+static int repeated_second(int v) { return v + 9; }
+static Callback make_callback(void) { return good_target; }
+
+static CollisionOps collision = { COLLIDING_HEADER_BAD };
+static RepeatedOps repeated = { REPEATED };
+
+#if 0 /* deliberately disabled */
+static ConstantOps commented_zero = { impossible_target };
+#endif
+#if 0 && EXTERNAL_FEATURE
+static ConstantOps false_and_unknown = { impossible_target };
+#endif
+#if defined(EXTERNAL_FEATURE) && 0
+static ConstantOps unknown_and_false = { impossible_target };
+#endif
+#if 0x0
+static ConstantOps hexadecimal_zero = { impossible_target };
+#endif
+#if 00
+static ConstantOps octal_zero = { impossible_target };
+#endif
+#if 0U
+static ConstantOps unsigned_zero = { impossible_target };
+#endif
+#if 0L
+static ConstantOps long_zero = { impossible_target };
+#endif
+#if -0
+static ConstantOps negative_zero = { impossible_target };
+#endif
+#if 1 || EXTERNAL_FEATURE
+static BooleanOps true_or_unknown = { good_target };
+#endif
+#if +1
+static BooleanOps positive_one = { good_target };
+#endif
+#define GET_CALLBACK() make_callback()
+static FactoryTextOps factory_text = { GET_CALLBACK() };
+
+#if UNKNOWN_0
+#define CONVERGED_0 1
+#else
+#define CONVERGED_0 1
+#endif
+#if UNKNOWN_1
+#define CONVERGED_1 1
+#else
+#define CONVERGED_1 1
+#endif
+#if UNKNOWN_2
+#define CONVERGED_2 1
+#else
+#define CONVERGED_2 1
+#endif
+#if UNKNOWN_3
+#define CONVERGED_3 1
+#else
+#define CONVERGED_3 1
+#endif
+#if UNKNOWN_4
+#define CONVERGED_4 1
+#else
+#define CONVERGED_4 1
+#endif
+#if UNKNOWN_5
+#define CONVERGED_5 1
+#else
+#define CONVERGED_5 1
+#endif
+#define CONVERGED_TARGET good_target
+static ConvergedOps converged = { CONVERGED_TARGET };
+
+#define MUTATED_FLAG 1
+#if MUTATED_FLAG
+#undef MUTATED_FLAG
+static MutatedConditionOps mutated_good = { good_target };
+#else
+static MutatedConditionOps mutated_bad = { impossible_target };
+#endif
 
 #if 0
 #include "inactive.h"
@@ -8864,6 +8973,13 @@ int dispatch_undef(UndefOps *ops) { return ops->run(1); }
 int dispatch_empty(EmptyOps *ops) { return ops->run(1); }
 int dispatch_array(unsigned i) { return callbacks[i](1); }
 int dispatch_rows(RowOps *ops) { return ops->run(1); }
+int dispatch_collision(CollisionOps *ops) { return ops->run(1); }
+int dispatch_repeated(RepeatedOps *ops) { return ops->run(1); }
+int dispatch_constant(ConstantOps *ops) { return ops->run(1); }
+int dispatch_boolean(BooleanOps *ops) { return ops->run(1); }
+int dispatch_factory_text(FactoryTextOps *ops) { return ops->run(1); }
+int dispatch_converged(ConvergedOps *ops) { return ops->run(1); }
+int dispatch_mutated(MutatedConditionOps *ops) { return ops->run(1); }
 "#,
         )
         .unwrap();
@@ -8901,6 +9017,13 @@ int dispatch_rows(RowOps *ops) { return ops->run(1); }
         assert!(targets("dispatch_empty").is_empty());
         assert_eq!(targets("dispatch_array"), ["array_first", "array_second"]);
         assert_eq!(targets("dispatch_rows"), ["row_first", "row_second"]);
+        assert!(targets("dispatch_collision").is_empty());
+        assert_eq!(targets("dispatch_repeated"), ["repeated_second"]);
+        assert!(targets("dispatch_constant").is_empty());
+        assert_eq!(targets("dispatch_boolean"), ["good_target"]);
+        assert!(targets("dispatch_factory_text").is_empty());
+        assert_eq!(targets("dispatch_converged"), ["good_target"]);
+        assert_eq!(targets("dispatch_mutated"), ["good_target"]);
     }
 
     #[test]

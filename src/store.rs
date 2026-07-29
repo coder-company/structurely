@@ -2093,7 +2093,7 @@ impl Store {
             for use_fact in &facts.macro_initializers {
                 let states = macro_resolver.states_at(path, use_fact.site_start_byte);
                 for state in states {
-                    if c_guard_truth(&use_fact.guard_path, &catalog, &state)
+                    if c_guard_truth(&use_fact.guard_path, &catalog, &state, path)
                         == CPreprocessorTruth::False
                     {
                         continue;
@@ -4849,7 +4849,8 @@ enum CPreprocessorTruth {
 struct CMacroState {
     macros: HashMap<String, CPreprocessorEventFact>,
     undefined: HashSet<String>,
-    branches: HashMap<usize, usize>,
+    branches: HashMap<String, usize>,
+    fingerprint: [u8; 32],
 }
 type CGuardCatalog = HashMap<usize, Vec<CPreprocessorGuardFact>>;
 
@@ -4878,7 +4879,7 @@ impl<'a> CMacroResolver<'a> {
         let mut states = vec![CMacroState::default()];
         let mut visiting = HashSet::new();
         let mut work = 0usize;
-        if !self.replay_file(file, site, 0, &mut visiting, &mut states, &mut work) {
+        if !self.replay_file(file, site, file, 0, &mut visiting, &mut states, &mut work) {
             self.replay_work
                 .set(self.replay_work.get().saturating_add(work));
             return Vec::new();
@@ -4889,10 +4890,12 @@ impl<'a> CMacroResolver<'a> {
         states
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn replay_file(
         &self,
         file: &str,
         before: usize,
+        branch_context: &str,
         depth: usize,
         visiting: &mut HashSet<String>,
         states: &mut Vec<CMacroState>,
@@ -4927,7 +4930,54 @@ impl<'a> CMacroResolver<'a> {
             .collect::<Vec<_>>();
         items.sort_by_key(|(position, _)| *position);
         let catalog = c_guard_catalog(facts);
-        for (_, item) in items {
+        let mut last_guard_position = HashMap::<usize, usize>::new();
+        for (position, guards) in facts
+            .includes
+            .iter()
+            .map(|fact| (fact.site_start_byte, &fact.guard_path))
+            .chain(
+                facts
+                    .preprocessor_events
+                    .iter()
+                    .map(|fact| (fact.site_start_byte, &fact.guard_path)),
+            )
+            .chain(
+                facts
+                    .bindings
+                    .iter()
+                    .map(|fact| (fact.site_start_byte, &fact.guard_path)),
+            )
+            .chain(
+                facts
+                    .macro_initializers
+                    .iter()
+                    .map(|fact| (fact.site_start_byte, &fact.guard_path)),
+            )
+        {
+            for guard in guards {
+                last_guard_position
+                    .entry(guard.group_start_byte)
+                    .and_modify(|last| *last = (*last).max(position))
+                    .or_insert(position);
+            }
+        }
+        let mut retirement_schedule = last_guard_position
+            .into_iter()
+            .map(|(group, last)| (last, group))
+            .collect::<Vec<_>>();
+        retirement_schedule.sort();
+        let mut retirement_cursor = 0usize;
+        for (position, item) in items {
+            while retirement_schedule
+                .get(retirement_cursor)
+                .is_some_and(|(last, _)| *last < position)
+            {
+                let group = retirement_schedule[retirement_cursor].1;
+                retire_c_macro_branches(states, branch_context, std::iter::once(group));
+                *work = work.saturating_add(states.len().max(1));
+                retirement_cursor += 1;
+            }
+            dedup_c_macro_states(states);
             *work = work.saturating_add(states.len().max(1));
             if self.replay_work.get().saturating_add(*work) > C_MACRO_REPLAY_WORK_CAP {
                 visiting.remove(file);
@@ -4935,19 +4985,32 @@ impl<'a> CMacroResolver<'a> {
             }
             match item {
                 Item::Include(include) => {
+                    *work = work.saturating_add(c_macro_state_weight(states));
+                    if self.replay_work.get().saturating_add(*work) > C_MACRO_REPLAY_WORK_CAP {
+                        visiting.remove(file);
+                        return false;
+                    }
                     let mut next = Vec::new();
                     for state in states.iter() {
-                        for (variant, selected) in
-                            split_c_macro_state_for_guards(state, &include.guard_path, &catalog)
-                        {
+                        for (variant, selected) in split_c_macro_state_for_guards(
+                            state,
+                            &include.guard_path,
+                            &catalog,
+                            branch_context,
+                        ) {
                             if selected {
                                 if let Some(target) =
                                     resolve_c_include(file, include, self.all_paths)
                                 {
                                     let mut included = vec![variant];
+                                    let include_context = format!(
+                                        "{branch_context}>{file}:{}->{target}",
+                                        include.site_start_byte
+                                    );
                                     if !self.replay_file(
                                         &target,
                                         usize::MAX,
+                                        &include_context,
                                         depth + 1,
                                         visiting,
                                         &mut included,
@@ -4965,33 +5028,56 @@ impl<'a> CMacroResolver<'a> {
                             }
                         }
                     }
-                    dedup_c_macro_states(&mut next);
-                    if next.len() > C_MACRO_ENVIRONMENT_CAP {
-                        visiting.remove(file);
-                        return false;
-                    }
                     *states = next;
                 }
                 Item::Event(event) => {
-                    let mut next = Vec::new();
-                    for state in states.iter() {
-                        for (mut variant, selected) in
-                            split_c_macro_state_for_guards(state, &event.guard_path, &catalog)
-                        {
-                            if selected {
-                                apply_c_preprocessor_event(&mut variant, event);
-                            }
-                            next.push(variant);
+                    if event.guard_path.is_empty() {
+                        for state in states.iter_mut() {
+                            apply_c_preprocessor_event(state, event);
                         }
+                    } else {
+                        *work = work.saturating_add(c_macro_state_weight(states));
+                        if self.replay_work.get().saturating_add(*work) > C_MACRO_REPLAY_WORK_CAP {
+                            visiting.remove(file);
+                            return false;
+                        }
+                        let mut next = Vec::new();
+                        for state in states.iter() {
+                            for (mut variant, selected) in split_c_macro_state_for_guards(
+                                state,
+                                &event.guard_path,
+                                &catalog,
+                                branch_context,
+                            ) {
+                                if selected {
+                                    apply_c_preprocessor_event(&mut variant, event);
+                                }
+                                next.push(variant);
+                            }
+                        }
+                        *states = next;
                     }
-                    dedup_c_macro_states(&mut next);
-                    if next.len() > C_MACRO_ENVIRONMENT_CAP {
-                        visiting.remove(file);
-                        return false;
-                    }
-                    *states = next;
                 }
             }
+            dedup_c_macro_states(states);
+            if states.len() > C_MACRO_ENVIRONMENT_CAP {
+                visiting.remove(file);
+                return false;
+            }
+        }
+        while retirement_schedule
+            .get(retirement_cursor)
+            .is_some_and(|(last, _)| *last < before)
+        {
+            let group = retirement_schedule[retirement_cursor].1;
+            retire_c_macro_branches(states, branch_context, std::iter::once(group));
+            *work = work.saturating_add(states.len().max(1));
+            retirement_cursor += 1;
+        }
+        dedup_c_macro_states(states);
+        if self.replay_work.get().saturating_add(*work) > C_MACRO_REPLAY_WORK_CAP {
+            visiting.remove(file);
+            return false;
         }
         visiting.remove(file);
         true
@@ -5015,7 +5101,7 @@ impl<'a> CMacroResolver<'a> {
         let mut saw_false = false;
         let mut saw_unknown = false;
         for state in &states {
-            match c_guard_truth(guards, &catalog, state) {
+            match c_guard_truth(guards, &catalog, state, file) {
                 CPreprocessorTruth::True => saw_true = true,
                 CPreprocessorTruth::False => saw_false = true,
                 CPreprocessorTruth::Unknown => saw_unknown = true,
@@ -5027,6 +5113,58 @@ impl<'a> CMacroResolver<'a> {
             CPreprocessorTruth::True
         } else {
             CPreprocessorTruth::False
+        }
+    }
+}
+
+fn c_macro_state_weight(states: &[CMacroState]) -> usize {
+    states
+        .iter()
+        .map(|state| {
+            let entry_weight = state
+                .macros
+                .len()
+                .saturating_add(state.undefined.len())
+                .saturating_add(state.branches.len())
+                .saturating_add(1);
+            let byte_weight = state
+                .macros
+                .values()
+                .map(|event| {
+                    event
+                        .name
+                        .len()
+                        .saturating_add(event.replacement.len())
+                        .saturating_add(
+                            event
+                                .parameters
+                                .iter()
+                                .map(String::len)
+                                .fold(0usize, usize::saturating_add),
+                        )
+                })
+                .fold(0usize, usize::saturating_add)
+                .saturating_add(63)
+                / 64;
+            entry_weight.saturating_add(byte_weight)
+        })
+        .fold(0usize, usize::saturating_add)
+}
+
+fn retire_c_macro_branches(
+    states: &mut [CMacroState],
+    branch_context: &str,
+    groups: impl Iterator<Item = usize>,
+) {
+    for group in groups {
+        let branch_key = format!("{branch_context}:{group}");
+        for state in states.iter_mut() {
+            if let Some(selected) = state.branches.remove(&branch_key) {
+                toggle_c_macro_fingerprint(
+                    &mut state.fingerprint,
+                    c_macro_branch_digest(&branch_key, selected),
+                );
+            }
         }
     }
 }
@@ -5053,8 +5191,9 @@ fn c_guard_truth(
     guards: &[CPreprocessorGuardFact],
     catalog: &CGuardCatalog,
     state: &CMacroState,
+    branch_context: &str,
 ) -> CPreprocessorTruth {
-    let variants = split_c_macro_state_for_guards(state, guards, catalog);
+    let variants = split_c_macro_state_for_guards(state, guards, catalog, branch_context);
     let selected = variants.iter().filter(|(_, selected)| *selected).count();
     if selected == 0 {
         CPreprocessorTruth::False
@@ -5069,6 +5208,7 @@ fn split_c_macro_state_for_guards(
     state: &CMacroState,
     guards: &[CPreprocessorGuardFact],
     catalog: &CGuardCatalog,
+    branch_context: &str,
 ) -> Vec<(CMacroState, bool)> {
     let mut variants = vec![state.clone()];
     let mut groups = guards
@@ -5078,9 +5218,10 @@ fn split_c_macro_state_for_guards(
     groups.sort();
     groups.dedup();
     for group in groups {
+        let branch_key = format!("{branch_context}:{group}");
         let mut next = Vec::new();
         for variant in variants {
-            if variant.branches.contains_key(&group) {
+            if variant.branches.contains_key(&branch_key) {
                 next.push(variant);
                 continue;
             }
@@ -5090,7 +5231,11 @@ fn split_c_macro_state_for_guards(
             };
             for selected in c_feasible_preprocessor_branches(branches, &variant) {
                 let mut branch_variant = variant.clone();
-                branch_variant.branches.insert(group, selected);
+                branch_variant.branches.insert(branch_key.clone(), selected);
+                toggle_c_macro_fingerprint(
+                    &mut branch_variant.fingerprint,
+                    c_macro_branch_digest(&branch_key, selected),
+                );
                 next.push(branch_variant);
             }
         }
@@ -5104,9 +5249,10 @@ fn split_c_macro_state_for_guards(
         .into_iter()
         .map(|variant| {
             let selected = guards.iter().all(|guard| {
+                let branch_key = format!("{branch_context}:{}", guard.group_start_byte);
                 variant
                     .branches
-                    .get(&guard.group_start_byte)
+                    .get(&branch_key)
                     .is_some_and(|branch| *branch == guard.branch_index)
             });
             (variant, selected)
@@ -5177,18 +5323,76 @@ fn c_condition_truth(guard: &CPreprocessorGuardFact, state: &CMacroState) -> CPr
 }
 
 fn c_if_expression_truth(expression: &str, state: &CMacroState) -> CPreprocessorTruth {
-    let expression = expression.trim();
+    let expression = strip_c_preprocessor_comments(expression);
+    c_if_expression_truth_at(expression.trim(), state, 0)
+}
+
+fn c_if_expression_truth_at(
+    expression: &str,
+    state: &CMacroState,
+    depth: usize,
+) -> CPreprocessorTruth {
+    const EXPRESSION_DEPTH_CAP: usize = 16;
+    if depth > EXPRESSION_DEPTH_CAP {
+        return CPreprocessorTruth::Unknown;
+    }
+    let mut expression = expression.trim();
+    while expression.starts_with('(')
+        && expression.ends_with(')')
+        && c_outer_delimiters_wrap(expression, b'(', b')')
+    {
+        expression = expression[1..expression.len() - 1].trim();
+    }
+    if let Some((left, right)) = split_c_preprocessor_boolean(expression, "||") {
+        return match (
+            c_if_expression_truth_at(left, state, depth + 1),
+            c_if_expression_truth_at(right, state, depth + 1),
+        ) {
+            (CPreprocessorTruth::True, _) | (_, CPreprocessorTruth::True) => {
+                CPreprocessorTruth::True
+            }
+            (CPreprocessorTruth::False, CPreprocessorTruth::False) => CPreprocessorTruth::False,
+            _ => CPreprocessorTruth::Unknown,
+        };
+    }
+    if let Some((left, right)) = split_c_preprocessor_boolean(expression, "&&") {
+        return match (
+            c_if_expression_truth_at(left, state, depth + 1),
+            c_if_expression_truth_at(right, state, depth + 1),
+        ) {
+            (CPreprocessorTruth::False, _) | (_, CPreprocessorTruth::False) => {
+                CPreprocessorTruth::False
+            }
+            (CPreprocessorTruth::True, CPreprocessorTruth::True) => CPreprocessorTruth::True,
+            _ => CPreprocessorTruth::Unknown,
+        };
+    }
     if expression == "0" {
         return CPreprocessorTruth::False;
     }
     if expression == "1" {
         return CPreprocessorTruth::True;
     }
-    let (negated, expression) = expression
-        .strip_prefix('!')
-        .map_or((false, expression), |rest| (true, rest.trim()));
+    if let Some(value) = parse_c_preprocessor_integer(expression) {
+        return if value == 0 {
+            CPreprocessorTruth::False
+        } else {
+            CPreprocessorTruth::True
+        };
+    }
+    if let Some(rest) = expression.strip_prefix('!') {
+        return match c_if_expression_truth_at(rest.trim(), state, depth + 1) {
+            CPreprocessorTruth::True => CPreprocessorTruth::False,
+            CPreprocessorTruth::False => CPreprocessorTruth::True,
+            CPreprocessorTruth::Unknown => CPreprocessorTruth::Unknown,
+        };
+    }
     let defined_name = expression
         .strip_prefix("defined")
+        .filter(|rest| {
+            rest.starts_with(|character: char| character.is_ascii_whitespace())
+                || rest.starts_with('(')
+        })
         .map(str::trim)
         .map(|name| name.trim_start_matches('(').trim_end_matches(')').trim())
         .filter(|name| is_c_macro_identifier(name));
@@ -5200,66 +5404,170 @@ fn c_if_expression_truth(expression: &str, state: &CMacroState) -> CPreprocessor
         } else {
             CPreprocessorTruth::Unknown
         };
-        return if negated {
-            match truth {
-                CPreprocessorTruth::True => CPreprocessorTruth::False,
-                CPreprocessorTruth::False => CPreprocessorTruth::True,
-                CPreprocessorTruth::Unknown => CPreprocessorTruth::Unknown,
-            }
-        } else {
-            truth
-        };
+        return truth;
     }
     if is_c_macro_identifier(expression) {
         if let Some(definition) = state.macros.get(expression) {
-            return match definition.replacement.trim() {
-                "" | "1" => CPreprocessorTruth::True,
-                "0" => CPreprocessorTruth::False,
-                _ => CPreprocessorTruth::Unknown,
-            };
+            if definition.replacement.trim().is_empty() {
+                return CPreprocessorTruth::True;
+            }
+            return c_if_expression_truth_at(&definition.replacement, state, depth + 1);
         }
     }
     CPreprocessorTruth::Unknown
 }
 
+fn parse_c_preprocessor_integer(expression: &str) -> Option<u128> {
+    let expression = expression
+        .strip_prefix('+')
+        .or_else(|| expression.strip_prefix('-'))
+        .unwrap_or(expression);
+    let literal = expression.trim_end_matches(['u', 'U', 'l', 'L']);
+    if literal.is_empty() {
+        return None;
+    }
+    let (digits, radix) = if let Some(hexadecimal) = literal
+        .strip_prefix("0x")
+        .or_else(|| literal.strip_prefix("0X"))
+    {
+        (hexadecimal, 16)
+    } else if let Some(binary) = literal
+        .strip_prefix("0b")
+        .or_else(|| literal.strip_prefix("0B"))
+    {
+        (binary, 2)
+    } else if literal.len() > 1 && literal.starts_with('0') {
+        (&literal[1..], 8)
+    } else {
+        (literal, 10)
+    };
+    (!digits.is_empty())
+        .then(|| u128::from_str_radix(digits, radix).ok())
+        .flatten()
+}
+
+fn split_c_preprocessor_boolean<'a>(
+    expression: &'a str,
+    operator: &str,
+) -> Option<(&'a str, &'a str)> {
+    let bytes = expression.as_bytes();
+    let operator = operator.as_bytes();
+    let mut depth = 0usize;
+    let mut index = 0usize;
+    while index + operator.len() <= bytes.len() {
+        match bytes[index] {
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            _ if depth == 0 && &bytes[index..index + operator.len()] == operator => {
+                return Some((&expression[..index], &expression[index + operator.len()..]));
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+fn strip_c_preprocessor_comments(expression: &str) -> String {
+    let bytes = expression.as_bytes();
+    let mut output = String::with_capacity(expression.len());
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index..].starts_with(b"//") {
+            break;
+        }
+        if bytes[index..].starts_with(b"/*") {
+            let Some(end) = bytes[index + 2..]
+                .windows(2)
+                .position(|window| window == b"*/")
+            else {
+                break;
+            };
+            output.push(' ');
+            index += end + 4;
+            continue;
+        }
+        output.push(bytes[index] as char);
+        index += 1;
+    }
+    output
+}
+
 fn apply_c_preprocessor_event(state: &mut CMacroState, event: &CPreprocessorEventFact) {
     match event.kind {
         CPreprocessorEventKind::Undef => {
-            state.macros.remove(&event.name);
-            state.undefined.insert(event.name.clone());
+            if let Some(previous) = state.macros.remove(&event.name) {
+                toggle_c_macro_fingerprint(&mut state.fingerprint, c_macro_event_digest(&previous));
+            }
+            if state.undefined.insert(event.name.clone()) {
+                toggle_c_macro_fingerprint(
+                    &mut state.fingerprint,
+                    c_macro_undefined_digest(&event.name),
+                );
+            }
         }
         CPreprocessorEventKind::DefineObject | CPreprocessorEventKind::DefineFunction => {
-            state.undefined.remove(&event.name);
-            state.macros.insert(event.name.clone(), event.clone());
+            if state.undefined.remove(&event.name) {
+                toggle_c_macro_fingerprint(
+                    &mut state.fingerprint,
+                    c_macro_undefined_digest(&event.name),
+                );
+            }
+            if let Some(previous) = state.macros.insert(event.name.clone(), event.clone()) {
+                toggle_c_macro_fingerprint(&mut state.fingerprint, c_macro_event_digest(&previous));
+            }
+            toggle_c_macro_fingerprint(&mut state.fingerprint, c_macro_event_digest(event));
         }
     }
 }
 
 fn dedup_c_macro_states(states: &mut Vec<CMacroState>) {
     let mut seen = HashSet::new();
-    states.retain(|state| {
-        let mut entries = state
-            .macros
-            .iter()
-            .map(|(name, event)| {
-                (
-                    name,
-                    event.kind,
-                    &event.parameters,
-                    &event.replacement,
-                    event.variadic,
-                    event.uses_stringification,
-                    event.uses_token_pasting,
-                )
-            })
-            .collect::<Vec<_>>();
-        entries.sort_by(|left, right| left.0.cmp(right.0));
-        let mut undefined = state.undefined.iter().collect::<Vec<_>>();
-        undefined.sort();
-        let mut branches = state.branches.iter().collect::<Vec<_>>();
-        branches.sort();
-        seen.insert(format!("{entries:?}:{undefined:?}:{branches:?}"))
-    });
+    states.retain(|state| seen.insert(state.fingerprint));
+}
+
+fn toggle_c_macro_fingerprint(fingerprint: &mut [u8; 32], digest: [u8; 32]) {
+    for (byte, digest_byte) in fingerprint.iter_mut().zip(digest) {
+        *byte ^= digest_byte;
+    }
+}
+
+fn c_macro_event_digest(event: &CPreprocessorEventFact) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"macro\0");
+    hasher.update(event.name.as_bytes());
+    hasher.update(&[match event.kind {
+        CPreprocessorEventKind::DefineObject => 0,
+        CPreprocessorEventKind::DefineFunction => 1,
+        CPreprocessorEventKind::Undef => 2,
+    }]);
+    for parameter in &event.parameters {
+        hasher.update(&(parameter.len() as u64).to_le_bytes());
+        hasher.update(parameter.as_bytes());
+    }
+    hasher.update(&(event.replacement.len() as u64).to_le_bytes());
+    hasher.update(event.replacement.as_bytes());
+    hasher.update(&[
+        u8::from(event.variadic),
+        u8::from(event.uses_stringification),
+        u8::from(event.uses_token_pasting),
+    ]);
+    *hasher.finalize().as_bytes()
+}
+
+fn c_macro_undefined_digest(name: &str) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"undefined\0");
+    hasher.update(name.as_bytes());
+    *hasher.finalize().as_bytes()
+}
+
+fn c_macro_branch_digest(branch_key: &str, selected: usize) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"branch\0");
+    hasher.update(branch_key.as_bytes());
+    hasher.update(&selected.to_le_bytes());
+    *hasher.finalize().as_bytes()
 }
 
 fn is_c_macro_identifier(value: &str) -> bool {
@@ -5574,33 +5882,27 @@ fn split_c_top_level(text: &str, delimiter: u8) -> Vec<&str> {
 }
 
 fn c_expanded_callable_name(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.bytes().any(|byte| {
-        !(byte == b'_'
-            || byte.is_ascii_alphanumeric()
-            || byte.is_ascii_whitespace()
-            || matches!(byte, b'&' | b'*' | b'(' | b')'))
-    }) {
-        return None;
-    }
-    let mut identifiers = Vec::new();
-    let bytes = value.as_bytes();
-    let mut index = 0usize;
-    while index < bytes.len() {
-        if bytes[index] == b'_' || bytes[index].is_ascii_alphabetic() {
-            let start = index;
-            index += 1;
-            while index < bytes.len()
-                && (bytes[index] == b'_' || bytes[index].is_ascii_alphanumeric())
-            {
-                index += 1;
-            }
-            identifiers.push(value[start..index].to_owned());
+    let mut value = value.trim();
+    loop {
+        if value.starts_with('(')
+            && value.ends_with(')')
+            && c_outer_delimiters_wrap(value, b'(', b')')
+        {
+            value = value[1..value.len() - 1].trim();
         } else {
-            index += 1;
+            break;
         }
     }
-    (identifiers.len() == 1).then(|| identifiers.remove(0))
+    if let Some(addressed) = value.strip_prefix('&') {
+        value = addressed.trim();
+        while value.starts_with('(')
+            && value.ends_with(')')
+            && c_outer_delimiters_wrap(value, b'(', b')')
+        {
+            value = value[1..value.len() - 1].trim();
+        }
+    }
+    is_c_macro_identifier(value).then(|| value.to_owned())
 }
 
 fn normalize_c_type_name(type_name: &str) -> String {
@@ -6370,6 +6672,39 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].field_name.as_deref(), Some("slot_run"));
         assert_eq!(parsed[0].target_name, "slot_target");
+    }
+
+    #[test]
+    fn c_macro_replay_handles_large_unconditional_environments_linearly() {
+        let facts = CFunctionPointerFacts {
+            preprocessor_events: (0..10_000)
+                .map(|index| CPreprocessorEventFact {
+                    kind: CPreprocessorEventKind::DefineObject,
+                    name: format!("MACRO_{index}"),
+                    parameters: Vec::new(),
+                    replacement: index.to_string(),
+                    variadic: false,
+                    uses_stringification: false,
+                    uses_token_pasting: false,
+                    guard_path: Vec::new(),
+                    line: index + 1,
+                    site_start_byte: index,
+                    site_end_byte: index + 1,
+                })
+                .collect(),
+            ..CFunctionPointerFacts::default()
+        };
+        let files = HashMap::from([("main.c".to_owned(), facts)]);
+        let all_paths = HashSet::from(["main.c".to_owned()]);
+        let resolver = CMacroResolver::new(&files, &all_paths);
+        let states = resolver.states_at("main.c", usize::MAX);
+
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].macros.len(), 10_000);
+        assert_eq!(
+            states[0].macros["MACRO_9999"].replacement,
+            "9999".to_owned()
+        );
     }
 
     #[test]
