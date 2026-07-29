@@ -83,6 +83,7 @@ pub struct ImpactHit {
 #[derive(Debug, Clone, Serialize)]
 pub struct ExploreHit {
     pub symbol: crate::model::Symbol,
+    pub score: f64,
     pub source: String,
     pub source_truncated: bool,
     pub callers: Vec<(crate::model::Symbol, Evidence)>,
@@ -879,6 +880,7 @@ impl Engine {
                 callees,
                 referenced_by,
                 references,
+                score: hit.score,
                 symbol: hit.symbol,
                 source: snippet,
                 source_truncated,
@@ -1641,6 +1643,25 @@ mod tests {
         let hits = engine.search("AuthService", 10).unwrap();
         assert_eq!(hits[0].symbol.name, "AuthService");
         assert!(hits[0].score > hits[1].score);
+    }
+
+    #[test]
+    fn semantic_search_uses_matching_file_names_as_ranking_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("atomic_file.rs"),
+            "fn write_atomic() {}\nfn publish() { write_atomic(); }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("parser.rs"),
+            "fn atomic_publication_parser_fallback() {}\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+
+        let hits = engine.search("atomic file publication", 10).unwrap();
+        assert_eq!(hits[0].symbol.file, "atomic_file.rs");
     }
 
     #[test]

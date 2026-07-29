@@ -4893,6 +4893,12 @@ impl Store {
             let normalized_query = query.trim().to_lowercase();
             let name = symbol.name.to_lowercase();
             let qualified_name = symbol.qualified_name.to_lowercase();
+            let file_terms = identifier_segments(&symbol.file);
+            let file_matches = terms
+                .iter()
+                .filter(|term| file_terms.contains(*term))
+                .count();
+            score += file_matches as f64 * 4.0;
             if name == normalized_query || qualified_name == normalized_query {
                 score += 10.0;
             } else if terms.contains(&name) {

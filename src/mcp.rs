@@ -584,6 +584,7 @@ pub fn format_explore_text(
         let right_exact = right.symbol.name.to_ascii_lowercase() == normalized_query;
         right_exact
             .cmp(&left_exact)
+            .then_with(|| right.score.total_cmp(&left.score))
             .then_with(|| {
                 (right.callers.len()
                     + right.callees.len()
