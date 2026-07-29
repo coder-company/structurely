@@ -3639,8 +3639,10 @@ mod tests {
                  AliasedSlot({ content: contentBuilder })\n\
                  AliasedSlot({ content: undecorated })\n\
                  AliasedSlot({ missing: contentBuilder })\n\
+                 AliasedSlot({ content: () => { Text('adapter') } })\n\
                  AliasedSlot() { Text('inline') }\n\
                  MultiSlot() { Text('ambiguous') }\n\
+                 Column() { AliasedSlot({ content: () => { Text('recovered') } }) }\n\
                }\n\
              }\n",
         )
@@ -3662,7 +3664,7 @@ mod tests {
             .into_iter()
             .filter(|(_, evidence)| evidence.provenance == "framework/arkui-builder-param")
             .collect::<Vec<_>>();
-        assert_eq!(registrations.len(), 2);
+        assert_eq!(registrations.len(), 4);
         assert!(registrations.iter().any(|(target, evidence)| {
             target.qualified_name == "importedContent"
                 && evidence.confidence == 0.97
@@ -3671,10 +3673,26 @@ mod tests {
         let inline = registrations
             .iter()
             .find(|(target, evidence)| {
-                target.name == "<BuilderParam child AliasedSlot>" && evidence.line == 9
+                target.name == "<BuilderParam child AliasedSlot>" && evidence.line == 10
             })
             .map(|(target, _)| target.clone())
             .unwrap();
+        let adapter = registrations
+            .iter()
+            .find(|(target, evidence)| {
+                target.name == "<BuilderParam adapter AliasedSlot.content>" && evidence.line == 9
+            })
+            .map(|(target, _)| target.clone())
+            .unwrap();
+        assert_eq!(
+            registrations
+                .iter()
+                .filter(|(target, _)| {
+                    target.name == "<BuilderParam adapter AliasedSlot.content>"
+                })
+                .count(),
+            2
+        );
 
         let slot_build = symbol(&engine, "Slot.build");
         let dispatches = engine
@@ -3683,11 +3701,12 @@ mod tests {
             .into_iter()
             .filter(|(_, evidence)| evidence.provenance == "framework/arkui-builder-param-dispatch")
             .collect::<Vec<_>>();
-        assert_eq!(dispatches.len(), 2);
+        assert_eq!(dispatches.len(), 4);
         assert!(dispatches
             .iter()
             .any(|(target, _)| target.qualified_name == "importedContent"));
         assert!(dispatches.iter().any(|(target, _)| target.id == inline.id));
+        assert!(dispatches.iter().any(|(target, _)| target.id == adapter.id));
 
         let original = fs::read_to_string(&host).unwrap();
         fs::write(&host, format!("// position-only edit\n{original}")).unwrap();
@@ -3699,6 +3718,15 @@ mod tests {
             .into_iter()
             .any(|(target, evidence)| {
                 target.id == inline.id
+                    && evidence.provenance == "framework/arkui-builder-param"
+                    && evidence.line == 11
+            }));
+        assert!(engine
+            .callees(&moved_host.id)
+            .unwrap()
+            .into_iter()
+            .any(|(target, evidence)| {
+                target.id == adapter.id
                     && evidence.provenance == "framework/arkui-builder-param"
                     && evidence.line == 10
             }));

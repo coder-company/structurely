@@ -437,6 +437,22 @@
             "\"confidence\": 0.97",
             "\"line\": 93"
           ]
+        },
+        {
+          "command": "callees",
+          "query": "ListExchange.build",
+          "file": "code/UI/ListBeExchange/ListExchange/src/main/ets/utils/ListExchange.ets",
+          "contains": [
+            "\"qualified_name\": \"ListExchangeViewComponent.build.<BuilderParam adapter ListExchange.deductionView>\"",
+            "\"provenance\": \"framework/arkui-builder-param-dispatch\""
+          ],
+          "recordContains": [
+            "\"qualified_name\": \"ListExchangeViewComponent.build.<BuilderParam adapter ListExchange.deductionView>\"",
+            "code/UI/ListBeExchange/ListExchange/src/main/ets/view/ListExchangeView.ets",
+            "\"provenance\": \"framework/arkui-builder-param-dispatch\"",
+            "\"confidence\": 0.97",
+            "\"line\": 117"
+          ]
         }
       ]
     }
