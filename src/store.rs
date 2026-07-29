@@ -11,7 +11,7 @@ use std::{
     time::Instant,
 };
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const WAL_AUTOCHECKPOINT_PAGES: u32 = 256;
 const JOURNAL_SIZE_LIMIT_BYTES: u64 = 16 * 1024 * 1024;
 const INLINE_CALLBACK_DEPTH_CAP: usize = 16;
@@ -168,7 +168,8 @@ impl Store {
                 explanation TEXT NOT NULL,
                 evidence_file TEXT NOT NULL,
                 evidence_line INTEGER NOT NULL,
-                UNIQUE(source_public_id, target_public_id, kind, provenance, evidence_file, evidence_line)
+                evidence_site INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(source_public_id, target_public_id, kind, provenance, evidence_file, evidence_line, evidence_site)
             );
             CREATE INDEX IF NOT EXISTS relationships_source_idx
                 ON relationships(source_public_id, kind);
@@ -313,6 +314,43 @@ impl Store {
             COMMIT;
             ",
         )?;
+        let relationship_columns = self
+            .connection
+            .prepare("PRAGMA table_info(relationships)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<HashSet<_>>>()?;
+        if !relationship_columns.contains("evidence_site") {
+            self.connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE relationships RENAME TO relationships_v1;
+                 CREATE TABLE relationships (
+                    id INTEGER PRIMARY KEY,
+                    source_public_id TEXT NOT NULL,
+                    target_public_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    provenance TEXT NOT NULL,
+                    confidence REAL NOT NULL CHECK(confidence >= 0 AND confidence <= 1),
+                    explanation TEXT NOT NULL,
+                    evidence_file TEXT NOT NULL,
+                    evidence_line INTEGER NOT NULL,
+                    evidence_site INTEGER NOT NULL DEFAULT 0,
+                    UNIQUE(source_public_id,target_public_id,kind,provenance,evidence_file,evidence_line,evidence_site)
+                 );
+                 INSERT INTO relationships(
+                    id,source_public_id,target_public_id,kind,provenance,confidence,
+                    explanation,evidence_file,evidence_line,evidence_site
+                 )
+                 SELECT id,source_public_id,target_public_id,kind,provenance,confidence,
+                    explanation,evidence_file,evidence_line,0
+                 FROM relationships_v1;
+                 DROP TABLE relationships_v1;
+                 CREATE INDEX relationships_source_idx
+                    ON relationships(source_public_id,kind);
+                 CREATE INDEX relationships_target_idx
+                    ON relationships(target_public_id,kind);
+                 COMMIT;",
+            )?;
+        }
         Self::ensure_column(
             &self.connection,
             "unresolved_calls",
@@ -572,9 +610,10 @@ impl Store {
 
         let mut relationship_statement = self.connection.prepare(
             "SELECT source_public_id,target_public_id,kind,provenance,confidence,
-                    explanation,evidence_file,evidence_line
+                    explanation,evidence_file,evidence_line,evidence_site
              FROM relationships
-             ORDER BY source_public_id,target_public_id,kind,provenance,evidence_file,evidence_line",
+             ORDER BY source_public_id,target_public_id,kind,provenance,evidence_file,
+                      evidence_line,evidence_site",
         )?;
         let relationships = relationship_statement
             .query_map([], |row| {
@@ -588,6 +627,8 @@ impl Store {
                         explanation: row.get(5)?,
                         file: row.get(6)?,
                         line: row.get::<_, i64>(7)? as usize,
+                        site: (row.get::<_, i64>(8)? != 0)
+                            .then(|| row.get::<_, i64>(8).unwrap_or_default() as usize),
                     },
                 })
             })?
@@ -688,7 +729,7 @@ impl Store {
             "DELETE FROM relationships
              WHERE source_public_id IN (SELECT public_id FROM fastapi_generated_symbols)
                 OR target_public_id IN (SELECT public_id FROM fastapi_generated_symbols)
-                OR provenance = 'framework/fastapi-route'",
+                OR provenance IN ('framework/fastapi-route','framework/fastapi-dependency')",
             [],
         )?;
         tx.execute(
@@ -946,6 +987,10 @@ impl Store {
             || !file.fastapi.factories.is_empty()
             || !file.fastapi.mounts.is_empty()
             || !file.fastapi.routes.is_empty()
+            || !file.fastapi.dependencies.is_empty()
+            || !file.fastapi.dependency_aliases.is_empty()
+            || !file.fastapi.dependency_factories.is_empty()
+            || !file.fastapi.dependency_type_aliases.is_empty()
         {
             let payload = serde_json::to_string(&file.fastapi)?;
             tx.prepare_cached("INSERT INTO fastapi_fact_batches(file_id,payload) VALUES (?1,?2)")?
@@ -2087,6 +2132,112 @@ impl Store {
                         &endpoint_file,
                         route_fact.line,
                     ),
+                },
+            )?;
+            resolved += 1;
+        }
+        let mut callable_aliases = HashMap::<RouterKey, FastApiRouterRef>::new();
+        let mut callable_factories = HashMap::<RouterKey, FastApiRouterRef>::new();
+        let mut dependency_sites = Vec::new();
+        for (path, (_, facts)) in &files {
+            for alias in facts
+                .aliases
+                .iter()
+                .chain(facts.dependency_aliases.iter())
+                .chain(facts.dependency_type_aliases.iter())
+            {
+                callable_aliases.insert((path.clone(), alias.name.clone()), alias.router.clone());
+            }
+            for factory in &facts.dependency_factories {
+                callable_factories
+                    .insert((path.clone(), factory.name.clone()), factory.router.clone());
+            }
+            for dependency in &facts.dependencies {
+                dependency_sites.push((path.clone(), dependency.clone()));
+            }
+        }
+        dependency_sites.sort_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.line.cmp(&right.1.line))
+                .then_with(|| left.1.owner_id.cmp(&right.1.owner_id))
+        });
+
+        let mut callable_symbols = HashMap::<RouterKey, Vec<(String, String)>>::new();
+        let mut all_paths = tx
+            .prepare("SELECT path FROM files ORDER BY path")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut symbol_statement = tx.prepare(
+            "SELECT f.path,s.name,s.qualified_name,s.public_id
+             FROM symbols s JOIN files f ON f.id=s.file_id
+             WHERE s.kind IN ('function','method')
+             ORDER BY f.path,s.name,s.qualified_name,s.public_id",
+        )?;
+        for symbol in symbol_statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })? {
+            let (file, name, qualified_name, public_id) = symbol?;
+            callable_symbols
+                .entry((file.clone(), name))
+                .or_default()
+                .push((qualified_name.clone(), public_id.clone()));
+            callable_symbols
+                .entry((file, qualified_name.clone()))
+                .or_default()
+                .push((qualified_name, public_id));
+        }
+        drop(symbol_statement);
+        all_paths.sort();
+        all_paths.dedup();
+        for candidates in callable_symbols.values_mut() {
+            candidates.sort();
+            candidates.dedup();
+        }
+
+        for (current_file, site) in dependency_sites.into_iter().take(WORK_CAP) {
+            let owner_exists = tx
+                .query_row(
+                    "SELECT 1 FROM symbols WHERE public_id=?1 AND kind IN ('function','method')",
+                    [&site.owner_id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if !owner_exists {
+                continue;
+            }
+            let Some(target_id) = resolve_fastapi_callable_ref(
+                &site.dependency,
+                &current_file,
+                &all_paths,
+                &callable_symbols,
+                &callable_aliases,
+                &callable_factories,
+                0,
+                &mut HashSet::new(),
+            ) else {
+                continue;
+            };
+            Self::insert_relationship(
+                tx,
+                &Relationship {
+                    source_id: site.owner_id,
+                    target_id,
+                    kind: RelationshipKind::Calls,
+                    evidence: Evidence::new(
+                        "framework/fastapi-dependency",
+                        0.995,
+                        format!("{} receives an exact FastAPI dependency", site.owner_name),
+                        &current_file,
+                        site.line,
+                    )
+                    .at_site(site.site_start_byte),
                 },
             )?;
             resolved += 1;
@@ -3611,8 +3762,8 @@ impl Store {
         tx.prepare_cached(
             "INSERT OR REPLACE INTO relationships(
                 source_public_id, target_public_id, kind, provenance, confidence,
-                explanation, evidence_file, evidence_line
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                explanation, evidence_file, evidence_line, evidence_site
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
         )?
         .execute(params![
             relationship.source_id,
@@ -3622,7 +3773,8 @@ impl Store {
             relationship.evidence.confidence,
             relationship.evidence.explanation,
             relationship.evidence.file,
-            relationship.evidence.line as i64
+            relationship.evidence.line as i64,
+            relationship.evidence.site.unwrap_or(0) as i64
         ])?;
         Ok(())
     }
@@ -3744,10 +3896,13 @@ impl Store {
         let sql = format!(
             "SELECT s.public_id,s.semantic_key,s.language,s.kind,s.name,s.qualified_name,
                     f.path,s.start_byte,s.end_byte,s.start_line,s.end_line,
-                    r.provenance,r.confidence,r.explanation,r.evidence_file,r.evidence_line
+                    r.provenance,r.confidence,r.explanation,r.evidence_file,r.evidence_line,
+                    r.evidence_site
              FROM relationships r JOIN symbols s ON s.public_id={join_side}
              JOIN files f ON f.id=s.file_id
-             WHERE {filter_side}=?1 AND r.kind=?2 ORDER BY r.confidence DESC,s.qualified_name"
+             WHERE {filter_side}=?1 AND r.kind=?2
+             ORDER BY r.confidence DESC,s.qualified_name,r.evidence_file,
+                      r.evidence_line,r.evidence_site"
         );
         let mut statement = self.connection.prepare(&sql)?;
         let rows = statement.query_map(params![symbol_id, kind.to_string()], |row| {
@@ -3759,6 +3914,8 @@ impl Store {
                     explanation: row.get(13)?,
                     file: row.get(14)?,
                     line: row.get::<_, i64>(15)? as usize,
+                    site: (row.get::<_, i64>(16)? != 0)
+                        .then(|| row.get::<_, i64>(16).unwrap_or_default() as usize),
                 },
             ))
         })?;
@@ -3981,16 +4138,33 @@ fn resolve_fastapi_router_ref(
     let target_file = match reference.target_file_hint.as_deref() {
         None => current_file.to_owned(),
         Some(hint) => {
-            let matches = paths
-                .iter()
-                .filter(|path| **path == hint || python_module_hint_matches(hint, path))
-                .cloned()
-                .collect::<HashSet<_>>();
-            let matches = matches.into_iter().collect::<Vec<_>>();
-            let [path] = matches.as_slice() else {
-                return None;
-            };
-            path.clone()
+            if paths.iter().any(|path| path == hint) {
+                hint.to_owned()
+            } else {
+                let matches = paths
+                    .iter()
+                    .filter(|path| python_module_hint_matches(hint, path))
+                    .cloned()
+                    .collect::<HashSet<_>>();
+                let mut matches = matches.into_iter().collect::<Vec<_>>();
+                matches.sort();
+                let normalized_hint = hint.replace(['.', '\\'], "/");
+                let initializer = matches.iter().find(|path| {
+                    let normalized = path.replace('\\', "/");
+                    normalized.ends_with(&format!(
+                        "{}/__init__.py",
+                        normalized_hint.trim_matches('/')
+                    ))
+                });
+                if let Some(initializer) = initializer {
+                    initializer.clone()
+                } else {
+                    let [path] = matches.as_slice() else {
+                        return None;
+                    };
+                    path.clone()
+                }
+            }
         }
     };
     let key = (target_file, reference.name.clone());
@@ -4030,6 +4204,129 @@ fn resolve_fastapi_router_ref(
         seen,
     );
     seen.remove(&key);
+    resolved
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_fastapi_callable_ref(
+    reference: &FastApiRouterRef,
+    current_file: &str,
+    paths: &[String],
+    symbols: &HashMap<(String, String), Vec<(String, String)>>,
+    aliases: &HashMap<(String, String), FastApiRouterRef>,
+    factories: &HashMap<(String, String), FastApiRouterRef>,
+    depth: usize,
+    seen: &mut HashSet<(String, String, bool)>,
+) -> Option<String> {
+    if depth > 16 {
+        return None;
+    }
+    let target_file = match reference.target_file_hint.as_deref() {
+        None => current_file.to_owned(),
+        Some(hint) => {
+            if paths.iter().any(|path| path == hint) {
+                hint.to_owned()
+            } else {
+                let matches = paths
+                    .iter()
+                    .filter(|path| python_module_hint_matches(hint, path))
+                    .cloned()
+                    .collect::<HashSet<_>>();
+                let mut matches = matches.into_iter().collect::<Vec<_>>();
+                matches.sort();
+                let normalized_hint = hint.replace(['.', '\\'], "/");
+                if let Some(initializer) = matches.iter().find(|path| {
+                    path.replace('\\', "/").ends_with(&format!(
+                        "{}/__init__.py",
+                        normalized_hint.trim_matches('/')
+                    ))
+                }) {
+                    initializer.clone()
+                } else {
+                    let [path] = matches.as_slice() else {
+                        return None;
+                    };
+                    path.clone()
+                }
+            }
+        }
+    };
+    let type_alias_name = reference.name.strip_prefix("@dependency-type:");
+    let key = (
+        target_file,
+        type_alias_name.unwrap_or(&reference.name).to_owned(),
+    );
+    let seen_key = (key.0.clone(), key.1.clone(), reference.factory);
+    if !seen.insert(seen_key.clone()) {
+        return None;
+    }
+    let resolved = if type_alias_name.is_some() {
+        aliases.get(&key).and_then(|alias| {
+            resolve_fastapi_callable_ref(
+                alias,
+                &key.0,
+                paths,
+                symbols,
+                aliases,
+                factories,
+                depth + 1,
+                seen,
+            )
+        })
+    } else if reference.factory {
+        if let Some(returned) = factories.get(&key) {
+            resolve_fastapi_callable_ref(
+                returned,
+                &key.0,
+                paths,
+                symbols,
+                aliases,
+                factories,
+                depth + 1,
+                seen,
+            )
+        } else if let Some(alias) = aliases.get(&key) {
+            let mut target = alias.clone();
+            target.factory = true;
+            resolve_fastapi_callable_ref(
+                &target,
+                &key.0,
+                paths,
+                symbols,
+                aliases,
+                factories,
+                depth + 1,
+                seen,
+            )
+        } else {
+            None
+        }
+    } else if let Some(candidates) = symbols.get(&key) {
+        let unique = candidates
+            .iter()
+            .map(|(_, public_id)| public_id)
+            .collect::<HashSet<_>>();
+        let unique = unique.into_iter().collect::<Vec<_>>();
+        let [public_id] = unique.as_slice() else {
+            seen.remove(&seen_key);
+            return None;
+        };
+        Some((*public_id).clone())
+    } else if let Some(alias) = aliases.get(&key) {
+        resolve_fastapi_callable_ref(
+            alias,
+            &key.0,
+            paths,
+            symbols,
+            aliases,
+            factories,
+            depth + 1,
+            seen,
+        )
+    } else {
+        None
+    };
+    seen.remove(&seen_key);
     resolved
 }
 

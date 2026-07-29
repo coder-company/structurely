@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path};
 
-pub const GRAPH_MODEL_VERSION: u32 = 58;
+pub const GRAPH_MODEL_VERSION: u32 = 59;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -236,6 +236,8 @@ pub struct Evidence {
     pub explanation: String,
     pub file: String,
     pub line: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site: Option<usize>,
 }
 
 impl Evidence {
@@ -252,7 +254,13 @@ impl Evidence {
             explanation: explanation.into(),
             file: file.into(),
             line,
+            site: None,
         }
+    }
+
+    pub fn at_site(mut self, site: usize) -> Self {
+        self.site = Some(site);
+        self
     }
 }
 
@@ -423,12 +431,18 @@ pub(crate) struct FastApiFacts {
     pub factories: Vec<FastApiFactoryFact>,
     pub mounts: Vec<FastApiMountFact>,
     pub routes: Vec<FastApiRouteFact>,
+    pub dependencies: Vec<FastApiDependencyFact>,
+    pub dependency_aliases: Vec<FastApiAliasFact>,
+    pub dependency_factories: Vec<FastApiFactoryFact>,
+    pub dependency_type_aliases: Vec<FastApiAliasFact>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct FastApiAliasFact {
     pub name: String,
     pub router: FastApiRouterRef,
+    #[serde(default)]
+    pub definition_start_byte: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -470,6 +484,16 @@ pub(crate) struct FastApiRouteFact {
     pub end_byte: usize,
     pub line: usize,
     pub end_line: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct FastApiDependencyFact {
+    pub owner_id: String,
+    pub owner_name: String,
+    pub dependency: FastApiRouterRef,
+    pub line: usize,
+    #[serde(default)]
+    pub site_start_byte: usize,
 }
 
 #[derive(Debug, Clone)]

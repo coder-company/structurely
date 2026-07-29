@@ -187,6 +187,34 @@ impl ProjectResolutionContext {
                     .flat_map(|fact| [&mut fact.parent, &mut fact.child]),
             )
             .chain(facts.fastapi.routes.iter_mut().map(|fact| &mut fact.router))
+            .chain(
+                facts
+                    .fastapi
+                    .dependencies
+                    .iter_mut()
+                    .map(|fact| &mut fact.dependency),
+            )
+            .chain(
+                facts
+                    .fastapi
+                    .dependency_aliases
+                    .iter_mut()
+                    .map(|fact| &mut fact.router),
+            )
+            .chain(
+                facts
+                    .fastapi
+                    .dependency_factories
+                    .iter_mut()
+                    .map(|fact| &mut fact.router),
+            )
+            .chain(
+                facts
+                    .fastapi
+                    .dependency_type_aliases
+                    .iter_mut()
+                    .map(|fact| &mut fact.router),
+            )
         {
             let Some(hint) = reference.target_file_hint.as_deref() else {
                 continue;

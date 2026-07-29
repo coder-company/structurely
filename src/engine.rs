@@ -7050,6 +7050,261 @@ def outer():
     }
 
     #[test]
+    fn fastapi_dependencies_resolve_direct_annotated_decorator_and_factory_returns() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("dependencies.py"),
+            "from typing import Annotated\n\
+             from fastapi import Depends\n\
+             def get_settings(): return object()\n\
+             def get_graphiti(): return object()\n\
+             def dependency_factory():\n\
+             \x20   async def combined_dependency(): return True\n\
+             \x20   return combined_dependency\n\
+             GraphDependency = Annotated[object, Depends(get_graphiti)]\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("api.py"),
+            "from typing import Annotated\n\
+             from fastapi import Depends, FastAPI\n\
+             from .dependencies import get_settings, dependency_factory, GraphDependency\n\
+             app = FastAPI()\n\
+             combined_auth = dependency_factory()\n\
+             @app.get('/items', dependencies=[Depends(combined_auth)])\n\
+             async def items(settings: Annotated[object, Depends(get_settings)], graph: GraphDependency): return settings\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let items = engine
+            .search("items", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.name == "items")
+            .unwrap()
+            .symbol;
+        let mut dependencies = engine
+            .callees(&items.id)
+            .unwrap()
+            .into_iter()
+            .filter(|(_, evidence)| evidence.provenance == "framework/fastapi-dependency")
+            .map(|(symbol, evidence)| (symbol.qualified_name, evidence.confidence))
+            .collect::<Vec<_>>();
+        dependencies.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            dependencies,
+            [
+                ("dependency_factory.combined_dependency".to_owned(), 0.995),
+                ("get_graphiti".to_owned(), 0.995),
+                ("get_settings".to_owned(), 0.995)
+            ]
+        );
+    }
+
+    #[test]
+    fn fastapi_dependencies_follow_barrels_and_fail_closed_on_spoofs_shadows_and_cycles() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join("pkg")).unwrap();
+        fs::write(
+            temp.path().join("pkg/deps.py"),
+            "def verified_dependency(): return True\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("pkg/__init__.py"),
+            "from .deps import verified_dependency\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("cycle_a.py"),
+            "from .cycle_b import dependency\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("cycle_b.py"),
+            "from .cycle_a import dependency\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("api.py"),
+            "from fastapi import Depends\n\
+             from .pkg import verified_dependency\n\
+             from .cycle_a import dependency as cyclic\n\
+             def accepted(value=Depends(verified_dependency)): return value\n\
+             def empty(value=Depends()): return value\n\
+             def cycle(value=Depends(cyclic)): return value\n\
+             def shadowed(Depends, value=Depends(verified_dependency)): return value\n\
+             class Annotated:\n\
+             \x20   def __class_getitem__(cls, value): return value\n\
+             def fake_annotated(value: Annotated[object, Depends(verified_dependency)]): return value\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("spoof.py"),
+            "def Depends(value): return value\n\
+             def fake(): return True\n\
+             def rejected(value=Depends(fake)): return value\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let accepted = engine
+            .search("accepted", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.name == "accepted")
+            .unwrap()
+            .symbol;
+        let dependencies = engine
+            .callees(&accepted.id)
+            .unwrap()
+            .into_iter()
+            .filter(|(_, evidence)| evidence.provenance == "framework/fastapi-dependency")
+            .collect::<Vec<_>>();
+        assert_eq!(dependencies.len(), 1);
+        assert_eq!(dependencies[0].0.name, "verified_dependency");
+        for name in ["empty", "cycle", "shadowed", "fake_annotated", "rejected"] {
+            let owner = engine
+                .search(name, 10)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.name == name)
+                .unwrap()
+                .symbol;
+            assert!(engine
+                .callees(&owner.id)
+                .unwrap()
+                .iter()
+                .all(|(_, evidence)| evidence.provenance != "framework/fastapi-dependency"));
+        }
+    }
+
+    #[test]
+    fn fastapi_dependency_edges_are_stable_and_clean_up_incrementally() {
+        let temp = tempfile::tempdir().unwrap();
+        let api = temp.path().join("api.py");
+        fs::write(
+            &api,
+            "from fastapi import Depends\n\
+             def dependency(): return True\n\
+             def endpoint(value=Depends(dependency)): return value\n",
+        )
+        .unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let endpoint = engine
+            .search("endpoint", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.name == "endpoint")
+            .unwrap()
+            .symbol;
+        let first = engine
+            .callees(&endpoint.id)
+            .unwrap()
+            .into_iter()
+            .find(|(_, evidence)| evidence.provenance == "framework/fastapi-dependency")
+            .unwrap();
+        engine.sync().unwrap();
+        let second = engine
+            .callees(&endpoint.id)
+            .unwrap()
+            .into_iter()
+            .find(|(_, evidence)| evidence.provenance == "framework/fastapi-dependency")
+            .unwrap();
+        assert_eq!(first.0.id, second.0.id);
+
+        fs::write(
+            &api,
+            "from fastapi import Depends\n\
+             def dependency(): return True\n\
+             def endpoint(value=None): return value\n",
+        )
+        .unwrap();
+        engine.sync().unwrap();
+        let endpoint = engine
+            .search("endpoint", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.name == "endpoint")
+            .unwrap()
+            .symbol;
+        assert!(engine
+            .callees(&endpoint.id)
+            .unwrap()
+            .iter()
+            .all(|(_, evidence)| evidence.provenance != "framework/fastapi-dependency"));
+    }
+
+    #[test]
+    fn fastapi_dependencies_enforce_alias_dominance_type_proof_and_site_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("types.py"),
+            "def OrdinaryAnnotation(): return object()\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("api.py"),
+            "from fastapi import Depends\n\
+             from .types import OrdinaryAnnotation\n\
+             def direct(): return True\n\
+             def factory():\n\
+             \x20   def nested(): return True\n\
+             \x20   return nested\n\
+             def local_factory(): return direct\n\
+             def before(value=Depends(late)): return value\n\
+             late = factory()\n\
+             reassigned = factory()\n\
+             reassigned = local_factory()\n\
+             def rejected(value=Depends(reassigned)): return value\n\
+             local_alias = local_factory()\n\
+             def accepted(value=Depends(local_alias)): return value\n\
+             def typed(value: OrdinaryAnnotation): return value\n\
+             InvalidAlias = Depends(direct)\n\
+             def invalid_type_alias(value: InvalidAlias): return value\n\
+             def before_type_alias(value: LateAlias): return value\n\
+             LateAlias = Annotated[object, Depends(direct)]\n\
+             def duplicate(left=Depends(direct), right=Depends(direct)): return left\n\
+             def custom(callback): return callback\n\
+             @custom(Depends(direct))\n\
+             def decorated(): return True\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let dependency_edges = |name: &str| {
+            let owner = engine
+                .search(name, 20)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.name == name)
+                .unwrap()
+                .symbol;
+            engine
+                .callees(&owner.id)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, evidence)| evidence.provenance == "framework/fastapi-dependency")
+                .collect::<Vec<_>>()
+        };
+
+        for rejected in [
+            "before",
+            "rejected",
+            "typed",
+            "invalid_type_alias",
+            "before_type_alias",
+            "decorated",
+        ] {
+            assert!(dependency_edges(rejected).is_empty(), "{rejected}");
+        }
+        let accepted = dependency_edges("accepted");
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].0.name, "direct");
+        let duplicate = dependency_edges("duplicate");
+        assert_eq!(duplicate.len(), 2);
+        assert_ne!(duplicate[0].1.site, duplicate[1].1.site);
+    }
+
+    #[test]
     fn fastapi_supports_verified_module_style_constructors() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(
