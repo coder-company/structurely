@@ -7838,6 +7838,205 @@ def outer():
     }
 
     #[test]
+    fn c_function_pointer_field_propagation_reaches_a_fixed_point_and_rejects_siblings() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("dispatch.c"),
+            "typedef int (*Fn)(int);\n\
+             typedef struct Hook { Fn func; int value; } Hook;\n\
+             typedef struct Registry { Fn fn; int value; } Registry;\n\
+             typedef struct Stage { Fn cb; } Stage;\n\
+             static int leaf(int value) { return value + 1; }\n\
+             void seed(Hook *hook) { hook->func = leaf; }\n\
+             void wire(Hook *hook, Registry *registry, Stage *stage) {\n\
+               registry->fn = hook->func;\n\
+               stage->cb = registry->fn;\n\
+               registry->value = hook->value;\n\
+               registry->fn = stage->cb;\n\
+             }\n\
+             int through_registry(Registry *registry, int value) { return registry->fn(value); }\n\
+             int through_stage(Stage *stage, int value) { return stage->cb(value); }\n\
+             int non_pointer(Registry *registry) { return registry->value(); }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let snapshot = engine.snapshot().unwrap();
+        let symbols = snapshot
+            .symbols
+            .iter()
+            .map(|symbol| (symbol.id.as_str(), symbol.name.as_str()))
+            .collect::<std::collections::HashMap<_, _>>();
+        let edges = snapshot
+            .relationships
+            .iter()
+            .filter(|edge| edge.evidence.provenance == "dynamic/c-function-pointer-dispatch")
+            .map(|edge| {
+                (
+                    symbols[edge.source_id.as_str()],
+                    symbols[edge.target_id.as_str()],
+                )
+            })
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            edges,
+            std::collections::HashSet::from([
+                ("through_registry", "leaf"),
+                ("through_stage", "leaf"),
+            ])
+        );
+    }
+
+    #[test]
+    fn c_function_pointer_field_propagation_is_include_safe_and_incremental() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("hook.h"),
+            "typedef int (*Fn)(int);\n\
+             typedef struct Hook { Fn func; } Hook;\n\
+             typedef struct Registry { Fn fn; } Registry;\n",
+        )
+        .unwrap();
+        let source = temp.path().join("dispatch.c");
+        let render = |register: bool| {
+            format!(
+                "#include \"hook.h\"\n\
+                 static int leaf(int value) {{ return value; }}\n\
+                 void seed(Hook *hook) {{ {} }}\n\
+                 void wire(Hook *hook, Registry *registry) {{ registry->fn = hook->func; }}\n\
+                 int dispatch(Registry *registry, int value) {{ return registry->fn(value); }}\n",
+                if register {
+                    "hook->func = leaf;"
+                } else {
+                    "(void)hook;"
+                }
+            )
+        };
+        fs::write(&source, render(true)).unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let edge_count = |engine: &Engine| {
+            engine
+                .snapshot()
+                .unwrap()
+                .relationships
+                .iter()
+                .filter(|edge| edge.evidence.provenance == "dynamic/c-function-pointer-dispatch")
+                .count()
+        };
+        assert_eq!(edge_count(&engine), 1);
+
+        fs::write(&source, render(false)).unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 1);
+        assert_eq!(edge_count(&engine), 0);
+
+        fs::write(&source, render(true)).unwrap();
+        fs::write(
+            temp.path().join("ambiguous.h"),
+            "typedef int (*Fn)(int);\n\
+             typedef struct Hook { Fn func; } Hook;\n",
+        )
+        .unwrap();
+        fs::write(
+            &source,
+            render(true).replace(
+                "#include \"hook.h\"",
+                "#include \"hook.h\"\n#include \"ambiguous.h\"",
+            ),
+        )
+        .unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 2);
+        assert_eq!(edge_count(&engine), 0);
+    }
+
+    #[test]
+    fn c_function_pointer_arrays_are_typedef_proven_file_local_and_site_exact() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("callbacks.c"),
+            "typedef int (*callback_t)(int);\n\
+             typedef int callback_fn(int);\n\
+             typedef int data_t;\n\
+             static int alpha(int value) { return value + 1; }\n\
+             static int beta(int value) { return value + 2; }\n\
+             static callback_t handlers[] = { alpha, [3] = (callback_t)beta };\n\
+             static callback_fn *functions[] = { beta };\n\
+             static data_t data[] = { alpha };\n\
+             int run(int slot, int value) {\n\
+               return handlers[slot](value) + handlers[slot + 1](value);\n\
+             }\n\
+             int run_function_type(int slot, int value) { return functions[slot](value); }\n\
+             int not_a_dispatch(int slot) { return data[slot]; }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("other.c"),
+            "typedef int (*callback_t)(int);\n\
+             static int gamma(int value) { return value + 3; }\n\
+             static callback_t handlers[] = { gamma };\n\
+             int other_run(int slot, int value) { return handlers[slot](value); }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let snapshot = engine.snapshot().unwrap();
+        let symbols = snapshot
+            .symbols
+            .iter()
+            .map(|symbol| (symbol.id.as_str(), symbol))
+            .collect::<std::collections::HashMap<_, _>>();
+        let edges = snapshot
+            .relationships
+            .iter()
+            .filter(|edge| edge.evidence.provenance == "dynamic/c-function-pointer-dispatch")
+            .map(|edge| {
+                (
+                    symbols[edge.source_id.as_str()].name.as_str(),
+                    symbols[edge.target_id.as_str()].name.as_str(),
+                    edge.evidence.site.unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let run = edges
+            .iter()
+            .filter(|(source, _, _)| *source == "run")
+            .collect::<Vec<_>>();
+        assert_eq!(run.len(), 4);
+        assert_eq!(
+            run.iter()
+                .map(|(_, target, _)| *target)
+                .collect::<std::collections::HashSet<_>>(),
+            std::collections::HashSet::from(["alpha", "beta"])
+        );
+        assert_eq!(
+            run.iter()
+                .map(|(_, _, site)| *site)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            2
+        );
+        assert_eq!(
+            edges
+                .iter()
+                .filter(|(source, _, _)| *source == "run_function_type")
+                .map(|(_, target, _)| *target)
+                .collect::<Vec<_>>(),
+            ["beta"]
+        );
+        assert_eq!(
+            edges
+                .iter()
+                .filter(|(source, _, _)| *source == "other_run")
+                .map(|(_, target, _)| *target)
+                .collect::<Vec<_>>(),
+            ["gamma"]
+        );
+        assert!(edges
+            .iter()
+            .all(|(source, _, _)| *source != "not_a_dispatch"));
+    }
+
+    #[test]
     fn watcher_makes_saved_symbols_query_visible() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("main.ts"), "function before() {}\n").unwrap();

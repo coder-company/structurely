@@ -1,7 +1,8 @@
 use crate::model::{
+    CFunctionPointerArrayDispatchFact, CFunctionPointerArrayFact, CFunctionPointerArrayTargetFact,
     CFunctionPointerBindingFact, CFunctionPointerDispatchFact, CFunctionPointerFacts,
-    CFunctionPointerTypedefFact, CIncludeFact, CStructFieldFact, CStructLayoutFact,
-    CallableReturnFact, CallbackArgumentFact, CallbackParameterDelegationFact,
+    CFunctionPointerPropagationFact, CFunctionPointerTypedefFact, CIncludeFact, CStructFieldFact,
+    CStructLayoutFact, CallableReturnFact, CallbackArgumentFact, CallbackParameterDelegationFact,
     CallbackParameterInvocation, Evidence, FileFacts, Language, PythonCallbackFormalFact,
     Relationship, RelationshipKind, SourceSpan, Symbol, SymbolKind, UnresolvedCall,
     UnresolvedReference,
@@ -1222,8 +1223,8 @@ fn collect_c_function_pointer_facts(
     let function_types = facts
         .typedefs
         .iter()
-        .map(|fact| fact.name.clone())
-        .collect::<std::collections::HashSet<_>>();
+        .map(|fact| (fact.name.clone(), fact.pointer))
+        .collect::<HashMap<_, _>>();
     collect_c_struct_layouts(root, source, &function_types, &mut facts.layouts);
     let function_fields = facts
         .layouts
@@ -1255,8 +1256,17 @@ fn collect_c_function_pointer_facts(
     if facts.bindings.len() > MAX_C_FUNCTION_POINTER_FACTS_PER_FILE {
         facts.bindings.clear();
     }
+    if facts.propagations.len() > MAX_C_FUNCTION_POINTER_FACTS_PER_FILE {
+        facts.propagations.clear();
+    }
     if facts.dispatches.len() > MAX_C_FUNCTION_POINTER_FACTS_PER_FILE {
         facts.dispatches.clear();
+    }
+    if facts.arrays.len() > MAX_C_FUNCTION_POINTER_FACTS_PER_FILE {
+        facts.arrays.clear();
+    }
+    if facts.array_dispatches.len() > MAX_C_FUNCTION_POINTER_FACTS_PER_FILE {
+        facts.array_dispatches.clear();
     }
     if facts.includes.len() > MAX_C_FUNCTION_POINTER_FACTS_PER_FILE {
         facts.includes.clear();
@@ -1292,7 +1302,7 @@ fn collect_c_function_pointer_typedefs(
 fn collect_c_struct_layouts(
     node: Node<'_>,
     source: &[u8],
-    function_types: &std::collections::HashSet<String>,
+    function_types: &HashMap<String, bool>,
     output: &mut Vec<CStructLayoutFact>,
 ) {
     if matches!(node.kind(), "struct_specifier" | "class_specifier") {
@@ -1330,9 +1340,13 @@ fn collect_c_struct_layouts(
                                 first_descendant_or_self(function, "pointer_declarator").is_some()
                             },
                         );
-                    let typed_pointer = declared_type
-                        .as_ref()
-                        .is_some_and(|name| function_types.contains(name));
+                    let typed_pointer = declared_type.as_ref().is_some_and(|name| {
+                        function_types.get(name).is_some_and(|typedef_pointer| {
+                            *typedef_pointer
+                                || first_descendant_or_self(declarator, "pointer_declarator")
+                                    .is_some()
+                        })
+                    });
                     fields.push(CStructFieldFact {
                         name: node_text(name, source),
                         index: fields.len(),
@@ -1392,6 +1406,32 @@ fn collect_c_function_pointer_observations(
             node.child_by_field_name("left"),
             node.child_by_field_name("right"),
         ) {
+            if let (Some(mut target_path), Some(mut source_path)) =
+                (c_field_path(left, source), c_field_path(right, source))
+            {
+                if target_path.len() >= 2 && source_path.len() >= 2 {
+                    let target_field_name = target_path.pop().expect("checked field path");
+                    let source_field_name = source_path.pop().expect("checked field path");
+                    facts.propagations.push(CFunctionPointerPropagationFact {
+                        target_receiver_type: c_receiver_type(
+                            node,
+                            target_path.first().map(String::as_str),
+                            source,
+                        ),
+                        target_receiver_path: target_path,
+                        target_field_name,
+                        source_receiver_type: c_receiver_type(
+                            node,
+                            source_path.first().map(String::as_str),
+                            source,
+                        ),
+                        source_receiver_path: source_path,
+                        source_field_name,
+                        line: node.start_position().row + 1,
+                        site_start_byte: node.start_byte(),
+                    });
+                }
+            }
             if let (Some(mut path), Some(target_name)) = (
                 c_field_path(left, source),
                 c_callable_reference(right, source, callable_names),
@@ -1415,6 +1455,7 @@ fn collect_c_function_pointer_observations(
             }
         }
     } else if node.kind() == "declaration" {
+        collect_c_function_pointer_arrays(node, source, callable_names, &mut facts.arrays);
         collect_c_initializer_bindings(
             node,
             source,
@@ -1425,6 +1466,24 @@ fn collect_c_function_pointer_observations(
         );
     } else if node.kind() == "call_expression" {
         if let Some(function) = node.child_by_field_name("function") {
+            if function.kind() == "subscript_expression" {
+                if let Some(name) = function
+                    .child_by_field_name("argument")
+                    .filter(|argument| argument.kind() == "identifier")
+                    .map(|argument| node_text(argument, source))
+                {
+                    facts
+                        .array_dispatches
+                        .push(CFunctionPointerArrayDispatchFact {
+                            owner_id: owning_symbol_id(node, owners)
+                                .cloned()
+                                .unwrap_or_else(|| file_symbol_id.to_owned()),
+                            name,
+                            line: node.start_position().row + 1,
+                            site_start_byte: node.start_byte(),
+                        });
+                }
+            }
             if let Some(mut path) = c_field_path(function, source) {
                 if let Some(field_name) = path.pop() {
                     let receiver_type =
@@ -1519,6 +1578,71 @@ fn collect_c_initializer_bindings(
                 output,
             );
         }
+    }
+}
+
+fn collect_c_function_pointer_arrays(
+    declaration: Node<'_>,
+    source: &[u8],
+    callable_names: &std::collections::HashSet<String>,
+    output: &mut Vec<CFunctionPointerArrayFact>,
+) {
+    let Some(element_type) = declaration
+        .child_by_field_name("type")
+        .and_then(|node| c_type_name(node, source))
+    else {
+        return;
+    };
+    let mut cursor = declaration.walk();
+    for initializer in declaration
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() == "init_declarator")
+    {
+        let (Some(declarator), Some(value)) = (
+            initializer.child_by_field_name("declarator"),
+            initializer.child_by_field_name("value"),
+        ) else {
+            continue;
+        };
+        if value.kind() != "initializer_list"
+            || first_descendant_or_self(declarator, "array_declarator").is_none()
+        {
+            continue;
+        }
+        let Some(name) = declarator_name(declarator).map(|name| node_text(name, source)) else {
+            continue;
+        };
+        let mut targets = Vec::new();
+        let mut value_cursor = value.walk();
+        for entry in value.named_children(&mut value_cursor) {
+            let target = if entry.kind() == "initializer_pair" {
+                entry.child_by_field_name("value")
+            } else {
+                Some(entry)
+            };
+            let Some((target, target_name)) = target.and_then(|target| {
+                c_callable_reference(target, source, callable_names).map(|name| (target, name))
+            }) else {
+                continue;
+            };
+            targets.push(CFunctionPointerArrayTargetFact {
+                target_name,
+                line: target.start_position().row + 1,
+                site_start_byte: target.start_byte(),
+            });
+        }
+        if targets.is_empty() {
+            continue;
+        }
+        output.push(CFunctionPointerArrayFact {
+            name,
+            element_type: element_type.clone(),
+            pointer_declarator: first_descendant_or_self(declarator, "pointer_declarator")
+                .is_some(),
+            targets,
+            line: declaration.start_position().row + 1,
+            site_start_byte: declaration.start_byte(),
+        });
     }
 }
 
@@ -4965,32 +5089,48 @@ mod tests {
     fn extracts_exact_c_function_pointer_facts() {
         let source = r#"
 typedef int (*handler_t)(int);
+typedef int handler_fn(int);
 typedef struct Ops {
   int tag;
   int (*run)(int);
   handler_t reset;
   struct Next *next;
+  handler_fn plain;
+  handler_fn *typed;
 } Ops;
 static int leaf(int x) { return x; }
 static Ops table[] = {
   { 1, leaf, &leaf, 0 },
   { .tag = 2, .run = leaf, .reset = &leaf },
 };
-void install(Ops *ops) { ops->run = &leaf; ops->reset = leaf; }
+static handler_t callbacks[] = { leaf, [2] = (handler_t)leaf };
+void install(Ops *ops, Ops *other) {
+  ops->run = &leaf;
+  ops->reset = leaf;
+  ops->typed = leaf;
+  ops->run = other->reset;
+}
 int dispatch(Ops *ops, int x) { return ops->next->run(x) + ops->reset(x); }
+int array_dispatch(int slot, int x) { return callbacks[slot](x); }
 "#;
         let facts = parse_file("dispatch.c", source).unwrap();
         let pointers = &facts.c_function_pointers;
-        assert_eq!(pointers.typedefs.len(), 1);
-        assert_eq!(pointers.typedefs[0].name, "handler_t");
-        assert!(pointers.typedefs[0].pointer);
+        assert_eq!(pointers.typedefs.len(), 2);
+        assert!(pointers
+            .typedefs
+            .iter()
+            .any(|fact| fact.name == "handler_t" && fact.pointer));
+        assert!(pointers
+            .typedefs
+            .iter()
+            .any(|fact| fact.name == "handler_fn" && !fact.pointer));
 
         let layout = pointers
             .layouts
             .iter()
             .find(|layout| layout.type_name == "Ops")
             .unwrap();
-        assert_eq!(layout.fields.len(), 4);
+        assert_eq!(layout.fields.len(), 6);
         assert_eq!(
             layout
                 .fields
@@ -5002,17 +5142,34 @@ int dispatch(Ops *ops, int x) { return ops->next->run(x) + ops->reset(x); }
                 ("run", 1, true),
                 ("reset", 2, true),
                 ("next", 3, false),
+                ("plain", 4, false),
+                ("typed", 5, true),
             ]
         );
         assert_eq!(layout.fields[3].value_type.as_deref(), Some("Next"));
 
-        assert_eq!(pointers.bindings.len(), 6);
+        assert_eq!(pointers.bindings.len(), 7);
         assert!(pointers.bindings.iter().any(|binding| {
             binding.receiver_type.as_deref() == Some("Ops")
                 && binding.receiver_path == ["table"]
                 && binding.field_index == Some(1)
                 && binding.target_name == "leaf"
         }));
+        assert_eq!(pointers.propagations.len(), 1);
+        let propagation = &pointers.propagations[0];
+        assert_eq!(propagation.target_receiver_type.as_deref(), Some("Ops"));
+        assert_eq!(propagation.target_receiver_path, ["ops"]);
+        assert_eq!(propagation.target_field_name, "run");
+        assert_eq!(propagation.source_receiver_type.as_deref(), Some("Ops"));
+        assert_eq!(propagation.source_receiver_path, ["other"]);
+        assert_eq!(propagation.source_field_name, "reset");
+        assert_eq!(pointers.arrays.len(), 1);
+        assert_eq!(pointers.arrays[0].name, "callbacks");
+        assert_eq!(pointers.arrays[0].element_type, "handler_t");
+        assert!(!pointers.arrays[0].pointer_declarator);
+        assert_eq!(pointers.arrays[0].targets.len(), 2);
+        assert_eq!(pointers.array_dispatches.len(), 1);
+        assert_eq!(pointers.array_dispatches[0].name, "callbacks");
         assert!(pointers.bindings.iter().any(|binding| {
             binding.receiver_path == ["table"]
                 && binding.field_name.as_deref() == Some("reset")

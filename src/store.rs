@@ -1005,7 +1005,10 @@ impl Store {
         if !file.c_function_pointers.typedefs.is_empty()
             || !file.c_function_pointers.layouts.is_empty()
             || !file.c_function_pointers.bindings.is_empty()
+            || !file.c_function_pointers.propagations.is_empty()
             || !file.c_function_pointers.dispatches.is_empty()
+            || !file.c_function_pointers.arrays.is_empty()
+            || !file.c_function_pointers.array_dispatches.is_empty()
             || !file.c_function_pointers.includes.is_empty()
         {
             let payload = serde_json::to_string(&file.c_function_pointers)?;
@@ -1983,6 +1986,21 @@ impl Store {
             }
             None
         };
+        let resolve_path_layout =
+            |source_file: &str, receiver_type: &str, receiver_path: &[String]| {
+                let mut layout_key = resolve_layout(source_file, receiver_type)?;
+                for member in receiver_path.iter().skip(1) {
+                    let layout = layouts.get(&layout_key)?.first()?;
+                    let next_type = layout
+                        .fields
+                        .iter()
+                        .find(|field| field.name == *member)?
+                        .value_type
+                        .as_deref()?;
+                    layout_key = resolve_layout(source_file, next_type)?;
+                }
+                Some(layout_key)
+            };
 
         let mut symbols_by_file_name = HashMap::<(String, String), Vec<String>>::new();
         let mut symbol_statement = tx.prepare(
@@ -2010,6 +2028,42 @@ impl Store {
             candidates.dedup();
         }
 
+        let mut array_targets = HashMap::<(String, String), Vec<String>>::new();
+        for (path, facts) in &files {
+            let visible = c_visible_files(path, &include_edges, INCLUDE_DEPTH_CAP, WORK_CAP)
+                .into_iter()
+                .collect::<HashSet<_>>();
+            for array in &facts.arrays {
+                let mut typedefs = files
+                    .iter()
+                    .filter(|(candidate_path, _)| visible.contains(*candidate_path))
+                    .flat_map(|(_, candidate_facts)| candidate_facts.typedefs.iter())
+                    .filter(|typedef| typedef.name == array.element_type)
+                    .map(|typedef| typedef.pointer)
+                    .collect::<Vec<_>>();
+                typedefs.sort();
+                typedefs.dedup();
+                if typedefs.len() != 1 || (!typedefs[0] && !array.pointer_declarator) {
+                    continue;
+                }
+                let mut targets = Vec::new();
+                for target in &array.targets {
+                    let candidates = symbols_by_file_name
+                        .get(&(path.clone(), target.target_name.clone()))
+                        .cloned()
+                        .unwrap_or_default();
+                    if candidates.len() == 1 {
+                        targets.push(candidates[0].clone());
+                    }
+                }
+                targets.sort();
+                targets.dedup();
+                if !targets.is_empty() && targets.len() <= TARGET_FANOUT_CAP {
+                    array_targets.insert((path.clone(), array.name.clone()), targets);
+                }
+            }
+        }
+
         let mut registered = HashMap::<FieldKey, HashSet<String>>::new();
         let mut work = 0usize;
         let mut paths = files.keys().cloned().collect::<Vec<_>>();
@@ -2024,7 +2078,9 @@ impl Store {
                 let Some(receiver_type) = binding.receiver_type.as_deref() else {
                     continue;
                 };
-                let Some(layout_key) = resolve_layout(path, receiver_type) else {
+                let Some(layout_key) =
+                    resolve_path_layout(path, receiver_type, &binding.receiver_path)
+                else {
                     continue;
                 };
                 let Some(layout) = layouts.get(&layout_key).and_then(|items| items.first()) else {
@@ -2054,6 +2110,85 @@ impl Store {
             }
         }
 
+        let mut propagations = Vec::<(FieldKey, FieldKey)>::new();
+        for path in &paths {
+            for propagation in &files[path].propagations {
+                if work >= WORK_CAP {
+                    break;
+                }
+                work += 1;
+                let (Some(target_type), Some(source_type)) = (
+                    propagation.target_receiver_type.as_deref(),
+                    propagation.source_receiver_type.as_deref(),
+                ) else {
+                    continue;
+                };
+                let (Some(target_layout_key), Some(source_layout_key)) = (
+                    resolve_path_layout(path, target_type, &propagation.target_receiver_path),
+                    resolve_path_layout(path, source_type, &propagation.source_receiver_path),
+                ) else {
+                    continue;
+                };
+                let target_is_pointer = layouts
+                    .get(&target_layout_key)
+                    .and_then(|items| items.first())
+                    .is_some_and(|layout| {
+                        layout.fields.iter().any(|field| {
+                            field.name == propagation.target_field_name && field.function_pointer
+                        })
+                    });
+                let source_is_pointer = layouts
+                    .get(&source_layout_key)
+                    .and_then(|items| items.first())
+                    .is_some_and(|layout| {
+                        layout.fields.iter().any(|field| {
+                            field.name == propagation.source_field_name && field.function_pointer
+                        })
+                    });
+                if !target_is_pointer || !source_is_pointer {
+                    continue;
+                }
+                propagations.push((
+                    (
+                        target_layout_key.0,
+                        target_layout_key.1,
+                        propagation.target_field_name.clone(),
+                    ),
+                    (
+                        source_layout_key.0,
+                        source_layout_key.1,
+                        propagation.source_field_name.clone(),
+                    ),
+                ));
+            }
+        }
+        propagations.sort();
+        propagations.dedup();
+        let mut changed = true;
+        while changed && work < WORK_CAP {
+            changed = false;
+            for (target, source) in &propagations {
+                if work >= WORK_CAP {
+                    break;
+                }
+                work += 1;
+                let Some(source_targets) = registered.get(source).cloned() else {
+                    continue;
+                };
+                if source_targets.len() > TARGET_FANOUT_CAP {
+                    continue;
+                }
+                let target_targets = registered.entry(target.clone()).or_default();
+                let previous = target_targets.len();
+                target_targets.extend(source_targets);
+                if target_targets.len() > TARGET_FANOUT_CAP {
+                    target_targets.clear();
+                    continue;
+                }
+                changed |= target_targets.len() != previous;
+            }
+        }
+
         let mut resolved = 0usize;
         for path in &paths {
             let facts = &files[path];
@@ -2077,36 +2212,13 @@ impl Store {
                 let layout_key = dispatch
                     .receiver_type
                     .as_deref()
-                    .and_then(|receiver_type| resolve_layout(path, receiver_type))
+                    .and_then(|receiver_type| {
+                        resolve_path_layout(path, receiver_type, &dispatch.receiver_path)
+                    })
                     .or_else(|| resolve_layout_by_field(path, &dispatch.field_name));
-                let Some(mut layout_key) = layout_key else {
+                let Some(layout_key) = layout_key else {
                     continue;
                 };
-                let mut chain_valid = true;
-                for member in dispatch.receiver_path.iter().skip(1) {
-                    let Some(layout) = layouts.get(&layout_key).and_then(|items| items.first())
-                    else {
-                        chain_valid = false;
-                        break;
-                    };
-                    let Some(next_type) = layout
-                        .fields
-                        .iter()
-                        .find(|field| field.name == *member)
-                        .and_then(|field| field.value_type.as_deref())
-                    else {
-                        chain_valid = false;
-                        break;
-                    };
-                    let Some(next_layout) = resolve_layout(path, next_type) else {
-                        chain_valid = false;
-                        break;
-                    };
-                    layout_key = next_layout;
-                }
-                if !chain_valid {
-                    continue;
-                }
                 let Some(layout) = layouts.get(&layout_key).and_then(|items| items.first()) else {
                     continue;
                 };
@@ -2143,6 +2255,60 @@ impl Store {
                                 format!(
                                     "proven C/C++ function-pointer may-dispatch through {}.{}",
                                     layout_key.1, dispatch.field_name
+                                ),
+                                path,
+                                dispatch.line,
+                            )
+                            .at_site(dispatch.site_start_byte),
+                        },
+                    )?;
+                    resolved += 1;
+                }
+            }
+        }
+        for path in &paths {
+            let visible = c_visible_files(path, &include_edges, INCLUDE_DEPTH_CAP, WORK_CAP)
+                .into_iter()
+                .collect::<HashSet<_>>();
+            for dispatch in &files[path].array_dispatches {
+                if work >= WORK_CAP {
+                    break;
+                }
+                work += 1;
+                let local_key = (path.clone(), dispatch.name.clone());
+                let selected = if array_targets.contains_key(&local_key) {
+                    Some(local_key)
+                } else {
+                    let mut candidates = array_targets
+                        .keys()
+                        .filter(|(candidate_file, name)| {
+                            name == &dispatch.name && visible.contains(candidate_file)
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    candidates.sort();
+                    candidates.dedup();
+                    (candidates.len() == 1).then(|| candidates.remove(0))
+                };
+                let Some(selected) = selected else {
+                    continue;
+                };
+                let Some(targets) = array_targets.get(&selected) else {
+                    continue;
+                };
+                for target_id in targets {
+                    Self::insert_relationship(
+                        tx,
+                        &Relationship {
+                            source_id: dispatch.owner_id.clone(),
+                            target_id: target_id.clone(),
+                            kind: RelationshipKind::Calls,
+                            evidence: Evidence::new(
+                                PROVENANCE,
+                                0.97,
+                                format!(
+                                    "proven C/C++ function-pointer array may-dispatch through {}",
+                                    dispatch.name
                                 ),
                                 path,
                                 dispatch.line,

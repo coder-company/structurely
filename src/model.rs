@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path};
 
-pub const GRAPH_MODEL_VERSION: u32 = 60;
+pub const GRAPH_MODEL_VERSION: u32 = 62;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -429,7 +429,10 @@ pub(crate) struct CFunctionPointerFacts {
     pub typedefs: Vec<CFunctionPointerTypedefFact>,
     pub layouts: Vec<CStructLayoutFact>,
     pub bindings: Vec<CFunctionPointerBindingFact>,
+    pub propagations: Vec<CFunctionPointerPropagationFact>,
     pub dispatches: Vec<CFunctionPointerDispatchFact>,
+    pub arrays: Vec<CFunctionPointerArrayFact>,
+    pub array_dispatches: Vec<CFunctionPointerArrayDispatchFact>,
     pub includes: Vec<CIncludeFact>,
 }
 
@@ -470,12 +473,49 @@ pub(crate) struct CFunctionPointerBindingFact {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CFunctionPointerPropagationFact {
+    pub target_receiver_type: Option<String>,
+    pub target_receiver_path: Vec<String>,
+    pub target_field_name: String,
+    pub source_receiver_type: Option<String>,
+    pub source_receiver_path: Vec<String>,
+    pub source_field_name: String,
+    pub line: usize,
+    pub site_start_byte: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CFunctionPointerDispatchFact {
     pub owner_id: String,
     pub receiver_type: Option<String>,
     pub receiver_path: Vec<String>,
     pub field_name: String,
     pub proven_function_pointer: bool,
+    pub line: usize,
+    pub site_start_byte: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CFunctionPointerArrayFact {
+    pub name: String,
+    pub element_type: String,
+    pub pointer_declarator: bool,
+    pub targets: Vec<CFunctionPointerArrayTargetFact>,
+    pub line: usize,
+    pub site_start_byte: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CFunctionPointerArrayTargetFact {
+    pub target_name: String,
+    pub line: usize,
+    pub site_start_byte: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CFunctionPointerArrayDispatchFact {
+    pub owner_id: String,
+    pub name: String,
     pub line: usize,
     pub site_start_byte: usize,
 }
