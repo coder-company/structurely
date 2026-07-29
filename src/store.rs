@@ -101,7 +101,7 @@ impl Store {
                 .with_context(|| format!("create {}", parent.display()))?;
         }
         let connection = Connection::open_with_flags(
-            path,
+            sqlite_open_path(path)?,
             OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_CREATE
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
@@ -131,7 +131,7 @@ impl Store {
         );
         validate_database_header(path)?;
         let connection = Connection::open_with_flags(
-            path,
+            sqlite_open_path(path)?,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .with_context(|| format!("open read-only graph database {}", path.display()))?;
@@ -5047,13 +5047,30 @@ fn validate_database_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn sqlite_open_path(path: &Path) -> Result<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let parent = parent
+            .canonicalize()
+            .with_context(|| format!("resolve graph database parent {}", parent.display()))?;
+        let name = path
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("graph database path has no file name"))?;
+        return Ok(parent.join(name));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    Ok(path.to_path_buf())
+}
+
 fn preflight_database(path: &Path) -> Result<()> {
     if !path.exists() {
         return Ok(());
     }
     validate_database_header(path)?;
     let connection = Connection::open_with_flags(
-        path,
+        sqlite_open_path(path)?,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .with_context(|| format!("preflight graph database {}", path.display()))?;

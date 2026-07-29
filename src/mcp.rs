@@ -898,8 +898,8 @@ mod tests {
         )
         .unwrap();
         let (mut engine, _) = Engine::init(temp.path()).unwrap();
-        let unavailable = temp.path().with_extension("unavailable");
-        fs::rename(temp.path(), &unavailable).unwrap();
+        let invalid_config = temp.path().join("structurely.json");
+        fs::write(&invalid_config, "{not-json").unwrap();
 
         let stale = call_tool(
             &mut engine,
@@ -923,7 +923,7 @@ mod tests {
             "committedSymbol"
         );
 
-        fs::rename(&unavailable, temp.path()).unwrap();
+        fs::remove_file(invalid_config).unwrap();
         let current = call_tool(
             &mut engine,
             &json!({
