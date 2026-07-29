@@ -1,5 +1,6 @@
 use crate::{
     budget::ResourceBudget,
+    content::{ContentHit, ContentIndex},
     inventory::{InventoryStale, ProjectInventory},
     model::{Evidence, RelationshipKind},
     parser::parse_file_as,
@@ -31,6 +32,7 @@ pub const DATABASE_FILE: &str = "graph.db";
 pub struct Engine {
     root: PathBuf,
     store: Store,
+    content: Option<ContentIndex>,
     storage_recovery: Option<String>,
     _writer_lock: Option<std::fs::File>,
 }
@@ -44,6 +46,10 @@ pub struct IndexReport {
     pub files_deleted: usize,
     pub symbols_changed: usize,
     pub relationships_resolved: usize,
+    pub content_files_indexed: usize,
+    pub content_files_changed: usize,
+    pub content_files_deleted: usize,
+    pub content_chunks: usize,
     pub parse_workers: usize,
     pub staging_ms: u128,
     pub resolution_ms: u128,
@@ -222,9 +228,11 @@ impl Engine {
             }
             Err(error) => return Err(error),
         };
+        let content = Some(ContentIndex::open(&root)?);
         Ok(Self {
             root,
             store,
+            content,
             storage_recovery,
             _writer_lock: writer_lock,
         })
@@ -234,9 +242,11 @@ impl Engine {
         let root = absolute(root.as_ref())?;
         ensure_project_directory(&root, false)?;
         let database = root.join(PROJECT_DIR).join(DATABASE_FILE);
+        let content = ContentIndex::open_read_only(&root)?;
         Ok(Self {
             root,
             store: Store::open_read_only(&database)?,
+            content,
             storage_recovery: None,
             _writer_lock: None,
         })
@@ -257,6 +267,13 @@ impl Engine {
         for attempt in 0..MAX_SYNC_ATTEMPTS {
             match self.sync_once() {
                 Ok(mut report) => {
+                    if let Some(content) = self.content.as_mut() {
+                        let content_report = content.sync()?;
+                        report.content_files_indexed = content_report.files_indexed;
+                        report.content_files_changed = content_report.files_changed;
+                        report.content_files_deleted = content_report.files_deleted;
+                        report.content_chunks = content_report.chunks;
+                    }
                     report.duration_ms = started.elapsed().as_millis();
                     if let Some(recovery) = &self.storage_recovery {
                         report.maintenance_warning = Some(match report.maintenance_warning {
@@ -409,6 +426,10 @@ impl Engine {
             files_deleted: deleted.len(),
             symbols_changed,
             relationships_resolved,
+            content_files_indexed: 0,
+            content_files_changed: 0,
+            content_files_deleted: 0,
+            content_chunks: 0,
             parse_workers,
             staging_ms,
             resolution_ms,
@@ -455,6 +476,23 @@ impl Engine {
 
     pub fn files(&self) -> Result<Vec<FileSummary>> {
         self.store.file_summaries()
+    }
+
+    pub fn content_search(&self, query: &str, limit: usize) -> Result<Vec<ContentHit>> {
+        match &self.content {
+            Some(content) => content.search(
+                ResourceBudget::query(query)?,
+                ResourceBudget::result_limit(limit)?,
+            ),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub fn content_counts(&self) -> Result<(usize, usize)> {
+        match &self.content {
+            Some(content) => content.counts(),
+            None => Ok((0, 0)),
+        }
     }
 
     pub fn snapshot(&self) -> Result<crate::store::GraphSnapshot> {
