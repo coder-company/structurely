@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path};
 
-pub const GRAPH_MODEL_VERSION: u32 = 64;
+pub const GRAPH_MODEL_VERSION: u32 = 65;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -437,6 +437,8 @@ pub(crate) struct CFunctionPointerFacts {
     pub arguments: Vec<CFunctionPointerArgumentFact>,
     pub local_bindings: Vec<CLocalFunctionPointerBindingFact>,
     pub local_dispatches: Vec<CLocalFunctionPointerDispatchFact>,
+    pub returns: Vec<CFunctionPointerReturnFact>,
+    pub factory_dispatches: Vec<CFunctionPointerFactoryDispatchFact>,
     pub includes: Vec<CIncludeFact>,
 }
 
@@ -550,10 +552,27 @@ pub(crate) struct CLocalFunctionPointerBindingFact {
     pub owner_id: String,
     pub local_name: String,
     pub target_name: Option<String>,
+    pub factory_name: Option<String>,
     pub declares_binding: bool,
     pub conditional: bool,
     pub scope_start_byte: usize,
     pub scope_end_byte: usize,
+    pub line: usize,
+    pub site_start_byte: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CFunctionPointerReturnFact {
+    pub owner_id: String,
+    pub target_name: String,
+    pub line: usize,
+    pub site_start_byte: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CFunctionPointerFactoryDispatchFact {
+    pub owner_id: String,
+    pub factory_name: String,
     pub line: usize,
     pub site_start_byte: usize,
 }

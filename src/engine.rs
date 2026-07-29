@@ -8268,6 +8268,118 @@ def outer():
     }
 
     #[test]
+    fn cpp_function_pointer_factories_flow_to_scoped_local_dispatches() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("factory.cpp");
+        let write_source = |choose_return: &str| {
+            fs::write(
+                &source,
+                format!(
+                    "static int alpha(int value) {{ return value + 1; }}\n\
+                     static int beta(int value) {{ return value + 2; }}\n\
+                     static int decoy(int value) {{ return value + 3; }}\n\
+                     typedef int (*callback_t)(int);\n\
+                     callback_t choose(bool split) {{ {choose_return} }}\n\
+                     auto exact_factory() {{ return &alpha; }}\n\
+                     int (*explicit_factory(bool split))(int) {{ return split ? &alpha : &beta; }}\n\
+                     int scalar_factory() {{ return 7; }}\n\
+                     callback_t unsafe_parameter(callback_t alpha) {{ return &alpha; }}\n\
+                     callback_t unsafe_local() {{ callback_t alpha = nullptr; return &alpha; }}\n\
+                     callback_t unsafe_uninitialized() {{ callback_t alpha; return &alpha; }}\n\
+                     auto lambda_factory() {{ return []() {{ return &alpha; }}; }}\n\
+                     int run(bool split, int value) {{\n\
+                       auto pointer = choose(split);\n\
+                       return pointer(value);\n\
+                     }}\n\
+                     int exact_run(int value) {{\n\
+                       auto pointer = exact_factory();\n\
+                       return pointer(value);\n\
+                     }}\n\
+                     int explicit_run(bool split, int value) {{\n\
+                       auto pointer = explicit_factory(split);\n\
+                       return pointer(value);\n\
+                     }}\n\
+                     int rejected(int value) {{\n\
+                       auto pointer = scalar_factory();\n\
+                       return pointer(value);\n\
+                     }}\n\
+                     int immediate(bool split, int value) {{\n\
+                       return choose(split)(value);\n\
+                     }}\n\
+                     int rejected_parameter(int value) {{\n\
+                       auto pointer = unsafe_parameter(&alpha);\n\
+                       return pointer(value);\n\
+                     }}\n\
+                     int rejected_local(int value) {{\n\
+                       auto pointer = unsafe_local();\n\
+                       return pointer(value);\n\
+                     }}\n\
+                     int rejected_uninitialized(int value) {{\n\
+                       auto pointer = unsafe_uninitialized();\n\
+                       return pointer(value);\n\
+                     }}\n\
+                     int rejected_lambda(int value) {{\n\
+                       return lambda_factory()(value);\n\
+                     }}\n\
+                     int killed_factory(bool split, int value) {{\n\
+                       auto pointer = choose(split);\n\
+                       pointer = scalar_factory();\n\
+                       return pointer(value);\n\
+                     }}\n"
+                ),
+            )
+            .unwrap();
+        };
+        write_source("return (&decoy != nullptr) ? &alpha : &beta;");
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let targets = |engine: &Engine, caller_name: &str| {
+            let caller = engine
+                .search(caller_name, 10)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.name == caller_name)
+                .unwrap()
+                .symbol;
+            engine
+                .callees(&caller.id)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, evidence)| {
+                    evidence.provenance == "dynamic/c-function-pointer-dispatch"
+                })
+                .map(|(target, evidence)| (target.name, evidence.confidence))
+                .collect::<Vec<_>>()
+        };
+
+        for caller in ["run", "explicit_run"] {
+            let mut actual = targets(&engine, caller);
+            actual.sort_by(|left, right| left.0.cmp(&right.0));
+            assert_eq!(
+                actual,
+                [("alpha".to_owned(), 0.97), ("beta".to_owned(), 0.97)]
+            );
+        }
+        assert_eq!(targets(&engine, "exact_run"), [("alpha".to_owned(), 0.995)]);
+        assert!(targets(&engine, "rejected").is_empty());
+        let mut immediate = targets(&engine, "immediate");
+        immediate.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            immediate,
+            [("alpha".to_owned(), 0.97), ("beta".to_owned(), 0.97)]
+        );
+        assert!(targets(&engine, "rejected_parameter").is_empty());
+        assert!(targets(&engine, "rejected_local").is_empty());
+        assert!(targets(&engine, "rejected_uninitialized").is_empty());
+        assert!(targets(&engine, "rejected_lambda").is_empty());
+        assert!(targets(&engine, "killed_factory").is_empty());
+
+        write_source("return &beta;");
+        assert_eq!(engine.sync().unwrap().files_changed, 1);
+        assert_eq!(targets(&engine, "run"), [("beta".to_owned(), 0.995)]);
+        assert_eq!(targets(&engine, "immediate"), [("beta".to_owned(), 0.995)]);
+    }
+
+    #[test]
     fn watcher_makes_saved_symbols_query_visible() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("main.ts"), "function before() {}\n").unwrap();

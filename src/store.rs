@@ -1013,6 +1013,8 @@ impl Store {
             || !file.c_function_pointers.arguments.is_empty()
             || !file.c_function_pointers.local_bindings.is_empty()
             || !file.c_function_pointers.local_dispatches.is_empty()
+            || !file.c_function_pointers.returns.is_empty()
+            || !file.c_function_pointers.factory_dispatches.is_empty()
             || !file.c_function_pointers.includes.is_empty()
         {
             let payload = serde_json::to_string(&file.c_function_pointers)?;
@@ -2060,6 +2062,21 @@ impl Store {
             candidates.sort();
             candidates.dedup();
         }
+        let mut returned_pointer_targets = HashMap::<String, HashSet<String>>::new();
+        for (path, facts) in &files {
+            for returned in &facts.returns {
+                let candidates = symbols_by_file_name
+                    .get(&(path.clone(), returned.target_name.clone()))
+                    .cloned()
+                    .unwrap_or_default();
+                if candidates.len() == 1 {
+                    returned_pointer_targets
+                        .entry(returned.owner_id.clone())
+                        .or_default()
+                        .insert(candidates[0].clone());
+                }
+            }
+        }
 
         let mut array_targets = HashMap::<(String, String), Vec<String>>::new();
         for (path, facts) in &files {
@@ -2401,6 +2418,57 @@ impl Store {
             }
         }
         for path in &paths {
+            for dispatch in &files[path].factory_dispatches {
+                if work >= WORK_CAP {
+                    break;
+                }
+                work += 1;
+                let factories = symbols_by_file_name
+                    .get(&(path.clone(), dispatch.factory_name.clone()))
+                    .cloned()
+                    .unwrap_or_default();
+                if factories.len() != 1 {
+                    continue;
+                }
+                let mut targets = returned_pointer_targets
+                    .get(&factories[0])
+                    .map(|targets| targets.iter().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                targets.sort();
+                if targets.is_empty() || targets.len() > TARGET_FANOUT_CAP {
+                    continue;
+                }
+                let confidence = if targets.len() == 1 { 0.995 } else { 0.97 };
+                for target_id in targets {
+                    Self::insert_relationship(
+                        tx,
+                        &Relationship {
+                            source_id: dispatch.owner_id.clone(),
+                            target_id,
+                            kind: RelationshipKind::Calls,
+                            evidence: Evidence::new(
+                                PROVENANCE,
+                                confidence,
+                                format!(
+                                    "{} C++ function-pointer factory dispatch through {}",
+                                    if confidence < 0.99 {
+                                        "bounded may-call"
+                                    } else {
+                                        "exact"
+                                    },
+                                    dispatch.factory_name,
+                                ),
+                                path,
+                                dispatch.line,
+                            )
+                            .at_site(dispatch.site_start_byte),
+                        },
+                    )?;
+                    resolved += 1;
+                }
+            }
+        }
+        for path in &paths {
             let mut local_bindings = HashMap::<
                 (String, String),
                 Vec<&crate::model::CLocalFunctionPointerBindingFact>,
@@ -2449,7 +2517,7 @@ impl Store {
                     continue;
                 };
                 let mut targets = HashSet::<String>::new();
-                let mut has_conditional_target = false;
+                let mut has_may_target = false;
                 for binding in bindings.iter().copied().filter(|binding| {
                     declaration.site_start_byte <= binding.site_start_byte
                         && binding.site_start_byte < dispatch.site_start_byte
@@ -2478,24 +2546,45 @@ impl Store {
                     }) {
                         continue;
                     }
-                    let target_id = binding.target_name.as_ref().and_then(|target_name| {
-                        let candidates = symbols_by_file_name
-                            .get(&(path.clone(), target_name.clone()))
-                            .cloned()
-                            .unwrap_or_default();
-                        (candidates.len() == 1).then(|| candidates[0].clone())
-                    });
+                    let mut binding_targets =
+                        if let Some(target_name) = binding.target_name.as_ref() {
+                            let candidates = symbols_by_file_name
+                                .get(&(path.clone(), target_name.clone()))
+                                .cloned()
+                                .unwrap_or_default();
+                            if candidates.len() == 1 {
+                                vec![candidates[0].clone()]
+                            } else {
+                                Vec::new()
+                            }
+                        } else if let Some(factory_name) = binding.factory_name.as_ref() {
+                            let factories = symbols_by_file_name
+                                .get(&(path.clone(), factory_name.clone()))
+                                .cloned()
+                                .unwrap_or_default();
+                            if factories.len() == 1 {
+                                returned_pointer_targets
+                                    .get(&factories[0])
+                                    .map(|targets| targets.iter().cloned().collect::<Vec<_>>())
+                                    .unwrap_or_default()
+                            } else {
+                                Vec::new()
+                            }
+                        } else {
+                            Vec::new()
+                        };
+                    binding_targets.sort();
+                    binding_targets.dedup();
+                    if binding_targets.len() > TARGET_FANOUT_CAP {
+                        binding_targets.clear();
+                    }
                     if binding.conditional {
-                        if let Some(target_id) = target_id {
-                            targets.insert(target_id);
-                            has_conditional_target = true;
-                        }
+                        has_may_target |= !binding_targets.is_empty();
+                        targets.extend(binding_targets);
                     } else {
                         targets.clear();
-                        if let Some(target_id) = target_id {
-                            targets.insert(target_id);
-                        }
-                        has_conditional_target = false;
+                        has_may_target = binding_targets.len() > 1;
+                        targets.extend(binding_targets);
                     }
                 }
                 if targets.len() > TARGET_FANOUT_CAP {
@@ -2512,10 +2601,10 @@ impl Store {
                             kind: RelationshipKind::Calls,
                             evidence: Evidence::new(
                                 PROVENANCE,
-                                if has_conditional_target { 0.97 } else { 0.995 },
+                                if has_may_target { 0.97 } else { 0.995 },
                                 format!(
                                     "{} same-owner C++ local function-pointer dispatch through {}",
-                                    if has_conditional_target {
+                                    if has_may_target {
                                         "bounded may-call"
                                     } else {
                                         "exact"

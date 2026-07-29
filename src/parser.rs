@@ -1,12 +1,13 @@
 use crate::model::{
     CFunctionPointerArgumentFact, CFunctionPointerArrayDispatchFact, CFunctionPointerArrayFact,
     CFunctionPointerArrayTargetFact, CFunctionPointerBindingFact, CFunctionPointerDispatchFact,
-    CFunctionPointerFacts, CFunctionPointerFormalStorageFact, CFunctionPointerPropagationFact,
-    CFunctionPointerTypedefFact, CIncludeFact, CLocalFunctionPointerBindingFact,
-    CLocalFunctionPointerDispatchFact, CStructFieldFact, CStructLayoutFact, CallableReturnFact,
-    CallbackArgumentFact, CallbackParameterDelegationFact, CallbackParameterInvocation, Evidence,
-    FileFacts, Language, PythonCallbackFormalFact, Relationship, RelationshipKind, SourceSpan,
-    Symbol, SymbolKind, UnresolvedCall, UnresolvedReference,
+    CFunctionPointerFactoryDispatchFact, CFunctionPointerFacts, CFunctionPointerFormalStorageFact,
+    CFunctionPointerPropagationFact, CFunctionPointerReturnFact, CFunctionPointerTypedefFact,
+    CIncludeFact, CLocalFunctionPointerBindingFact, CLocalFunctionPointerDispatchFact,
+    CStructFieldFact, CStructLayoutFact, CallableReturnFact, CallbackArgumentFact,
+    CallbackParameterDelegationFact, CallbackParameterInvocation, Evidence, FileFacts, Language,
+    PythonCallbackFormalFact, Relationship, RelationshipKind, SourceSpan, Symbol, SymbolKind,
+    UnresolvedCall, UnresolvedReference,
 };
 use crate::semantic::{enrich_file_facts, is_arkui_intrinsic_name};
 use anyhow::{anyhow, Context, Result};
@@ -1253,6 +1254,7 @@ fn collect_c_function_pointer_facts(
         file_symbol_id,
         &callable_names,
         &function_fields,
+        &function_types,
         &mut facts,
     );
     if facts.typedefs.len() > MAX_C_FUNCTION_POINTER_FACTS_PER_FILE {
@@ -1287,6 +1289,12 @@ fn collect_c_function_pointer_facts(
     }
     if facts.local_dispatches.len() > MAX_C_FUNCTION_POINTER_FACTS_PER_FILE {
         facts.local_dispatches.clear();
+    }
+    if facts.returns.len() > MAX_C_FUNCTION_POINTER_FACTS_PER_FILE {
+        facts.returns.clear();
+    }
+    if facts.factory_dispatches.len() > MAX_C_FUNCTION_POINTER_FACTS_PER_FILE {
+        facts.factory_dispatches.clear();
     }
     if facts.includes.len() > MAX_C_FUNCTION_POINTER_FACTS_PER_FILE {
         facts.includes.clear();
@@ -1402,6 +1410,7 @@ fn collect_c_function_pointer_observations(
     file_symbol_id: &str,
     callable_names: &std::collections::HashSet<String>,
     function_fields: &std::collections::HashSet<String>,
+    function_types: &HashMap<String, bool>,
     facts: &mut CFunctionPointerFacts,
 ) {
     if node.kind() == "preproc_include" {
@@ -1428,7 +1437,9 @@ fn collect_c_function_pointer_observations(
         ) {
             if language == Language::Cpp && left.kind() == "identifier" {
                 let target_name = c_address_of_callable_reference(right, source, callable_names);
+                let factory_name = c_local_pointer_factory_call(right, source);
                 if target_name.is_some()
+                    || factory_name.is_some()
                     || c_local_pointer_name_has_declaration(
                         &node_text(left, source),
                         node,
@@ -1443,6 +1454,7 @@ fn collect_c_function_pointer_observations(
                             .unwrap_or_else(|| file_symbol_id.to_owned()),
                         local_name: node_text(left, source),
                         target_name,
+                        factory_name,
                         declares_binding: false,
                         conditional: c_write_is_conditional(node),
                         scope_start_byte,
@@ -1519,6 +1531,33 @@ fn collect_c_function_pointer_observations(
                         receiver_path: path,
                         field_name: Some(field_name),
                         field_index: None,
+                        target_name,
+                        line: node.start_position().row + 1,
+                        site_start_byte: node.start_byte(),
+                    });
+                }
+            }
+        }
+    } else if node.kind() == "return_statement" {
+        if c_enclosing_function_returns_pointer(node, source, function_types) {
+            if let Some(value) = node
+                .child_by_field_name("value")
+                .or_else(|| node.named_child(0))
+            {
+                let owner_id = owning_symbol_id(node, owners)
+                    .cloned()
+                    .unwrap_or_else(|| file_symbol_id.to_owned());
+                let mut targets = Vec::new();
+                c_returned_callable_references(value, source, callable_names, &mut targets);
+                targets.retain(|target| {
+                    c_parameter_index(node, target, source).is_none()
+                        && !c_local_declaration_precedes(node, target, source)
+                });
+                targets.sort();
+                targets.dedup();
+                for target_name in targets {
+                    facts.returns.push(CFunctionPointerReturnFact {
+                        owner_id: owner_id.clone(),
                         target_name,
                         line: node.start_position().row + 1,
                         site_start_byte: node.start_byte(),
@@ -1604,6 +1643,24 @@ fn collect_c_function_pointer_observations(
                         });
                 }
             }
+            if language == Language::Cpp && function.kind() == "call_expression" {
+                if let Some(factory_name) = function
+                    .child_by_field_name("function")
+                    .filter(|callee| callee.kind() == "identifier")
+                    .map(|callee| node_text(callee, source))
+                {
+                    facts
+                        .factory_dispatches
+                        .push(CFunctionPointerFactoryDispatchFact {
+                            owner_id: owning_symbol_id(node, owners)
+                                .cloned()
+                                .unwrap_or_else(|| file_symbol_id.to_owned()),
+                            factory_name,
+                            line: node.start_position().row + 1,
+                            site_start_byte: node.start_byte(),
+                        });
+                }
+            }
             if function.kind() == "field_expression" {
                 if let Some(mut path) = c_field_path(function, source) {
                     if let Some(field_name) = path.pop() {
@@ -1636,9 +1693,54 @@ fn collect_c_function_pointer_observations(
             file_symbol_id,
             callable_names,
             function_fields,
+            function_types,
             facts,
         );
     }
+}
+
+fn c_enclosing_function_returns_pointer(
+    node: Node<'_>,
+    source: &[u8],
+    function_types: &HashMap<String, bool>,
+) -> bool {
+    let mut ancestor = node.parent();
+    while let Some(function) = ancestor {
+        if function.kind() == "lambda_expression" {
+            return false;
+        }
+        if function.kind() == "function_definition" {
+            let type_is_pointer = function
+                .child_by_field_name("type")
+                .map(|kind| c_type_name(kind, source).unwrap_or_else(|| node_text(kind, source)))
+                .is_some_and(|name| {
+                    name == "auto" || function_types.get(&name).copied().unwrap_or(false)
+                });
+            let explicit_pointer_return =
+                function
+                    .child_by_field_name("declarator")
+                    .is_some_and(|declarator| {
+                        declarator.kind() == "function_declarator"
+                            && declarator.child_by_field_name("declarator").is_some_and(
+                                |returned_declarator| {
+                                    first_descendant_or_self(
+                                        returned_declarator,
+                                        "pointer_declarator",
+                                    )
+                                    .is_some()
+                                        && first_descendant_or_self(
+                                            returned_declarator,
+                                            "function_declarator",
+                                        )
+                                        .is_some()
+                                },
+                            )
+                    });
+            return type_is_pointer || explicit_pointer_return;
+        }
+        ancestor = function.parent();
+    }
+    false
 }
 
 fn collect_c_initializer_bindings(
@@ -1787,18 +1889,22 @@ fn collect_c_local_function_pointer_declarations(
         ) else {
             continue;
         };
-        let (Some(local_name), Some(target_name)) = (
-            declarator_name(declarator).map(|name| node_text(name, source)),
-            c_address_of_callable_reference(value, source, callable_names),
-        ) else {
+        let Some(local_name) = declarator_name(declarator).map(|name| node_text(name, source))
+        else {
             continue;
         };
+        let target_name = c_address_of_callable_reference(value, source, callable_names);
+        let factory_name = c_local_pointer_factory_call(value, source);
+        if target_name.is_none() && factory_name.is_none() {
+            continue;
+        }
         output.push(CLocalFunctionPointerBindingFact {
             owner_id: owning_symbol_id(initializer, owners)
                 .cloned()
                 .unwrap_or_else(|| file_symbol_id.to_owned()),
             local_name,
-            target_name: Some(target_name),
+            target_name,
+            factory_name,
             declares_binding: true,
             conditional: false,
             scope_start_byte: receiver_binding_scope(initializer, true).0,
@@ -1807,6 +1913,74 @@ fn collect_c_local_function_pointer_declarations(
             site_start_byte: initializer.start_byte(),
         });
     }
+}
+
+fn c_local_pointer_factory_call(node: Node<'_>, source: &[u8]) -> Option<String> {
+    (node.kind() == "call_expression")
+        .then(|| node.child_by_field_name("function"))
+        .flatten()
+        .filter(|function| function.kind() == "identifier")
+        .map(|function| node_text(function, source))
+}
+
+fn c_returned_callable_references(
+    node: Node<'_>,
+    source: &[u8],
+    callable_names: &std::collections::HashSet<String>,
+    output: &mut Vec<String>,
+) {
+    if let Some(target) = c_address_of_callable_reference(node, source, callable_names) {
+        output.push(target);
+        return;
+    }
+    if node.kind() == "conditional_expression" {
+        for field in ["consequence", "alternative"] {
+            if let Some(child) = node.child_by_field_name(field) {
+                c_returned_callable_references(child, source, callable_names, output);
+            }
+        }
+    } else if node.kind() == "parenthesized_expression" {
+        if let Some(child) = node.named_child(0) {
+            c_returned_callable_references(child, source, callable_names, output);
+        }
+    }
+}
+
+fn c_local_declaration_precedes(node: Node<'_>, name: &str, source: &[u8]) -> bool {
+    fn contains_declaration(current: Node<'_>, before: usize, name: &str, source: &[u8]) -> bool {
+        if current.start_byte() >= before {
+            return false;
+        }
+        if current.kind() == "declaration" {
+            let type_id = current
+                .child_by_field_name("type")
+                .map(|type_node| type_node.id());
+            let mut cursor = current.walk();
+            if current.named_children(&mut cursor).any(|child| {
+                Some(child.id()) != type_id
+                    && declarator_name(child)
+                        .is_some_and(|candidate| node_text(candidate, source) == name)
+            }) {
+                return true;
+            }
+        }
+        let mut cursor = current.walk();
+        let found = current
+            .named_children(&mut cursor)
+            .any(|child| contains_declaration(child, before, name, source));
+        found
+    }
+
+    let mut ancestor = node.parent();
+    while let Some(function) = ancestor {
+        if function.kind() == "function_definition" {
+            return function
+                .child_by_field_name("body")
+                .is_some_and(|body| contains_declaration(body, node.start_byte(), name, source));
+        }
+        ancestor = function.parent();
+    }
+    false
 }
 
 fn c_local_pointer_name_has_declaration(
