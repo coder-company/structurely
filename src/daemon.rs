@@ -159,7 +159,7 @@ fn lock_is_contended(error: &std::io::Error) -> bool {
     {
         // LockFileEx reports ERROR_LOCK_VIOLATION when another process owns
         // the requested byte range; Rust does not classify it as WouldBlock.
-        return error.raw_os_error() == Some(33);
+        error.raw_os_error() == Some(33)
     }
     #[cfg(not(windows))]
     false
