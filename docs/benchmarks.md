@@ -63,6 +63,11 @@ Structurely resolves all 14 intended targets while CodeGraph 1.5.0 resolves
 one. Structurely also rejects every deliberately impossible target, updates
 both source- and header-defined aliases incrementally, and converges on a
 zero-change sync.
+The enforced
+[`post-macro performance run`](../benchmarks/codegraph-source-intersection-2026-07-29-post-macros/README.md)
+preserves both 2× gates: Structurely is 2.450× faster to index, 9.024× faster
+at query p50, and 7.375× faster at query p95 while using 86.44% less peak
+memory and a 4.59% smaller database.
 The pinned
 [`OpenHarmony call-result gate`](../benchmarks/openharmony-call-result-2026-07-29/README.md)
 passes 16/16 correlated assertions across 6,995 ETS files. Its new assertion
