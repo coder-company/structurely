@@ -7,8 +7,8 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -76,7 +76,7 @@ pub fn start(project: impl AsRef<Path>, debounce: Duration) -> Result<DaemonStar
             && current
                 .state
                 .as_ref()
-                .is_some_and(|state| state.phase == "running")
+                .is_some_and(|state| matches!(state.phase.as_str(), "running" | "degraded"))
         {
             return Ok(DaemonStart {
                 started: true,
@@ -159,26 +159,79 @@ pub fn run(project: impl AsRef<Path>, debounce: Duration) -> Result<()> {
     });
 
     let mut engine = Engine::open(&project)?;
-    let report = engine.sync()?;
-    write_state(&paths.state, &DaemonState::running(&project, report.epoch))?;
+    let initial_epoch = match engine.sync() {
+        Ok(report) => {
+            write_state(&paths.state, &DaemonState::running(&project, report.epoch))?;
+            report.epoch
+        }
+        Err(error) => {
+            let epoch = engine.committed_epoch().unwrap_or(0);
+            write_state(
+                &paths.state,
+                &DaemonState::degraded(&project, epoch, error.to_string()),
+            )?;
+            epoch
+        }
+    };
     let state_path = paths.state.clone();
     let watch_stop = Arc::clone(&stop);
-    let mut state_write_error = None;
-    let mut watch_result = engine.watch(
+    let state_write_error = Arc::new(Mutex::new(None));
+    let reconcile_error = Arc::clone(&state_write_error);
+    let degraded_error = Arc::clone(&state_write_error);
+    let polling_error = Arc::clone(&state_write_error);
+    let last_epoch = Arc::new(AtomicU64::new(initial_epoch));
+    let reconcile_epoch = Arc::clone(&last_epoch);
+    let degraded_epoch = Arc::clone(&last_epoch);
+    let polling_epoch = Arc::clone(&last_epoch);
+    let mut watch_result = engine.watch_resilient(
         stop.clone(),
         debounce.max(Duration::from_millis(10)),
+        || {},
         |report| {
-            record_state_update(
-                &state_path,
-                &project,
-                report.epoch,
-                &watch_stop,
-                &mut state_write_error,
-            );
+            reconcile_epoch.store(report.epoch, Ordering::Relaxed);
+            if let Ok(mut state_error) = reconcile_error.lock() {
+                record_state_update(
+                    &state_path,
+                    &project,
+                    report.epoch,
+                    &watch_stop,
+                    &mut state_error,
+                );
+            }
+        },
+        |error| {
+            if let Ok(mut state_error) = degraded_error.lock() {
+                record_degraded_update(
+                    &state_path,
+                    &project,
+                    degraded_epoch.load(Ordering::Relaxed),
+                    error,
+                    &watch_stop,
+                    &mut state_error,
+                );
+            }
+        },
+        |report| {
+            polling_epoch.store(report.epoch, Ordering::Relaxed);
+            if let Ok(mut state_error) = polling_error.lock() {
+                let polling = anyhow::anyhow!(
+                    "filesystem watcher unavailable; graph is current via periodic polling"
+                );
+                record_degraded_update(
+                    &state_path,
+                    &project,
+                    report.epoch,
+                    &polling,
+                    &watch_stop,
+                    &mut state_error,
+                );
+            }
         },
     );
-    if let Some(error) = state_write_error {
-        watch_result = Err(error.context("publish daemon state after index update"));
+    if let Ok(mut error) = state_write_error.lock() {
+        if let Some(error) = error.take() {
+            watch_result = Err(error.context("publish daemon state after index update"));
+        }
     }
     stop.store(true, Ordering::Relaxed);
     let _ = monitor.join();
@@ -186,7 +239,7 @@ pub fn run(project: impl AsRef<Path>, debounce: Duration) -> Result<()> {
     let final_epoch = engine
         .status()
         .map(|status| status.epoch)
-        .unwrap_or(report.epoch);
+        .unwrap_or(initial_epoch);
     let final_state = match &watch_result {
         Ok(()) => DaemonState::stopped(&project, final_epoch, None),
         Err(error) => DaemonState::stopped(&project, final_epoch, Some(error.to_string())),
@@ -216,6 +269,17 @@ impl DaemonState {
             epoch,
             updated_unix_ms: unix_millis(),
             error,
+        }
+    }
+
+    fn degraded(project: &Path, epoch: u64, error: String) -> Self {
+        Self {
+            pid: std::process::id(),
+            project: project.display().to_string(),
+            phase: "degraded".to_owned(),
+            epoch,
+            updated_unix_ms: unix_millis(),
+            error: Some(error),
         }
     }
 }
@@ -283,6 +347,26 @@ fn record_state_update(
         return;
     }
     if let Err(write_error) = write_state(path, &DaemonState::running(project, epoch)) {
+        *error = Some(write_error);
+        stop.store(true, Ordering::Relaxed);
+    }
+}
+
+fn record_degraded_update(
+    path: &Path,
+    project: &Path,
+    epoch: u64,
+    reconcile_error: &anyhow::Error,
+    stop: &AtomicBool,
+    error: &mut Option<anyhow::Error>,
+) {
+    if error.is_some() {
+        return;
+    }
+    if let Err(write_error) = write_state(
+        path,
+        &DaemonState::degraded(project, epoch, reconcile_error.to_string()),
+    ) {
         *error = Some(write_error);
         stop.store(true, Ordering::Relaxed);
     }

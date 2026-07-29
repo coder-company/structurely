@@ -118,19 +118,36 @@ fn daemon_start_status_catch_up_and_stop_are_idempotent() {
                 temp.path(),
                 &["daemon", "status", "--path", temp.path().to_str().unwrap()],
             );
-            if !status["running"].as_bool().unwrap() {
-                assert_eq!(status["state"]["phase"], "stopped");
+            if status["state"]["phase"] == "degraded" {
+                assert_eq!(status["running"], true);
                 assert!(status["state"]["error"].as_str().is_some());
                 break;
             }
             assert!(
                 Instant::now() < deadline,
-                "daemon did not release its lock after an indexing failure"
+                "daemon did not report a degraded indexing state"
             );
             thread::sleep(Duration::from_millis(50));
         }
         fs::set_permissions(&broken, fs::Permissions::from_mode(0o600)).unwrap();
         fs::remove_file(broken).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let status = run_json(
+                temp.path(),
+                &["daemon", "status", "--path", temp.path().to_str().unwrap()],
+            );
+            if status["state"]["phase"] == "running" {
+                assert_eq!(status["running"], true);
+                assert!(status["state"]["error"].is_null());
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "daemon did not recover after the source became readable"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
     }
 
     #[cfg(not(unix))]
@@ -141,11 +158,11 @@ fn daemon_start_status_catch_up_and_stop_are_idempotent() {
         );
         assert_eq!(stopped["stopped"], true);
     }
-    let recovered = run_json(
+    let duplicate = run_json(
         temp.path(),
         &["daemon", "start", "--path", temp.path().to_str().unwrap()],
     );
-    assert_eq!(recovered["started"], true);
+    assert_eq!(duplicate["started"], false);
     let final_stop = run_json(
         temp.path(),
         &["daemon", "stop", "--path", temp.path().to_str().unwrap()],

@@ -117,6 +117,53 @@ pub struct BenchmarkReport {
     pub relationships: usize,
 }
 
+type WatcherErrorSlot = Arc<Mutex<Option<notify::Error>>>;
+
+fn create_project_watcher(
+    root: &Path,
+) -> Result<(
+    notify::RecommendedWatcher,
+    mpsc::Receiver<()>,
+    WatcherErrorSlot,
+)> {
+    const WATCH_SIGNAL_CAPACITY: usize = 1;
+    let (sender, receiver) = mpsc::sync_channel(WATCH_SIGNAL_CAPACITY);
+    let errors = Arc::new(Mutex::new(None));
+    let callback_errors = Arc::clone(&errors);
+    let callback_root = root.to_owned();
+    let mut watcher =
+        notify::recommended_watcher(move |result: notify::Result<Event>| match result {
+            Ok(event) if relevant_watch_event(&callback_root, &event) => {
+                let _ = sender.try_send(());
+            }
+            Ok(_) => {}
+            Err(error) => {
+                if let Ok(mut slot) = callback_errors.lock() {
+                    *slot = Some(error);
+                }
+                let _ = sender.try_send(());
+            }
+        })?;
+    watcher.watch(root, RecursiveMode::Recursive)?;
+    Ok((watcher, receiver, errors))
+}
+
+fn relevant_watch_event(root: &Path, event: &Event) -> bool {
+    if matches!(event.kind, EventKind::Access(_)) {
+        return false;
+    }
+    event.paths.iter().any(|path| {
+        path.strip_prefix(root).is_ok_and(|relative| {
+            !relative
+                .components()
+                .any(|part| part.as_os_str() == PROJECT_DIR)
+                && (crate::model::Language::from_path(relative).is_some()
+                    || path.is_dir()
+                    || !path.exists())
+        })
+    })
+}
+
 impl Engine {
     pub fn init(root: impl AsRef<Path>) -> Result<(Self, IndexReport)> {
         let root = absolute(root.as_ref())?;
@@ -144,6 +191,10 @@ impl Engine {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub(crate) fn committed_epoch(&self) -> Result<u64> {
+        self.store.epoch()
     }
 
     pub fn sync(&mut self) -> Result<IndexReport> {
@@ -400,67 +451,183 @@ impl Engine {
         on_ready: impl FnOnce(),
         mut on_sync: impl FnMut(&IndexReport),
     ) -> Result<()> {
-        let (sender, receiver) = mpsc::channel::<notify::Result<Event>>();
-        let mut watcher = notify::recommended_watcher(move |event| {
-            let _ = sender.send(event);
-        })?;
-        watcher.watch(&self.root, RecursiveMode::Recursive)?;
-        on_ready();
+        self.watch_resilient(
+            stop,
+            debounce,
+            on_ready,
+            |report| {
+                if report.files_changed > 0 || report.files_deleted > 0 {
+                    on_sync(report);
+                }
+            },
+            |_| {},
+            |_| {},
+        )
+    }
+
+    pub fn watch_resilient(
+        &mut self,
+        stop: Arc<AtomicBool>,
+        debounce: Duration,
+        on_ready: impl FnOnce(),
+        mut on_reconcile: impl FnMut(&IndexReport),
+        mut on_error: impl FnMut(&anyhow::Error),
+        mut on_polling: impl FnMut(&IndexReport),
+    ) -> Result<()> {
+        const RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
+        const MAX_RETRY_DELAY: Duration = Duration::from_secs(2);
         let poll = Duration::from_millis(50);
+        let mut fallback_sender = None;
+        let mut watcher_needs_rebuild = false;
+        let mut initial_watcher_error = None;
+        let (mut watcher, mut receiver, mut watcher_errors) =
+            match create_project_watcher(&self.root) {
+                Ok((watcher, receiver, errors)) => (Some(watcher), receiver, errors),
+                Err(error) => {
+                    let (sender, receiver) = mpsc::sync_channel(1);
+                    fallback_sender = Some(sender);
+                    watcher_needs_rebuild = true;
+                    initial_watcher_error = Some(error);
+                    (None, receiver, Arc::new(Mutex::new(None)))
+                }
+            };
+        on_ready();
         let mut last_relevant_event: Option<Instant> = None;
         let mut last_reconcile = Instant::now();
+        let mut sync_retry_delay = Duration::from_millis(50);
+        let mut sync_retry_at: Option<Instant> = None;
+        let mut watcher_retry_delay = Duration::from_millis(50);
+        let mut watcher_retry_at: Option<Instant> = None;
+        let mut last_sync_error = None;
+        let mut degraded = initial_watcher_error.is_some();
+        let mut first_reconcile = true;
+        if let Some(error) = initial_watcher_error {
+            on_error(&error);
+        }
 
         while !stop.load(Ordering::Relaxed) {
             match receiver.recv_timeout(poll) {
-                Ok(Ok(event)) if self.relevant_watch_event(&event) => {
+                Ok(()) => {
                     last_relevant_event = Some(Instant::now());
                 }
-                Ok(Ok(_)) => {}
-                Ok(Err(error)) => return Err(error.into()),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    bail!("filesystem watcher disconnected")
+                    if !watcher_needs_rebuild {
+                        let error = anyhow!(
+                            "filesystem watcher disconnected; using polling while rebuilding"
+                        );
+                        on_error(&error);
+                        degraded = true;
+                        drop(watcher.take());
+                    }
+                    watcher_needs_rebuild = true;
+                    watcher_retry_at.get_or_insert(Instant::now());
+                    let (sender, fallback_receiver) = mpsc::sync_channel(1);
+                    fallback_sender = Some(sender);
+                    receiver = fallback_receiver;
                 }
             }
-            if last_relevant_event.is_some_and(|last| last.elapsed() >= debounce) {
-                let report = self.sync()?;
-                if report.files_changed > 0 || report.files_deleted > 0 {
-                    on_sync(&report);
+            if let Some(error) = watcher_errors
+                .lock()
+                .ok()
+                .and_then(|mut error| error.take())
+            {
+                if !watcher_needs_rebuild {
+                    let error = anyhow!("filesystem watcher error: {error}");
+                    on_error(&error);
+                    degraded = true;
+                    drop(watcher.take());
                 }
-                last_relevant_event = None;
-                last_reconcile = Instant::now();
-            } else if last_reconcile.elapsed() >= Duration::from_secs(1) {
-                let report = self.sync()?;
-                if report.files_changed > 0 || report.files_deleted > 0 {
-                    on_sync(&report);
+                watcher_needs_rebuild = true;
+                watcher_retry_at.get_or_insert(Instant::now());
+            }
+            if watcher_needs_rebuild
+                && watcher_retry_at.is_none_or(|deadline| Instant::now() >= deadline)
+            {
+                match create_project_watcher(&self.root) {
+                    Ok((replacement, replacement_receiver, replacement_errors)) => {
+                        watcher = Some(replacement);
+                        receiver = replacement_receiver;
+                        watcher_errors = replacement_errors;
+                        fallback_sender = None;
+                        watcher_needs_rebuild = false;
+                        watcher_retry_at = None;
+                        watcher_retry_delay = Duration::from_millis(50);
+                        last_relevant_event = Some(Instant::now());
+                    }
+                    Err(_) => {
+                        watcher_retry_at = Some(Instant::now() + watcher_retry_delay);
+                        watcher_retry_delay =
+                            watcher_retry_delay.saturating_mul(2).min(MAX_RETRY_DELAY);
+                    }
                 }
-                last_reconcile = Instant::now();
+            }
+
+            let debounce_ready = last_relevant_event.is_some_and(|last| last.elapsed() >= debounce);
+            let periodic_ready = last_reconcile.elapsed() >= RECONCILE_INTERVAL;
+            let retry_ready = sync_retry_at.is_some_and(|deadline| Instant::now() >= deadline);
+            if (debounce_ready || periodic_ready || retry_ready)
+                && sync_retry_at.is_none_or(|deadline| Instant::now() >= deadline)
+            {
+                match self.sync() {
+                    Ok(report) => {
+                        let recovered = last_sync_error.take().is_some();
+                        if watcher_needs_rebuild {
+                            if recovered
+                                || report.files_changed > 0
+                                || report.files_deleted > 0
+                                || report.maintenance_warning.is_some()
+                            {
+                                on_polling(&report);
+                            }
+                        } else if first_reconcile
+                            || degraded
+                            || recovered
+                            || report.files_changed > 0
+                            || report.files_deleted > 0
+                            || report.maintenance_warning.is_some()
+                        {
+                            on_reconcile(&report);
+                        }
+                        first_reconcile = false;
+                        degraded = watcher_needs_rebuild;
+                        last_relevant_event = None;
+                        last_reconcile = Instant::now();
+                        sync_retry_delay = Duration::from_millis(50);
+                        sync_retry_at = None;
+                    }
+                    Err(error) => {
+                        on_error(&error);
+                        degraded = true;
+                        last_sync_error = Some(error.to_string());
+                        sync_retry_at = Some(Instant::now() + sync_retry_delay);
+                        sync_retry_delay = sync_retry_delay.saturating_mul(2).min(MAX_RETRY_DELAY);
+                    }
+                }
             }
         }
-        if last_relevant_event.is_some() {
-            let report = self.sync()?;
-            if report.files_changed > 0 || report.files_deleted > 0 {
-                on_sync(&report);
+        match self.sync() {
+            Ok(report) => {
+                if watcher_needs_rebuild {
+                    on_polling(&report);
+                } else if first_reconcile
+                    || degraded
+                    || last_sync_error.is_some()
+                    || report.files_changed > 0
+                    || report.files_deleted > 0
+                    || report.maintenance_warning.is_some()
+                {
+                    on_reconcile(&report);
+                }
+            }
+            Err(error) => {
+                on_error(&error);
+                return Err(error);
             }
         }
+        drop(fallback_sender);
         drop(watcher);
         Ok(())
-    }
-
-    fn relevant_watch_event(&self, event: &Event) -> bool {
-        if matches!(event.kind, EventKind::Access(_)) {
-            return false;
-        }
-        event.paths.iter().any(|path| {
-            path.strip_prefix(&self.root).is_ok_and(|relative| {
-                !relative
-                    .components()
-                    .any(|part| part.as_os_str() == PROJECT_DIR)
-                    && (crate::model::Language::from_path(relative).is_some()
-                        || path.is_dir()
-                        || !path.exists())
-            })
-        })
     }
 
     pub fn node(
@@ -9255,14 +9422,26 @@ int dispatch_mutated(MutatedConditionOps *ops) { return ops->run(1); }
         });
 
         ready_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
-        fs::write(temp.path().join("main.ts"), "function afterSave() {}\n").unwrap();
+        for revision in 0..256 {
+            fs::write(
+                temp.path().join("main.ts"),
+                format!("function afterSave{revision}() {{}}\n"),
+            )
+            .unwrap();
+        }
         let report = report_receiver
             .recv_timeout(Duration::from_secs(10))
             .unwrap();
         assert_eq!(report.files_changed, 1);
+        thread::sleep(Duration::from_millis(150));
         stop.store(true, Ordering::Relaxed);
         let engine = handle.join().unwrap();
-        let hits = engine.search("afterSave", 10).unwrap();
-        assert_eq!(hits[0].symbol.name, "afterSave");
+        let hits = engine.search("afterSave255", 10).unwrap();
+        assert_eq!(hits[0].symbol.name, "afterSave255");
+        let reconciliations = 1 + report_receiver.try_iter().count();
+        assert!(
+            reconciliations < 16,
+            "256 writes should coalesce into bounded reconciliation work, got {reconciliations}"
+        );
     }
 }
