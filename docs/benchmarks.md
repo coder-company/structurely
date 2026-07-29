@@ -339,7 +339,7 @@ against accepted v51.
 
 The
 [`FastAPI router-composition gate`](../benchmarks/fastapi-router-composition-2026-07-29/README.md)
-materializes all 44 production endpoints across pinned LightRAG and Graphiti:
-34 and 10 respectively. It additionally requires zero public routes from
+materializes all 53 production endpoints across pinned LightRAG and Graphiti:
+42 and 11 respectively. It additionally requires zero public routes from
 unmounted router-only corpora and proves that a changed factory mount prefix
 propagates to every descendant.

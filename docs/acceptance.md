@@ -151,7 +151,7 @@ query p50, uses 87.50% less peak memory, and stores a 12.29% smaller database.
 The qualified semantic snapshot has zero additions, removals, or callback
 losses against accepted v51.
 The `benchmarks/fastapi-router-composition-2026-07-29/` gate advances the graph
-model to v58 and materializes all 44 mounted production FastAPI endpoints from
+model to v58 and materializes all 53 deployed production FastAPI endpoints from
 pinned LightRAG and Graphiti with exact route-to-handler/file provenance. Its
 metamorphic checks prove that unmounted router modules publish zero endpoints
 and that a changed factory mount prefix propagates to every descendant route.
