@@ -102,6 +102,24 @@ impl Store {
         &self.path
     }
 
+    pub(crate) fn metadata_value(&self, key: &str) -> Result<Option<String>> {
+        self.connection
+            .query_row("SELECT value FROM metadata WHERE key=?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn set_metadata_value(&mut self, key: &str, value: &str) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO metadata(key,value) VALUES (?1,?2)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )?;
+        Ok(())
+    }
+
     pub fn storage_metrics(&self) -> Result<StorageMetrics> {
         let wal_path = PathBuf::from(format!("{}-wal", self.path.display()));
         Ok(StorageMetrics {
@@ -1926,7 +1944,7 @@ impl Store {
         for (path, facts) in &files {
             let mut targets = Vec::new();
             for include in &facts.includes {
-                if let Some(target) = resolve_c_quoted_include(path, &include.path, &all_paths) {
+                if let Some(target) = resolve_c_include(path, include, &all_paths) {
                     targets.push(target);
                 }
             }
@@ -4720,29 +4738,39 @@ fn normalize_c_type_name(type_name: &str) -> String {
         .to_owned()
 }
 
-fn resolve_c_quoted_include(
+fn resolve_c_include(
     source_file: &str,
-    include: &str,
+    include: &crate::model::CIncludeFact,
     all_paths: &HashSet<String>,
 ) -> Option<String> {
-    let include = include.replace('\\', "/");
-    let parent = source_file
-        .rsplit_once('/')
-        .map_or("", |(parent, _)| parent);
-    let joined = if parent.is_empty() {
-        include.clone()
-    } else {
-        format!("{parent}/{include}")
-    };
-    if let Some(normalized) = normalize_project_relative_path(&joined) {
-        if all_paths.contains(&normalized) {
-            return Some(normalized);
+    use crate::model::CIncludeResolution;
+
+    let path = include.path.replace('\\', "/");
+    match include.resolution {
+        CIncludeResolution::Rejected => return None,
+        CIncludeResolution::Resolved => return all_paths.contains(&path).then_some(path),
+        CIncludeResolution::Unmanaged => {}
+    }
+
+    if !include.angled {
+        let parent = source_file
+            .rsplit_once('/')
+            .map_or("", |(parent, _)| parent);
+        let joined = if parent.is_empty() {
+            path.clone()
+        } else {
+            format!("{parent}/{path}")
+        };
+        if let Some(normalized) = normalize_project_relative_path(&joined) {
+            if all_paths.contains(&normalized) {
+                return Some(normalized);
+            }
         }
     }
-    let suffix = format!("/{include}");
+    let suffix = format!("/{path}");
     let mut suffix_matches = all_paths
         .iter()
-        .filter(|path| path.as_str() == include || path.ends_with(&suffix))
+        .filter(|candidate| candidate.as_str() == path || candidate.ends_with(&suffix))
         .cloned()
         .collect::<Vec<_>>();
     suffix_matches.sort();

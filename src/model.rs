@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path};
 
-pub const GRAPH_MODEL_VERSION: u32 = 65;
+pub const GRAPH_MODEL_VERSION: u32 = 66;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -590,8 +590,20 @@ pub(crate) struct CLocalFunctionPointerDispatchFact {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CIncludeFact {
     pub path: String,
+    pub angled: bool,
+    #[serde(default)]
+    pub resolution: CIncludeResolution,
     pub line: usize,
     pub site_start_byte: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CIncludeResolution {
+    #[default]
+    Unmanaged,
+    Resolved,
+    Rejected,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

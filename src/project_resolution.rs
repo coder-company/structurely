@@ -1,9 +1,10 @@
-use crate::model::{EventChannel, FileFacts};
+use crate::model::{CIncludeResolution, EventChannel, FileFacts};
 use globset::{Glob, GlobSetBuilder};
 use ignore::WalkBuilder;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs,
+    io::Read,
     path::{Component, Path, PathBuf},
 };
 
@@ -24,6 +25,27 @@ struct AliasPattern {
     replacements: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct CppIncludePaths {
+    quote: Vec<PathBuf>,
+    general: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CppCompileContext {
+    by_source: HashMap<String, Vec<CppIncludePaths>>,
+    shared: Option<CppIncludePaths>,
+    database_present: bool,
+    fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CppIncludeResolution {
+    Unmanaged,
+    Resolved(String),
+    Rejected,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ProjectResolutionContext {
     root: PathBuf,
@@ -31,6 +53,7 @@ pub(crate) struct ProjectResolutionContext {
     aliases: Vec<AliasPattern>,
     workspace_packages: Vec<WorkspacePackage>,
     harmony_app_roots: Vec<PathBuf>,
+    cpp: CppCompileContext,
 }
 
 impl ProjectResolutionContext {
@@ -97,16 +120,43 @@ impl ProjectResolutionContext {
         workspace_packages.extend(load_go_packages(root));
         workspace_packages.sort_by(|left, right| right.name.len().cmp(&left.name.len()));
         let harmony_app_roots = load_harmony_app_roots(root);
+        let cpp = load_cpp_compile_context(root);
         Self {
             root: root.to_owned(),
             base_url,
             aliases,
             workspace_packages,
             harmony_app_roots,
+            cpp,
         }
     }
 
+    pub(crate) fn fingerprint(&self) -> &str {
+        &self.cpp.fingerprint
+    }
+
+    pub(crate) fn has_compilation_database(&self) -> bool {
+        !self.cpp.by_source.is_empty()
+    }
+
     pub(crate) fn apply(&self, facts: &mut FileFacts) {
+        if matches!(
+            facts.language,
+            crate::model::Language::C | crate::model::Language::Cpp
+        ) {
+            for include in &mut facts.c_function_pointers.includes {
+                match self.resolve_cpp_include(&facts.path, &include.path, include.angled) {
+                    CppIncludeResolution::Unmanaged => {}
+                    CppIncludeResolution::Resolved(resolved) => {
+                        include.path = resolved;
+                        include.resolution = CIncludeResolution::Resolved;
+                    }
+                    CppIncludeResolution::Rejected => {
+                        include.resolution = CIncludeResolution::Rejected;
+                    }
+                }
+            }
+        }
         let emitter_scope = facts
             .dynamic_events
             .iter()
@@ -231,6 +281,85 @@ impl ProjectResolutionContext {
                 reference.target_file_hint = Some(resolved);
             }
         }
+    }
+
+    fn resolve_cpp_include(
+        &self,
+        source_file: &str,
+        include: &str,
+        angled: bool,
+    ) -> CppIncludeResolution {
+        if !self.cpp.database_present {
+            return CppIncludeResolution::Unmanaged;
+        }
+        if include.is_empty()
+            || include.len() > 4_096
+            || include.contains('\0')
+            || Path::new(include).is_absolute()
+        {
+            return CppIncludeResolution::Rejected;
+        }
+        let mut roots = Vec::<PathBuf>::new();
+        if !angled {
+            roots.push(
+                Path::new(source_file)
+                    .parent()
+                    .unwrap_or_else(|| Path::new(""))
+                    .to_owned(),
+            );
+            if let Some(resolved) = self.resolve_cpp_include_from_roots(include, &roots) {
+                return CppIncludeResolution::Resolved(resolved);
+            }
+            roots.clear();
+        }
+        let contexts = self.cpp.by_source.get(source_file);
+        let inherited = self.cpp.shared.as_ref().map(std::slice::from_ref);
+        let Some(contexts) = contexts.map(Vec::as_slice).or(inherited) else {
+            return CppIncludeResolution::Rejected;
+        };
+        let mut resolved = Vec::new();
+        for paths in contexts {
+            roots.clear();
+            if !angled {
+                roots.extend(paths.quote.iter().cloned());
+            }
+            roots.extend(paths.general.iter().cloned());
+            let Some(candidate) = self.resolve_cpp_include_from_roots(include, &roots) else {
+                return CppIncludeResolution::Rejected;
+            };
+            resolved.push(candidate);
+        }
+        resolved.sort();
+        resolved.dedup();
+        if resolved.len() == 1 {
+            CppIncludeResolution::Resolved(resolved.remove(0))
+        } else {
+            CppIncludeResolution::Rejected
+        }
+    }
+
+    fn resolve_cpp_include_from_roots(&self, include: &str, roots: &[PathBuf]) -> Option<String> {
+        let canonical_root = fs::canonicalize(&self.root).ok()?;
+        for root in roots {
+            let candidate = self.root.join(root).join(include);
+            let Ok(canonical) = fs::canonicalize(candidate) else {
+                continue;
+            };
+            let Ok(relative) = canonical.strip_prefix(&canonical_root) else {
+                continue;
+            };
+            if canonical.is_file()
+                && crate::model::Language::from_path(relative).is_some_and(|language| {
+                    matches!(
+                        language,
+                        crate::model::Language::C | crate::model::Language::Cpp
+                    )
+                })
+            {
+                return Some(normalize_path(relative));
+            }
+        }
+        None
     }
 
     fn harmony_scope_for(&self, file: &str) -> String {
@@ -895,6 +1024,367 @@ fn canonical_source_hint(root: &Path, relative: &Path) -> Option<String> {
     None
 }
 
+fn load_cpp_compile_context(root: &Path) -> CppCompileContext {
+    const MAX_DATABASE_BYTES: u64 = 16 * 1024 * 1024;
+    const MAX_ENTRIES: usize = 100_000;
+    const MAX_ARGUMENTS: usize = 4_096;
+    const MAX_TOKEN_BYTES: usize = 4_096;
+    const MAX_INCLUDE_DIRS: usize = 8_192;
+    const CANDIDATES: &[&str] = &[
+        "compile_commands.json",
+        "build/compile_commands.json",
+        "cmake-build-debug/compile_commands.json",
+        "cmake-build-release/compile_commands.json",
+        "out/compile_commands.json",
+    ];
+
+    let Some(database) = CANDIDATES
+        .iter()
+        .map(|candidate| root.join(candidate))
+        .find(|candidate| candidate.is_file())
+    else {
+        return CppCompileContext {
+            database_present: false,
+            fingerprint: "cpp-compdb:none:v1".to_owned(),
+            ..CppCompileContext::default()
+        };
+    };
+    let Ok(canonical_root) = fs::canonicalize(root) else {
+        return CppCompileContext {
+            database_present: true,
+            fingerprint: "cpp-compdb:unreadable:v1".to_owned(),
+            ..CppCompileContext::default()
+        };
+    };
+    let Ok(file) = fs::File::open(&database) else {
+        return CppCompileContext {
+            database_present: true,
+            fingerprint: "cpp-compdb:unreadable:v1".to_owned(),
+            ..CppCompileContext::default()
+        };
+    };
+    let Ok(canonical_database) = fs::canonicalize(&database) else {
+        return CppCompileContext {
+            database_present: true,
+            fingerprint: "cpp-compdb:unreadable:v1".to_owned(),
+            ..CppCompileContext::default()
+        };
+    };
+    if !canonical_database.starts_with(&canonical_root) {
+        return CppCompileContext {
+            database_present: true,
+            fingerprint: "cpp-compdb:outside-root:v1".to_owned(),
+            ..CppCompileContext::default()
+        };
+    }
+    let opened_identity = file.try_clone().and_then(same_file::Handle::from_file);
+    let path_identity = same_file::Handle::from_path(&canonical_database);
+    if !matches!((opened_identity, path_identity), (Ok(opened), Ok(path)) if opened == path) {
+        return CppCompileContext {
+            database_present: true,
+            fingerprint: "cpp-compdb:changed-during-open:v1".to_owned(),
+            ..CppCompileContext::default()
+        };
+    }
+    let Ok(metadata) = file.metadata() else {
+        return CppCompileContext {
+            database_present: true,
+            fingerprint: "cpp-compdb:unreadable:v1".to_owned(),
+            ..CppCompileContext::default()
+        };
+    };
+    if metadata.len() > MAX_DATABASE_BYTES {
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |duration| duration.as_nanos());
+        return CppCompileContext {
+            database_present: true,
+            fingerprint: format!("cpp-compdb:oversize:{}:{modified}:v1", metadata.len()),
+            ..CppCompileContext::default()
+        };
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    let Ok(_) = file.take(MAX_DATABASE_BYTES + 1).read_to_end(&mut bytes) else {
+        return CppCompileContext {
+            database_present: true,
+            fingerprint: "cpp-compdb:unreadable:v1".to_owned(),
+            ..CppCompileContext::default()
+        };
+    };
+    if bytes.len() as u64 > MAX_DATABASE_BYTES
+        || fs::canonicalize(&canonical_database)
+            .ok()
+            .filter(|current| {
+                current == &canonical_database && current.starts_with(&canonical_root)
+            })
+            .is_none()
+    {
+        return CppCompileContext {
+            database_present: true,
+            fingerprint: "cpp-compdb:changed-during-read:v1".to_owned(),
+            ..CppCompileContext::default()
+        };
+    }
+    let database_fingerprint = format!(
+        "cpp-compdb:{}:{}:v1",
+        database
+            .strip_prefix(root)
+            .map(normalize_path)
+            .unwrap_or_else(|_| database.display().to_string()),
+        blake3::hash(&bytes).to_hex()
+    );
+    let Ok(entries) = serde_json::from_slice::<Vec<serde_json::Value>>(&bytes) else {
+        return CppCompileContext {
+            database_present: true,
+            fingerprint: database_fingerprint,
+            ..CppCompileContext::default()
+        };
+    };
+    let mut by_source = HashMap::<String, Vec<CppIncludePaths>>::new();
+    for entry in entries.into_iter().take(MAX_ENTRIES) {
+        let directory = entry
+            .get("directory")
+            .and_then(serde_json::Value::as_str)
+            .filter(|directory| directory.len() <= MAX_TOKEN_BYTES)
+            .map(PathBuf::from)
+            .map(|directory| {
+                if directory.is_absolute() {
+                    directory
+                } else {
+                    root.join(directory)
+                }
+            })
+            .unwrap_or_else(|| root.to_owned());
+        let arguments =
+            if let Some(arguments) = entry.get("arguments").and_then(serde_json::Value::as_array) {
+                arguments
+                    .iter()
+                    .take(MAX_ARGUMENTS)
+                    .filter_map(serde_json::Value::as_str)
+                    .filter(|argument| argument.len() <= MAX_TOKEN_BYTES)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            } else {
+                entry
+                    .get("command")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|command| command.len() <= MAX_ARGUMENTS * MAX_TOKEN_BYTES)
+                    .and_then(split_compiler_command)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .take(MAX_ARGUMENTS)
+                    .collect()
+            };
+        let mut quote = Vec::new();
+        let mut ordinary = Vec::new();
+        let mut system = Vec::new();
+        let mut after = Vec::new();
+        let mut index = 0usize;
+        while index < arguments.len() {
+            let argument = &arguments[index];
+            let (bucket, attached) = if argument == "-iquote" {
+                (Some(&mut quote), None)
+            } else if let Some(value) = argument.strip_prefix("-iquote") {
+                (Some(&mut quote), (!value.is_empty()).then_some(value))
+            } else if argument == "-isystem" {
+                (Some(&mut system), None)
+            } else if let Some(value) = argument.strip_prefix("-isystem") {
+                (Some(&mut system), (!value.is_empty()).then_some(value))
+            } else if argument == "-idirafter" {
+                (Some(&mut after), None)
+            } else if let Some(value) = argument.strip_prefix("-idirafter") {
+                (Some(&mut after), (!value.is_empty()).then_some(value))
+            } else if argument == "-I" || argument == "/I" {
+                (Some(&mut ordinary), None)
+            } else if let Some(value) = argument
+                .strip_prefix("-I")
+                .or_else(|| argument.strip_prefix("/I"))
+            {
+                (Some(&mut ordinary), (!value.is_empty()).then_some(value))
+            } else {
+                (None, None)
+            };
+            if let Some(bucket) = bucket {
+                let value = attached.or_else(|| {
+                    let next = arguments.get(index + 1)?;
+                    if next.starts_with('-') || (next.starts_with("/I") && next.len() > 2) {
+                        return None;
+                    }
+                    index += 1;
+                    Some(next.as_str())
+                });
+                if let Some(value) =
+                    value.filter(|value| !value.is_empty() && value.len() <= MAX_TOKEN_BYTES)
+                {
+                    let candidate = Path::new(value);
+                    let absolute = if candidate.is_absolute() {
+                        candidate.to_owned()
+                    } else {
+                        directory.join(candidate)
+                    };
+                    if let Ok(canonical) = fs::canonicalize(absolute) {
+                        if canonical.is_dir() {
+                            if let Ok(relative) = canonical.strip_prefix(&canonical_root) {
+                                let relative = relative.to_owned();
+                                if !bucket.contains(&relative) {
+                                    bucket.push(relative);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            index += 1;
+        }
+        let mut general = ordinary;
+        general.extend(system);
+        general.extend(after);
+        quote.truncate(MAX_INCLUDE_DIRS);
+        general.truncate(MAX_INCLUDE_DIRS);
+        let source = entry
+            .get("file")
+            .and_then(serde_json::Value::as_str)
+            .filter(|file| !file.is_empty() && file.len() <= MAX_TOKEN_BYTES)
+            .and_then(|file| {
+                let file = Path::new(file);
+                let absolute = if file.is_absolute() {
+                    file.to_owned()
+                } else {
+                    directory.join(file)
+                };
+                fs::canonicalize(absolute).ok()
+            })
+            .filter(|source| source.is_file())
+            .and_then(|source| {
+                source
+                    .strip_prefix(&canonical_root)
+                    .ok()
+                    .map(normalize_path)
+            });
+        if let Some(source) = source {
+            by_source
+                .entry(source)
+                .or_default()
+                .push(CppIncludePaths { quote, general });
+        }
+    }
+    for contexts in by_source.values_mut() {
+        for paths in contexts.iter_mut() {
+            let mut quote_seen = HashSet::new();
+            paths
+                .quote
+                .retain(|directory| quote_seen.insert(directory.clone()));
+            paths.quote.truncate(MAX_INCLUDE_DIRS);
+            let mut general_seen = HashSet::new();
+            paths
+                .general
+                .retain(|directory| general_seen.insert(directory.clone()));
+            paths.general.truncate(MAX_INCLUDE_DIRS);
+        }
+        contexts.sort_by(|left, right| {
+            left.quote
+                .cmp(&right.quote)
+                .then_with(|| left.general.cmp(&right.general))
+        });
+        contexts.dedup();
+    }
+    let mut all_contexts = by_source.values().flatten();
+    let shared = all_contexts
+        .next()
+        .cloned()
+        .filter(|first| all_contexts.all(|candidate| candidate == first));
+    let fingerprint = cpp_context_fingerprint(&database_fingerprint, &by_source);
+    CppCompileContext {
+        by_source,
+        shared,
+        database_present: true,
+        fingerprint,
+    }
+}
+
+fn cpp_context_fingerprint(
+    database_fingerprint: &str,
+    by_source: &HashMap<String, Vec<CppIncludePaths>>,
+) -> String {
+    let mut sources = by_source.iter().collect::<Vec<_>>();
+    sources.sort_by(|left, right| left.0.cmp(right.0));
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(database_fingerprint.as_bytes());
+    for (source, contexts) in sources {
+        hasher.update(&[0]);
+        hasher.update(source.as_bytes());
+        for context in contexts {
+            hasher.update(&[1]);
+            for directory in &context.quote {
+                hasher.update(&[2]);
+                hasher.update(normalize_path(directory).as_bytes());
+            }
+            for directory in &context.general {
+                hasher.update(&[3]);
+                hasher.update(normalize_path(directory).as_bytes());
+            }
+        }
+    }
+    format!("cpp-context:{}:v1", hasher.finalize().to_hex())
+}
+
+fn split_compiler_command(command: &str) -> Option<Vec<String>> {
+    let mut output = Vec::new();
+    let mut token = String::new();
+    let mut quote = None::<char>;
+    let mut escaped = false;
+    let mut characters = command.chars().peekable();
+    while let Some(character) = characters.next() {
+        if escaped {
+            token.push(character);
+            escaped = false;
+            continue;
+        }
+        if character == '\\' && quote != Some('\'') {
+            let escapes = characters.peek().is_some_and(|next| {
+                if quote == Some('"') {
+                    matches!(next, '$' | '`' | '"' | '\\' | '\n')
+                } else {
+                    next.is_whitespace() || matches!(next, '\'' | '"' | '\\')
+                }
+            });
+            if escapes {
+                escaped = true;
+                continue;
+            }
+        }
+        if let Some(delimiter) = quote {
+            if character == delimiter {
+                quote = None;
+            } else {
+                token.push(character);
+            }
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            quote = Some(character);
+        } else if character.is_whitespace() {
+            if !token.is_empty() {
+                output.push(std::mem::take(&mut token));
+            }
+        } else {
+            token.push(character);
+        }
+    }
+    if escaped {
+        token.push('\\');
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if !token.is_empty() {
+        output.push(token);
+    }
+    Some(output)
+}
+
 fn python_relative_import_hint(module: &str) -> String {
     let dots = module.bytes().take_while(|byte| *byte == b'.').count();
     if dots == 0 {
@@ -977,6 +1467,154 @@ fn strip_jsonc(source: &str) -> String {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn compilation_database_resolves_per_tu_angle_and_quote_includes() {
+        let root = tempdir().unwrap();
+        for directory in [
+            "src",
+            "quote dir",
+            "include-empty",
+            "include-a",
+            "include-b",
+        ] {
+            fs::create_dir_all(root.path().join(directory)).unwrap();
+        }
+        fs::write(root.path().join("src/main.c"), "#include <config.h>\n").unwrap();
+        fs::write(root.path().join("src/other.c"), "#include <config.h>\n").unwrap();
+        fs::write(root.path().join("src/config.h"), "/* local */").unwrap();
+        fs::write(root.path().join("quote dir/config.h"), "/* quote */").unwrap();
+        fs::write(root.path().join("include-a/config.h"), "/* a */").unwrap();
+        fs::write(root.path().join("include-b/config.h"), "/* b */").unwrap();
+        fs::write(
+            root.path().join("compile_commands.json"),
+            serde_json::to_string(&serde_json::json!([
+                {
+                    "directory": root.path(),
+                    "file": "src/main.c",
+                    "arguments": ["cc", "-iquote", "quote dir", "-I", "-Iinclude-empty", "-Iinclude-a", "src/main.c"],
+                    "command": "cc -Iinclude-b src/main.c"
+                },
+                {
+                    "directory": root.path(),
+                    "file": "src/other.c",
+                    "command": "cc '-Iinclude-b' src/other.c"
+                }
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let context = ProjectResolutionContext::load(root.path());
+        assert_eq!(
+            context.resolve_cpp_include("src/main.c", "config.h", false),
+            CppIncludeResolution::Resolved("src/config.h".to_owned())
+        );
+        assert_eq!(
+            context.resolve_cpp_include("src/main.c", "config.h", true),
+            CppIncludeResolution::Resolved("include-a/config.h".to_owned())
+        );
+        assert_eq!(
+            context.resolve_cpp_include("src/other.c", "config.h", true),
+            CppIncludeResolution::Resolved("include-b/config.h".to_owned())
+        );
+        assert!(context.fingerprint().starts_with("cpp-context:"));
+    }
+
+    #[test]
+    fn compilation_database_rejects_outside_roots_and_unclosed_commands() {
+        let root = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        fs::write(root.path().join("src/main.c"), "#include <escape.h>\n").unwrap();
+        fs::write(outside.path().join("escape.h"), "/* outside */").unwrap();
+        fs::write(
+            root.path().join("compile_commands.json"),
+            serde_json::to_string(&serde_json::json!([
+                {
+                    "directory": root.path(),
+                    "file": "src/main.c",
+                    "arguments": ["cc", "-I", outside.path(), "src/main.c"]
+                }
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        let context = ProjectResolutionContext::load(root.path());
+        assert_eq!(
+            context.resolve_cpp_include("src/main.c", "escape.h", true),
+            CppIncludeResolution::Rejected
+        );
+        assert_eq!(split_compiler_command("cc -I'unclosed"), None);
+        assert_eq!(
+            split_compiler_command("cc \"-Ispace dir\" main.c"),
+            Some(vec![
+                "cc".to_owned(),
+                "-Ispace dir".to_owned(),
+                "main.c".to_owned()
+            ])
+        );
+        assert_eq!(
+            split_compiler_command(r"cc -Ispace\ dir C:\sdk\main.c"),
+            Some(vec![
+                "cc".to_owned(),
+                "-Ispace dir".to_owned(),
+                r"C:\sdk\main.c".to_owned()
+            ])
+        );
+        assert_eq!(
+            split_compiler_command(r#"cc "/IC:\Program Files\sdk" C:\src\main.c"#),
+            Some(vec![
+                "cc".to_owned(),
+                r"/IC:\Program Files\sdk".to_owned(),
+                r"C:\src\main.c".to_owned()
+            ])
+        );
+    }
+
+    #[test]
+    fn compilation_database_variants_and_header_contexts_fail_closed() {
+        let root = tempdir().unwrap();
+        for directory in ["src", "include-a", "include-b"] {
+            fs::create_dir_all(root.path().join(directory)).unwrap();
+        }
+        for file in ["src/main.c", "src/other.c", "src/shared.h"] {
+            fs::write(root.path().join(file), "#include <config.h>\n").unwrap();
+        }
+        fs::write(root.path().join("include-a/config.h"), "/* a */").unwrap();
+        fs::write(root.path().join("include-b/config.h"), "/* b */").unwrap();
+        fs::write(
+            root.path().join("compile_commands.json"),
+            serde_json::to_string(&serde_json::json!([
+                {
+                    "directory": root.path(),
+                    "file": "src/main.c",
+                    "arguments": ["cc", "-Iinclude-a", "src/main.c"]
+                },
+                {
+                    "directory": root.path(),
+                    "file": "src/main.c",
+                    "arguments": ["cc", "-Iinclude-b", "src/main.c"]
+                },
+                {
+                    "directory": root.path(),
+                    "file": "src/other.c",
+                    "arguments": ["cc", "-Iinclude-b", "src/other.c"]
+                }
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        let context = ProjectResolutionContext::load(root.path());
+        assert_eq!(
+            context.resolve_cpp_include("src/main.c", "config.h", true),
+            CppIncludeResolution::Rejected
+        );
+        assert_eq!(
+            context.resolve_cpp_include("src/shared.h", "config.h", true),
+            CppIncludeResolution::Rejected
+        );
+    }
 
     #[test]
     fn relative_import_normalization_rejects_project_root_escape() {

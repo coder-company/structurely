@@ -1416,19 +1416,23 @@ fn collect_c_function_pointer_observations(
     if node.kind() == "preproc_include" {
         if let Some(path) = node
             .child_by_field_name("path")
-            .filter(|path| path.kind() == "string_literal")
-            .map(|path| node_text(path, source))
-            .and_then(|path| {
-                path.strip_prefix('"')
-                    .and_then(|path| path.strip_suffix('"'))
-                    .map(str::to_owned)
-            })
+            .filter(|path| matches!(path.kind(), "string_literal" | "system_lib_string"))
         {
-            facts.includes.push(CIncludeFact {
-                path,
-                line: node.start_position().row + 1,
-                site_start_byte: node.start_byte(),
-            });
+            let raw = node_text(path, source);
+            let angled = raw.starts_with('<') && raw.ends_with('>');
+            let path = raw
+                .strip_prefix(if angled { '<' } else { '"' })
+                .and_then(|path| path.strip_suffix(if angled { '>' } else { '"' }))
+                .map(str::to_owned);
+            if let Some(path) = path {
+                facts.includes.push(CIncludeFact {
+                    path,
+                    angled,
+                    resolution: crate::model::CIncludeResolution::Unmanaged,
+                    line: node.start_position().row + 1,
+                    site_start_byte: node.start_byte(),
+                });
+            }
         }
     } else if node.kind() == "assignment_expression" {
         if let (Some(left), Some(right)) = (

@@ -741,6 +741,7 @@ dependencies = [
  "ignore",
  "notify",
  "rusqlite",
+ "same-file",
  "serde",
  "serde_json",
  "tempfile",

@@ -148,16 +148,29 @@ impl Engine {
     }
 
     pub fn sync(&mut self) -> Result<IndexReport> {
+        const RESOLUTION_FINGERPRINT_KEY: &str = "project_resolution_fingerprint";
         let started = Instant::now();
-        let force_reindex = !self.store.is_current_graph_model()?;
+        let resolution_context = Arc::new(ProjectResolutionContext::load(&self.root));
+        let resolution_changed = self
+            .store
+            .metadata_value(RESOLUTION_FINGERPRINT_KEY)?
+            .as_deref()
+            != Some(resolution_context.fingerprint());
+        let force_reindex = !self.store.is_current_graph_model()? || resolution_changed;
         let indexed = self.store.indexed_file_hashes()?;
-        let delta = ProjectInventory::new(&self.root)?.delta(&indexed, force_reindex)?;
+        let inventory = ProjectInventory::new(&self.root)?;
+        let mut delta = inventory.delta(&indexed, force_reindex)?;
+        let header_context_changed = resolution_context.has_compilation_database()
+            && (delta.changed.iter().any(|(path, _, _)| is_c_header(path))
+                || delta.deleted.iter().any(|path| is_c_header(path)));
+        if header_context_changed && !force_reindex {
+            delta = inventory.delta(&indexed, true)?;
+        }
         let changed = delta.changed;
         let deleted = delta.deleted;
         let files_scanned = delta.files_scanned;
         let files_skipped = delta.files_skipped;
         let files_changed = changed.len();
-        let resolution_context = Arc::new(ProjectResolutionContext::load(&self.root));
         let available_workers = thread::available_parallelism()
             .map(|parallelism| parallelism.get())
             .unwrap_or(1);
@@ -230,6 +243,10 @@ impl Engine {
                     self.store.publish(facts, &deleted)
                 })?
             };
+        if resolution_changed {
+            self.store
+                .set_metadata_value(RESOLUTION_FINGERPRINT_KEY, resolution_context.fingerprint())?;
+        }
 
         Ok(IndexReport {
             epoch,
@@ -688,6 +705,18 @@ fn bounded_source(source: &str, maximum_chars: usize) -> (String, bool) {
         Some(index) => (source[..index].to_owned(), true),
         None => (source.to_owned(), false),
     }
+}
+
+fn is_c_header(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "h" | "hh" | "hpp" | "hxx"
+            )
+        })
 }
 
 fn absolute(path: &Path) -> Result<PathBuf> {
@@ -8377,6 +8406,268 @@ def outer():
         assert_eq!(engine.sync().unwrap().files_changed, 1);
         assert_eq!(targets(&engine, "run"), [("beta".to_owned(), 0.995)]);
         assert_eq!(targets(&engine, "immediate"), [("beta".to_owned(), 0.995)]);
+    }
+
+    #[test]
+    fn compilation_database_disambiguates_angle_includes_and_refreshes_incrementally() {
+        let temp = tempfile::tempdir().unwrap();
+        for directory in [
+            "src",
+            "include-a",
+            "include-b",
+            "include-new",
+            "nested/include-a",
+        ] {
+            fs::create_dir_all(temp.path().join(directory)).unwrap();
+        }
+        fs::write(
+            temp.path().join("include-a/config.h"),
+            "typedef struct Ops { int (*run)(int); } Ops;\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("include-b/config.h"),
+            "typedef struct Ops { int data; int (*run)(int); } Ops;\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("nested/include-a/config.h"),
+            "typedef struct Ops { int decoy; } Ops;\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("src/main.c"),
+            "#include <config.h>\n\
+             static int alpha(int value) { return value + 1; }\n\
+             static Ops table = { alpha };\n\
+             int dispatch(Ops *ops) { return ops->run(1); }\n",
+        )
+        .unwrap();
+        let write_database = |includes: &[&str]| {
+            let mut arguments = vec!["cc".to_owned()];
+            arguments.extend(includes.iter().map(|include| format!("-I{include}")));
+            arguments.extend(["-c".to_owned(), "src/main.c".to_owned()]);
+            fs::write(
+                temp.path().join("compile_commands.json"),
+                serde_json::to_string(&serde_json::json!([{
+                    "directory": temp.path(),
+                    "file": "src/main.c",
+                    "arguments": arguments
+                }]))
+                .unwrap(),
+            )
+            .unwrap();
+        };
+        write_database(&["include-a"]);
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let targets = |engine: &Engine| {
+            let dispatch = engine
+                .search("dispatch", 10)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.name == "dispatch")
+                .unwrap()
+                .symbol;
+            engine
+                .callees(&dispatch.id)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, evidence)| {
+                    evidence.provenance == "dynamic/c-function-pointer-dispatch"
+                })
+                .map(|(target, _)| target.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(targets(&engine), ["alpha"]);
+
+        write_database(&["include-b"]);
+        assert_eq!(engine.sync().unwrap().files_changed, 4);
+        assert!(targets(&engine).is_empty());
+
+        write_database(&["include-a"]);
+        assert_eq!(engine.sync().unwrap().files_changed, 4);
+        assert_eq!(targets(&engine), ["alpha"]);
+        assert_eq!(engine.sync().unwrap().files_changed, 0);
+
+        write_database(&["include-new", "include-a"]);
+        assert_eq!(engine.sync().unwrap().files_changed, 4);
+        assert_eq!(targets(&engine), ["alpha"]);
+        fs::write(
+            temp.path().join("include-new/config.h"),
+            "typedef struct Ops { int data; int (*run)(int); } Ops;\n",
+        )
+        .unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 5);
+        assert!(targets(&engine).is_empty());
+        fs::remove_file(temp.path().join("include-new/config.h")).unwrap();
+        let restored = engine.sync().unwrap();
+        assert_eq!(restored.files_changed, 4);
+        assert_eq!(restored.files_deleted, 1);
+        assert_eq!(targets(&engine), ["alpha"]);
+    }
+
+    #[test]
+    fn c_include_resolution_preserves_quote_angle_and_fail_closed_semantics() {
+        let dynamic_targets = |engine: &Engine| {
+            let dispatch = engine
+                .search("dispatch", 10)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.name == "dispatch")
+                .unwrap()
+                .symbol;
+            engine
+                .callees(&dispatch.id)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, evidence)| {
+                    evidence.provenance == "dynamic/c-function-pointer-dispatch"
+                })
+                .map(|(target, _)| target.name)
+                .collect::<Vec<_>>()
+        };
+        let local = tempfile::tempdir().unwrap();
+        fs::create_dir_all(local.path().join("src")).unwrap();
+        fs::write(
+            local.path().join("config.h"),
+            "typedef struct Ops { int data; int (*run)(int); } Ops;\n",
+        )
+        .unwrap();
+        fs::write(
+            local.path().join("src/config.h"),
+            "typedef struct Ops { int (*run)(int); } Ops;\n",
+        )
+        .unwrap();
+        let source = |delimiter: char| {
+            let (open, close) = if delimiter == '"' {
+                ('"', '"')
+            } else {
+                ('<', '>')
+            };
+            format!(
+                "#include {open}config.h{close}\n\
+                 static int alpha(int value) {{ return value + 1; }}\n\
+                 static Ops table = {{ alpha }};\n\
+                 int dispatch(Ops *ops) {{ return ops->run(1); }}\n"
+            )
+        };
+        fs::write(local.path().join("src/main.c"), source('"')).unwrap();
+        let (mut engine, _) = Engine::init(local.path()).unwrap();
+        assert_eq!(dynamic_targets(&engine), ["alpha"]);
+
+        fs::write(local.path().join("src/main.c"), source('<')).unwrap();
+        engine.sync().unwrap();
+        assert!(
+            dynamic_targets(&engine).is_empty(),
+            "an unmanaged angle include must not inherit quoted source-directory precedence"
+        );
+
+        let variants = tempfile::tempdir().unwrap();
+        fs::create_dir_all(variants.path().join("src")).unwrap();
+        fs::create_dir_all(variants.path().join("include-a")).unwrap();
+        fs::write(
+            variants.path().join("include-a/config.h"),
+            "typedef struct Ops { int (*run)(int); } Ops;\n",
+        )
+        .unwrap();
+        fs::write(
+            variants.path().join("src/main.c"),
+            "#include <config.h>\n\
+             static int alpha(int value) { return value + 1; }\n\
+             static Ops table = { alpha };\n\
+             int dispatch(Ops *ops) { return ops->run(1); }\n",
+        )
+        .unwrap();
+        fs::write(
+            variants.path().join("compile_commands.json"),
+            serde_json::to_string(&serde_json::json!([
+                {
+                    "directory": variants.path(),
+                    "file": "src/main.c",
+                    "arguments": ["cc", "-Iinclude-a", "src/main.c"]
+                },
+                {
+                    "directory": variants.path(),
+                    "file": "src/main.c",
+                    "arguments": ["cc", "src/main.c"]
+                }
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(variants.path()).unwrap();
+        assert!(
+            dynamic_targets(&engine).is_empty(),
+            "a rejected build variant must not fall back to the sole global suffix match"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compilation_database_fingerprint_tracks_include_symlink_targets() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        for directory in ["src", "include-a", "include-b"] {
+            fs::create_dir_all(temp.path().join(directory)).unwrap();
+        }
+        fs::write(
+            temp.path().join("include-a/config.h"),
+            "typedef struct Ops { int (*run)(int); } Ops;\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("include-b/config.h"),
+            "typedef struct Ops { int data; int (*run)(int); } Ops;\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("src/main.c"),
+            "#include <config.h>\n\
+             static int alpha(int value) { return value + 1; }\n\
+             static Ops table = { alpha };\n\
+             int dispatch(Ops *ops) { return ops->run(1); }\n",
+        )
+        .unwrap();
+        symlink("include-a", temp.path().join("selected")).unwrap();
+        fs::write(
+            temp.path().join("compile_commands.json"),
+            serde_json::to_string(&serde_json::json!([{
+                "directory": temp.path(),
+                "file": "src/main.c",
+                "arguments": ["cc", "-Iselected", "src/main.c"]
+            }]))
+            .unwrap(),
+        )
+        .unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let targets = |engine: &Engine| {
+            let dispatch = engine
+                .search("dispatch", 10)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.name == "dispatch")
+                .unwrap()
+                .symbol;
+            engine
+                .callees(&dispatch.id)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, evidence)| {
+                    evidence.provenance == "dynamic/c-function-pointer-dispatch"
+                })
+                .map(|(target, _)| target.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(targets(&engine), ["alpha"]);
+
+        fs::remove_file(temp.path().join("selected")).unwrap();
+        symlink("include-b", temp.path().join("selected")).unwrap();
+        assert!(engine.sync().unwrap().files_changed >= 3);
+        assert!(
+            targets(&engine).is_empty(),
+            "retargeting an include-directory symlink must invalidate persisted resolution"
+        );
     }
 
     #[test]
