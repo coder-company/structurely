@@ -56,7 +56,8 @@ pub fn start(project: impl AsRef<Path>, debounce: Duration) -> Result<DaemonStar
         });
     }
     let executable = std::env::current_exe().context("locate structurely executable")?;
-    Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .arg("daemon")
         .arg("run")
         .arg("--path")
@@ -65,9 +66,9 @@ pub fn start(project: impl AsRef<Path>, debounce: Duration) -> Result<DaemonStar
         .arg(debounce.as_millis().max(10).to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("spawn Structurely daemon")?;
+        .stderr(Stdio::null());
+    detach_background_process(&mut command);
+    command.spawn().context("spawn Structurely daemon")?;
 
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -89,6 +90,21 @@ pub fn start(project: impl AsRef<Path>, debounce: Duration) -> Result<DaemonStar
         thread::sleep(Duration::from_millis(25));
     }
 }
+
+#[cfg(windows)]
+fn detach_background_process(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    // A daemon must not remain attached to the short-lived CLI process's
+    // console or process group. In particular, inherited runner pipes can
+    // otherwise keep `daemon start` open after its own work has completed.
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+}
+
+#[cfg(not(windows))]
+fn detach_background_process(_command: &mut Command) {}
 
 pub fn stop(project: impl AsRef<Path>) -> Result<DaemonStop> {
     let project = project_root(project.as_ref())?;
