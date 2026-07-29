@@ -241,6 +241,15 @@ def binary_identity(path: Path) -> dict[str, str]:
     return {"commit": commit, "sha256": digest, "worktree": "dirty" if dirty else "clean"}
 
 
+def baseline_codegraph_capture(baseline: object) -> object:
+    if not isinstance(baseline, dict):
+        return baseline
+    captures = baseline.get("captures")
+    if isinstance(captures, dict) and "codegraph" in captures:
+        return captures["codegraph"]
+    return baseline
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--structurely", required=True, type=Path)
@@ -335,7 +344,9 @@ def main() -> None:
     }
     if args.baseline:
         baseline = json.loads(args.baseline.read_text())
-        report["baselineMatches"] = normalized_codegraph == baseline
+        report["baselineMatches"] = (
+            normalized_codegraph == baseline_codegraph_capture(baseline)
+        )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n")
