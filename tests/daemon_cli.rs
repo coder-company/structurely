@@ -12,17 +12,17 @@ use std::{
 
 #[test]
 fn daemon_start_status_catch_up_and_stop_are_idempotent() {
-    let temp = tempfile::tempdir().unwrap();
-    fs::write(temp.path().join("main.ts"), "function before() {}\n").unwrap();
-    run(temp.path(), &["init", temp.path().to_str().unwrap()]);
+    let temp = tempfile::tempdir().unwrap().keep();
+    fs::write(temp.join("main.ts"), "function before() {}\n").unwrap();
+    run(&temp, &["init", temp.to_str().unwrap()]);
 
     let started = run_json(
-        temp.path(),
+        &temp,
         &[
             "daemon",
             "start",
             "--path",
-            temp.path().to_str().unwrap(),
+            temp.to_str().unwrap(),
             "--debounce-ms",
             "25",
         ],
@@ -32,22 +32,18 @@ fn daemon_start_status_catch_up_and_stop_are_idempotent() {
     let initial_epoch = started["status"]["state"]["epoch"].as_u64().unwrap();
 
     let duplicate = run_json(
-        temp.path(),
-        &["daemon", "start", "--path", temp.path().to_str().unwrap()],
+        &temp,
+        &["daemon", "start", "--path", temp.to_str().unwrap()],
     );
     assert_eq!(duplicate["started"], false);
     assert_eq!(duplicate["status"]["running"], true);
 
-    fs::write(
-        temp.path().join("main.ts"),
-        "function afterDaemonSync() {}\n",
-    )
-    .unwrap();
+    fs::write(temp.join("main.ts"), "function afterDaemonSync() {}\n").unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let status = run_json(
-            temp.path(),
-            &["daemon", "status", "--path", temp.path().to_str().unwrap()],
+            &temp,
+            &["daemon", "status", "--path", temp.to_str().unwrap()],
         );
         if status["state"]["epoch"].as_u64().unwrap_or(0) > initial_epoch {
             break;
@@ -60,7 +56,7 @@ fn daemon_start_status_catch_up_and_stop_are_idempotent() {
     }
 
     let mcp = run_mcp(
-        temp.path(),
+        &temp,
         serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -81,27 +77,21 @@ fn daemon_start_status_catch_up_and_stop_are_idempotent() {
         "afterDaemonSync"
     );
 
-    let stopped = run_json(
-        temp.path(),
-        &["daemon", "stop", "--path", temp.path().to_str().unwrap()],
-    );
+    let stopped = run_json(&temp, &["daemon", "stop", "--path", temp.to_str().unwrap()]);
     assert_eq!(stopped["stopped"], true);
     assert_eq!(stopped["status"]["running"], false);
     assert_eq!(stopped["status"]["state"]["phase"], "stopped");
 
-    let duplicate_stop = run_json(
-        temp.path(),
-        &["daemon", "stop", "--path", temp.path().to_str().unwrap()],
-    );
+    let duplicate_stop = run_json(&temp, &["daemon", "stop", "--path", temp.to_str().unwrap()]);
     assert_eq!(duplicate_stop["stopped"], false);
 
     let restarted = run_json(
-        temp.path(),
+        &temp,
         &[
             "daemon",
             "start",
             "--path",
-            temp.path().to_str().unwrap(),
+            temp.to_str().unwrap(),
             "--debounce-ms",
             "25",
         ],
@@ -109,14 +99,14 @@ fn daemon_start_status_catch_up_and_stop_are_idempotent() {
     assert_eq!(restarted["started"], true);
     #[cfg(unix)]
     {
-        let broken = temp.path().join("broken.ts");
+        let broken = temp.join("broken.ts");
         fs::write(&broken, "function unreadable() {}\n").unwrap();
         fs::set_permissions(&broken, fs::Permissions::from_mode(0o000)).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             let status = run_json(
-                temp.path(),
-                &["daemon", "status", "--path", temp.path().to_str().unwrap()],
+                &temp,
+                &["daemon", "status", "--path", temp.to_str().unwrap()],
             );
             if status["state"]["phase"] == "degraded" {
                 assert_eq!(status["running"], true);
@@ -134,8 +124,8 @@ fn daemon_start_status_catch_up_and_stop_are_idempotent() {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             let status = run_json(
-                temp.path(),
-                &["daemon", "status", "--path", temp.path().to_str().unwrap()],
+                &temp,
+                &["daemon", "status", "--path", temp.to_str().unwrap()],
             );
             if status["state"]["phase"] == "running" {
                 assert_eq!(status["running"], true);
@@ -151,15 +141,13 @@ fn daemon_start_status_catch_up_and_stop_are_idempotent() {
     }
 
     let duplicate = run_json(
-        temp.path(),
-        &["daemon", "start", "--path", temp.path().to_str().unwrap()],
+        &temp,
+        &["daemon", "start", "--path", temp.to_str().unwrap()],
     );
     assert_eq!(duplicate["started"], false);
-    let final_stop = run_json(
-        temp.path(),
-        &["daemon", "stop", "--path", temp.path().to_str().unwrap()],
-    );
+    let final_stop = run_json(&temp, &["daemon", "stop", "--path", temp.to_str().unwrap()]);
     assert_eq!(final_stop["stopped"], true);
+    fs::remove_dir_all(temp).unwrap();
 }
 
 fn run_mcp(current_dir: &Path, request: Value) -> Value {
@@ -192,11 +180,30 @@ fn run_json(current_dir: &Path, arguments: &[&str]) -> Value {
 }
 
 fn run(current_dir: &Path, arguments: &[&str]) -> Vec<u8> {
-    let output = Command::new(env!("CARGO_BIN_EXE_structurely"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_structurely"))
         .args(arguments)
         .current_dir(current_dir)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let output = loop {
+        if child.try_wait().unwrap().is_some() {
+            break child.wait_with_output().unwrap();
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "command timed out: {}\nstdout: {}\nstderr: {}",
+                arguments.join(" "),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        thread::sleep(Duration::from_millis(25));
+    };
     assert!(
         output.status.success(),
         "command failed: {}\nstdout: {}\nstderr: {}",
