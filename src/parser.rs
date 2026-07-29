@@ -117,6 +117,7 @@ pub(crate) fn parse_file_as(
         unresolved_calls,
         callback_parameter_invocations,
         callback_arguments,
+        arkui_builder_flow: Default::default(),
         unresolved_references,
         dynamic_events: Vec::new(),
         literal_bindings: Vec::new(),

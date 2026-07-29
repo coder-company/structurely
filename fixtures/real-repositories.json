@@ -404,6 +404,39 @@
             "\"confidence\": 0.97",
             "\"line\": 179"
           ]
+        },
+        {
+          "command": "callees",
+          "query": "CodeView.codeView",
+          "file": "code/UI/ArkTsComponentCollection/StateManagement/entry/src/main/ets/commoncomponents/CodeView.ets",
+          "contains": [
+            "\"qualified_name\": \"BrotherComponentSync.build.<BuilderParam child CodeView>\"",
+            "\"provenance\": \"framework/arkui-builder-param-dispatch\""
+          ],
+          "recordContains": [
+            "\"qualified_name\": \"BrotherComponentSync.build.<BuilderParam child CodeView>\"",
+            "code/UI/ArkTsComponentCollection/StateManagement/entry/src/main/ets/pages/pagelevelstagemanagement/multicompomentssync/brothercomponentssync/BrotherComponentSync.ets",
+            "\"provenance\": \"framework/arkui-builder-param-dispatch\"",
+            "\"confidence\": 0.97",
+            "\"line\": 26"
+          ]
+        },
+        {
+          "command": "callees",
+          "query": "Index.build",
+          "file": "code/UI/ExpandTitle/entry/src/main/ets/pages/Index.ets",
+          "contains": [
+            "\"qualified_name\": \"titleMenu\"",
+            "\"qualified_name\": \"titleContent\"",
+            "\"provenance\": \"framework/arkui-builder-param\""
+          ],
+          "recordContains": [
+            "\"qualified_name\": \"titleMenu\"",
+            "code/UI/ExpandTitle/entry/src/main/ets/pages/TitleMenu.ets",
+            "\"provenance\": \"framework/arkui-builder-param\"",
+            "\"confidence\": 0.97",
+            "\"line\": 93"
+          ]
         }
       ]
     }

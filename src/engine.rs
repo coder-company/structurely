@@ -3604,6 +3604,124 @@ mod tests {
     }
 
     #[test]
+    fn arkui_builder_param_flows_resolve_imported_builders_and_trailing_children() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("Slot.ets"),
+            "@Component\n\
+             export struct Slot {\n\
+               @BuilderParam content: () => void\n\
+               build() { this.content() }\n\
+             }\n\
+             @Component\n\
+             export struct MultiSlot {\n\
+               @BuilderParam content: () => void\n\
+               @BuilderParam footer: () => void\n\
+               build() { this.content(); this.footer() }\n\
+             }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("Builders.ets"),
+            "@Builder\n\
+             export function importedContent() { Text('imported') }\n\
+             export function undecorated() { Text('plain') }\n",
+        )
+        .unwrap();
+        let host = temp.path().join("Host.ets");
+        fs::write(
+            &host,
+            "import { Slot as AliasedSlot, MultiSlot } from './Slot'\n\
+             import { importedContent as contentBuilder, undecorated } from './Builders'\n\
+             @Component\n\
+             struct Host {\n\
+               build() {\n\
+                 AliasedSlot({ content: contentBuilder })\n\
+                 AliasedSlot({ content: undecorated })\n\
+                 AliasedSlot({ missing: contentBuilder })\n\
+                 AliasedSlot() { Text('inline') }\n\
+                 MultiSlot() { Text('ambiguous') }\n\
+               }\n\
+             }\n",
+        )
+        .unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let symbol = |engine: &Engine, qualified_name: &str| {
+            engine
+                .search(qualified_name, 20)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.qualified_name == qualified_name)
+                .unwrap()
+                .symbol
+        };
+        let host_build = symbol(&engine, "Host.build");
+        let registrations = engine
+            .callees(&host_build.id)
+            .unwrap()
+            .into_iter()
+            .filter(|(_, evidence)| evidence.provenance == "framework/arkui-builder-param")
+            .collect::<Vec<_>>();
+        assert_eq!(registrations.len(), 2);
+        assert!(registrations.iter().any(|(target, evidence)| {
+            target.qualified_name == "importedContent"
+                && evidence.confidence == 0.97
+                && evidence.line == 6
+        }));
+        let inline = registrations
+            .iter()
+            .find(|(target, evidence)| {
+                target.name == "<BuilderParam child AliasedSlot>" && evidence.line == 9
+            })
+            .map(|(target, _)| target.clone())
+            .unwrap();
+
+        let slot_build = symbol(&engine, "Slot.build");
+        let dispatches = engine
+            .callees(&slot_build.id)
+            .unwrap()
+            .into_iter()
+            .filter(|(_, evidence)| evidence.provenance == "framework/arkui-builder-param-dispatch")
+            .collect::<Vec<_>>();
+        assert_eq!(dispatches.len(), 2);
+        assert!(dispatches
+            .iter()
+            .any(|(target, _)| target.qualified_name == "importedContent"));
+        assert!(dispatches.iter().any(|(target, _)| target.id == inline.id));
+
+        let original = fs::read_to_string(&host).unwrap();
+        fs::write(&host, format!("// position-only edit\n{original}")).unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 1);
+        let moved_host = symbol(&engine, "Host.build");
+        assert!(engine
+            .callees(&moved_host.id)
+            .unwrap()
+            .into_iter()
+            .any(|(target, evidence)| {
+                target.id == inline.id
+                    && evidence.provenance == "framework/arkui-builder-param"
+                    && evidence.line == 10
+            }));
+
+        fs::write(
+            &host,
+            "import { AliasedSlot } from './Missing'\n\
+             @Component\n\
+             struct Host {\n\
+               build() { AliasedSlot() { Text('gone') } }\n\
+             }\n",
+        )
+        .unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 1);
+        let host_build = symbol(&engine, "Host.build");
+        assert!(engine
+            .callees(&host_build.id)
+            .unwrap()
+            .into_iter()
+            .all(|(_, evidence)| evidence.provenance != "framework/arkui-builder-param"));
+    }
+
+    #[test]
     fn harmony_emitter_resolves_imported_exported_descriptors_and_literals() {
         let temp = tempfile::tempdir().unwrap();
         fs::create_dir_all(temp.path().join("app/AppScope")).unwrap();

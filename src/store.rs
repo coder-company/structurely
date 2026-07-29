@@ -1,6 +1,6 @@
 use crate::model::{
-    EventChannel, Evidence, FileFacts, Language, Relationship, RelationshipKind, Symbol,
-    SymbolKind, GRAPH_MODEL_VERSION,
+    ArkuiBuilderFlowFacts, EventChannel, Evidence, FileFacts, Language, Relationship,
+    RelationshipKind, Symbol, SymbolKind, GRAPH_MODEL_VERSION,
 };
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -179,6 +179,10 @@ impl Store {
                 PRIMARY KEY(file_id,owner_public_id,parameter_index)
             );
             CREATE TABLE IF NOT EXISTS callback_argument_batches (
+                file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+                payload TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS arkui_builder_flow_batches (
                 file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
                 payload TEXT NOT NULL
             );
@@ -554,6 +558,7 @@ impl Store {
     fn finish_epoch(tx: &Transaction<'_>, next_epoch: u64) -> Result<usize> {
         let mut relationships_resolved = Self::resolve_calls(tx)?;
         relationships_resolved += Self::resolve_callback_arguments(tx)?;
+        relationships_resolved += Self::resolve_arkui_builder_flows(tx)?;
         relationships_resolved += Self::resolve_interface_dispatch(tx)?;
         relationships_resolved += Self::resolve_dynamic_events(tx)?;
         tx.execute(
@@ -704,6 +709,17 @@ impl Store {
             let payload = serde_json::to_string(&arguments)?;
             tx.prepare_cached(
                 "INSERT INTO callback_argument_batches(file_id,payload) VALUES (?1,?2)",
+            )?
+            .execute(params![file_id, payload])?;
+        }
+        if !file.arkui_builder_flow.builders.is_empty()
+            || !file.arkui_builder_flow.params.is_empty()
+            || !file.arkui_builder_flow.invocations.is_empty()
+            || !file.arkui_builder_flow.assignments.is_empty()
+        {
+            let payload = serde_json::to_string(&file.arkui_builder_flow)?;
+            tx.prepare_cached(
+                "INSERT INTO arkui_builder_flow_batches(file_id,payload) VALUES (?1,?2)",
             )?
             .execute(params![file_id, payload])?;
         }
@@ -1309,6 +1325,231 @@ impl Store {
                 },
             )?;
             resolved += 1;
+        }
+        Ok(resolved)
+    }
+
+    fn resolve_arkui_builder_flows(tx: &Transaction<'_>) -> Result<usize> {
+        tx.execute(
+            "DELETE FROM relationships
+             WHERE provenance IN (
+                 'framework/arkui-builder-param',
+                 'framework/arkui-builder-param-dispatch'
+             )",
+            [],
+        )?;
+        let mut batch_statement = tx.prepare(
+            "SELECT b.file_id,f.path,b.payload
+             FROM arkui_builder_flow_batches b
+             JOIN files f ON f.id=b.file_id
+             ORDER BY f.path",
+        )?;
+        let batches = batch_statement
+            .query_map([], |row| {
+                let payload = row.get::<_, String>(2)?;
+                let facts =
+                    serde_json::from_str::<ArkuiBuilderFlowFacts>(&payload).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            payload.len(),
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?;
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, facts))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(batch_statement);
+
+        let mut imported = HashMap::<(i64, String), Vec<String>>::new();
+        let mut import_statement = tx.prepare(
+            "SELECT file_id,binding_name,target_public_id
+             FROM import_bindings
+             ORDER BY file_id,binding_name,target_public_id",
+        )?;
+        for binding in import_statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        {
+            imported
+                .entry((binding.0, binding.1))
+                .or_default()
+                .push(binding.2);
+        }
+        drop(import_statement);
+
+        let mut local = HashMap::<(i64, String), Vec<String>>::new();
+        let mut symbol_statement = tx.prepare(
+            "SELECT file_id,name,public_id FROM symbols
+             ORDER BY file_id,name,public_id",
+        )?;
+        for symbol in symbol_statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        {
+            local
+                .entry((symbol.0, symbol.1))
+                .or_default()
+                .push(symbol.2);
+        }
+        drop(symbol_statement);
+
+        let mut builders = HashSet::<String>::new();
+        let mut params = HashMap::<String, Vec<_>>::new();
+        let mut invocations = HashMap::<(String, String), Vec<_>>::new();
+        for (_, _, facts) in &batches {
+            builders.extend(
+                facts
+                    .builders
+                    .iter()
+                    .map(|builder| builder.target_id.clone()),
+            );
+            for param in &facts.params {
+                params
+                    .entry(param.component_id.clone())
+                    .or_default()
+                    .push(param.clone());
+            }
+            for invocation in &facts.invocations {
+                invocations
+                    .entry((
+                        invocation.component_id.clone(),
+                        invocation.param_name.clone(),
+                    ))
+                    .or_default()
+                    .push(invocation.clone());
+            }
+        }
+        for declarations in params.values_mut() {
+            declarations.sort_by_key(|param| param.ordinal);
+        }
+
+        let mut resolved = 0;
+        for (file_id, file, facts) in &batches {
+            for assignment in &facts.assignments {
+                let mut component_ids = local
+                    .get(&(*file_id, assignment.component_binding.clone()))
+                    .into_iter()
+                    .flatten()
+                    .chain(
+                        imported
+                            .get(&(*file_id, assignment.component_binding.clone()))
+                            .into_iter()
+                            .flatten(),
+                    )
+                    .filter(|candidate| params.contains_key(*candidate))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                component_ids.sort();
+                component_ids.dedup();
+                if component_ids.len() != 1 {
+                    continue;
+                }
+                let component_id = &component_ids[0];
+                let Some(declarations) = params.get(component_id) else {
+                    continue;
+                };
+                let matching_params = declarations
+                    .iter()
+                    .filter(|param| {
+                        assignment
+                            .param_name
+                            .as_deref()
+                            .is_none_or(|name| name == param.param_name)
+                    })
+                    .collect::<Vec<_>>();
+                if matching_params.len() != 1 {
+                    continue;
+                }
+                let param = matching_params[0];
+
+                let mut target_ids = if let Some(target_id) = &assignment.target_id {
+                    vec![target_id.clone()]
+                } else if let Some(binding) = &assignment.target_binding {
+                    local
+                        .get(&(*file_id, binding.clone()))
+                        .into_iter()
+                        .flatten()
+                        .chain(
+                            imported
+                                .get(&(*file_id, binding.clone()))
+                                .into_iter()
+                                .flatten(),
+                        )
+                        .cloned()
+                        .collect::<Vec<_>>()
+                } else {
+                    continue;
+                };
+                if assignment.require_decorated_target {
+                    target_ids.retain(|target| builders.contains(target));
+                }
+                target_ids.sort();
+                target_ids.dedup();
+                if target_ids.len() != 1 {
+                    continue;
+                }
+                let target_id = &target_ids[0];
+                Self::insert_relationship(
+                    tx,
+                    &Relationship {
+                        source_id: assignment.caller_id.clone(),
+                        target_id: target_id.clone(),
+                        kind: RelationshipKind::Calls,
+                        evidence: Evidence::new(
+                            "framework/arkui-builder-param",
+                            0.97,
+                            format!(
+                                "{} assigns an ArkUI builder to {}.{}",
+                                assignment.caller_id, param.component_name, param.param_name
+                            ),
+                            file,
+                            assignment.line,
+                        ),
+                    },
+                )?;
+                resolved += 1;
+
+                if let Some(consumers) =
+                    invocations.get(&(component_id.clone(), param.param_name.clone()))
+                {
+                    for consumer in consumers {
+                        Self::insert_relationship(
+                            tx,
+                            &Relationship {
+                                source_id: consumer.owner_id.clone(),
+                                target_id: target_id.clone(),
+                                kind: RelationshipKind::Calls,
+                                evidence: Evidence::new(
+                                    "framework/arkui-builder-param-dispatch",
+                                    0.97,
+                                    format!(
+                                        "{}.{} invokes the builder assigned at {}:{}",
+                                        param.component_name,
+                                        param.param_name,
+                                        file,
+                                        assignment.line
+                                    ),
+                                    file,
+                                    assignment.line,
+                                ),
+                            },
+                        )?;
+                        resolved += 1;
+                    }
+                }
+            }
         }
         Ok(resolved)
     }

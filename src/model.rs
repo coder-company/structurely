@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path};
 
-pub const GRAPH_MODEL_VERSION: u32 = 40;
+pub const GRAPH_MODEL_VERSION: u32 = 41;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -292,6 +292,46 @@ pub(crate) struct CallbackArgumentFact {
     pub line: usize,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct ArkuiBuilderFlowFacts {
+    pub builders: Vec<ArkuiBuilderDeclarationFact>,
+    pub params: Vec<ArkuiBuilderParamDeclarationFact>,
+    pub invocations: Vec<ArkuiBuilderParamInvocationFact>,
+    pub assignments: Vec<ArkuiBuilderParamAssignmentFact>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ArkuiBuilderDeclarationFact {
+    pub target_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ArkuiBuilderParamDeclarationFact {
+    pub component_id: String,
+    pub component_name: String,
+    pub param_name: String,
+    pub ordinal: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ArkuiBuilderParamInvocationFact {
+    pub component_id: String,
+    pub param_name: String,
+    pub owner_id: String,
+    pub line: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ArkuiBuilderParamAssignmentFact {
+    pub caller_id: String,
+    pub component_binding: String,
+    pub param_name: Option<String>,
+    pub target_id: Option<String>,
+    pub target_binding: Option<String>,
+    pub require_decorated_target: bool,
+    pub line: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EventAction {
     Register,
@@ -367,6 +407,7 @@ pub(crate) struct FileFacts {
     pub unresolved_calls: Vec<UnresolvedCall>,
     pub callback_parameter_invocations: Vec<CallbackParameterInvocation>,
     pub callback_arguments: Vec<CallbackArgumentFact>,
+    pub arkui_builder_flow: ArkuiBuilderFlowFacts,
     pub unresolved_references: Vec<UnresolvedReference>,
     pub dynamic_events: Vec<DynamicEventFact>,
     pub literal_bindings: Vec<LiteralBindingFact>,
