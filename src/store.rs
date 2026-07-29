@@ -7,7 +7,9 @@ use crate::model::{
     SymbolKind, GRAPH_MODEL_VERSION,
 };
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{
+    params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
+};
 use serde::Serialize;
 use std::{
     cell::Cell,
@@ -87,6 +89,13 @@ pub struct StorageMetrics {
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
+        if path
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            anyhow::bail!("refusing symbolic-link graph database {}", path.display());
+        }
+        preflight_schema_version(path)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create {}", parent.display()))?;
@@ -174,6 +183,12 @@ impl Store {
     }
 
     fn migrate(&mut self) -> Result<()> {
+        if let Some(version) = existing_schema_version(&self.connection)? {
+            anyhow::ensure!(
+                version <= SCHEMA_VERSION,
+                "graph database schema {version} is newer than supported schema {SCHEMA_VERSION}"
+            );
+        }
         self.connection.execute_batch(
             "
             BEGIN IMMEDIATE;
@@ -369,7 +384,6 @@ impl Store {
             CREATE INDEX IF NOT EXISTS import_bindings_name_idx
                 ON import_bindings(file_id,binding_name);
             INSERT OR IGNORE INTO metadata(key, value) VALUES ('graph_epoch', '0');
-            COMMIT;
             ",
         )?;
         let relationship_columns = self
@@ -379,8 +393,7 @@ impl Store {
             .collect::<rusqlite::Result<HashSet<_>>>()?;
         if !relationship_columns.contains("evidence_site") {
             self.connection.execute_batch(
-                "BEGIN IMMEDIATE;
-                 ALTER TABLE relationships RENAME TO relationships_v1;
+                "ALTER TABLE relationships RENAME TO relationships_v1;
                  CREATE TABLE relationships (
                     id INTEGER PRIMARY KEY,
                     source_public_id TEXT NOT NULL,
@@ -405,8 +418,7 @@ impl Store {
                  CREATE INDEX relationships_source_idx
                     ON relationships(source_public_id,kind);
                  CREATE INDEX relationships_target_idx
-                    ON relationships(target_public_id,kind);
-                 COMMIT;",
+                    ON relationships(target_public_id,kind);",
             )?;
         }
         Self::ensure_column(
@@ -526,6 +538,7 @@ impl Store {
             ) WITHOUT ROWID;
             ",
         )?;
+        self.connection.execute_batch("COMMIT;")?;
         Ok(())
     }
 
@@ -4988,6 +5001,48 @@ impl Store {
     }
 }
 
+fn preflight_schema_version(path: &Path) -> Result<()> {
+    let Ok(metadata) = path.metadata() else {
+        return Ok(());
+    };
+    if metadata.len() == 0 {
+        return Ok(());
+    }
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("preflight graph database {}", path.display()))?;
+    if let Some(version) = existing_schema_version(&connection)? {
+        anyhow::ensure!(
+            version <= SCHEMA_VERSION,
+            "graph database schema {version} is newer than supported schema {SCHEMA_VERSION}"
+        );
+    }
+    Ok(())
+}
+
+fn existing_schema_version(connection: &Connection) -> Result<Option<u32>> {
+    let has_metadata: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_metadata {
+        return Ok(None);
+    }
+    connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key='schema_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|value| {
+            value
+                .parse()
+                .with_context(|| format!("invalid graph database schema version `{value}`"))
+        })
+        .transpose()
+}
+
 const C_MACRO_EXPANSION_DEPTH_CAP: usize = 6;
 const C_MACRO_ENVIRONMENT_CAP: usize = 32;
 const C_MACRO_ARGUMENT_CAP: usize = 64;
@@ -7204,5 +7259,73 @@ mod tests {
             )
             .unwrap();
         assert_eq!(resolved_calls_are_temporary, 1);
+    }
+
+    #[test]
+    fn newer_schema_is_rejected_without_mutating_database_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("future.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO metadata(key,value) VALUES ('schema_version','999');",
+            )
+            .unwrap();
+        drop(connection);
+        let before = std::fs::read(&path).unwrap();
+
+        let error = Store::open(&path).err().unwrap().to_string();
+
+        assert!(error.contains("newer than supported"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!PathBuf::from(format!("{}-wal", path.display())).exists());
+        assert!(!PathBuf::from(format!("{}-shm", path.display())).exists());
+    }
+
+    #[test]
+    fn failed_migration_rolls_back_every_persistent_schema_change() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("interrupted.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE relationships (
+                    id INTEGER PRIMARY KEY,
+                    source_public_id TEXT NOT NULL,
+                    target_public_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    provenance TEXT NOT NULL,
+                    confidence REAL NOT NULL,
+                    explanation TEXT NOT NULL,
+                    evidence_file TEXT NOT NULL,
+                    evidence_line INTEGER NOT NULL
+                 );
+                 CREATE VIEW callback_arguments AS SELECT 1 AS id;",
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(Store::open(&path).is_err());
+
+        let connection = Connection::open(&path).unwrap();
+        let relationship_columns = connection
+            .prepare("PRAGMA table_info(relationships)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(!relationship_columns.contains(&"evidence_site".to_owned()));
+        let metadata_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!metadata_exists);
     }
 }
