@@ -5,6 +5,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::{
     fs,
+    io::{Read, Seek},
     path::Path,
     process::{Command, Stdio},
     thread,
@@ -194,36 +195,49 @@ fn run_json(current_dir: &Path, arguments: &[&str]) -> Value {
 }
 
 fn run(current_dir: &Path, arguments: &[&str]) -> Vec<u8> {
+    let mut stdout = tempfile::tempfile().unwrap();
+    let mut stderr = tempfile::tempfile().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_structurely"))
         .args(arguments)
         .current_dir(current_dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(stdout.try_clone().unwrap())
+        .stderr(stderr.try_clone().unwrap())
         .spawn()
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
-    let output = loop {
-        if child.try_wait().unwrap().is_some() {
-            break child.wait_with_output().unwrap();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
         }
         if Instant::now() >= deadline {
             child.kill().unwrap();
-            let output = child.wait_with_output().unwrap();
+            let status = child.wait().unwrap();
+            let stdout = read_capture(&mut stdout);
+            let stderr = read_capture(&mut stderr);
             panic!(
-                "command timed out: {}\nstdout: {}\nstderr: {}",
+                "command timed out with {status}: {}\nstdout: {}\nstderr: {}",
                 arguments.join(" "),
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr)
             );
         }
         thread::sleep(Duration::from_millis(25));
     };
+    let stdout = read_capture(&mut stdout);
+    let stderr = read_capture(&mut stderr);
     assert!(
-        output.status.success(),
+        status.success(),
         "command failed: {}\nstdout: {}\nstderr: {}",
         arguments.join(" "),
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
     );
-    output.stdout
+    stdout
+}
+
+fn read_capture(file: &mut fs::File) -> Vec<u8> {
+    file.rewind().unwrap();
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).unwrap();
+    bytes
 }
