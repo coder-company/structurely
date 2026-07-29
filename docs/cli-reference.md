@@ -4,6 +4,17 @@ Structurely prints machine-readable JSON unless a command explicitly returns
 source-backed text. Run `structurely <command> --help` for the installed
 version's exact options.
 
+## Set up a project
+
+```bash
+structurely setup <codex|claude|cursor> [project] [--replace-codegraph]
+```
+
+`setup` initializes or synchronizes the graph, starts the background indexer,
+installs the project-local MCP entry, and verifies the result.
+`--replace-codegraph` replaces the existing CodeGraph server entry without
+changing unrelated agent settings.
+
 ## Create an index
 
 ```bash

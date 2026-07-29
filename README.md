@@ -4,15 +4,9 @@ Structurely gives coding agents a local semantic map of your codebase. It
 indexes symbols, calls, routes, callbacks, UI flows, and framework relationships
 into a transactional SQLite graph. Your source code stays on your machine.
 
-Structurely is written in Rust and exposes CodeGraph-compatible CLI and MCP
-tools. On the pinned 441-file acceptance corpus, it matches all 25 shared
-compatibility checks while indexing 2.37× faster, querying 10.54× faster, and
-using 84.60% less peak memory than CodeGraph 1.5.0. See the
-[reproducible results](benchmarks/release-hardening-2026-07-29/README.md).
+Structurely is a native Rust binary with its own CLI and MCP tools.
 
 ## Install Structurely
-
-You need Rust 1.88 or newer.
 
 macOS and Linux:
 
@@ -32,55 +26,75 @@ Confirm the installation:
 structurely --version
 ```
 
-Tagged GitHub releases also provide standalone archives, SHA-256 checksums, and
-build-provenance attestations.
+The installer detects your platform, downloads the latest native release,
+verifies its SHA-256 checksum, smoke-tests it, and installs it for your user.
+You do not need Rust or administrator access. Set
+`STRUCTURELY_VERSION=v0.2.0` before the command to install a specific release.
 
-## Index your first project
-
-```bash
-structurely init /path/to/project
-structurely explore "authentication flow" --path /path/to/project
-```
-
-`init` creates `/path/to/project/.structurely/graph.db`. Add `.structurely/` to
-the project's ignore file if your global Git configuration does not already
-ignore it.
-
-Use the background indexer to keep the graph current:
+## Set up your project
 
 ```bash
-structurely daemon start --path /path/to/project
-structurely daemon status --path /path/to/project
+cd /path/to/project
+structurely setup codex
 ```
 
-## Connect your coding agent
-
-Structurely configures project-local MCP settings without changing unrelated
-entries:
+Use `claude` or `cursor` instead of `codex` when needed. This one command
+indexes the project, starts the background indexer, installs the project-local
+MCP entry, and verifies that everything is ready.
 
 ```bash
-structurely integrations install codex --path /path/to/project
-structurely integrations install claude --path /path/to/project
-structurely integrations install cursor --path /path/to/project
+structurely explore "authentication flow"
 ```
 
-Restart the agent after installation. To configure another MCP client manually,
-run this command as a standard-input/standard-output server:
+## Replace CodeGraph
+
+From a project that uses CodeGraph:
+
+```bash
+structurely setup codex --replace-codegraph
+```
+
+This replaces only the existing `codegraph` MCP server entry while preserving
+unrelated agent settings. It builds a new Structurely graph because the database
+formats are intentionally different. It does not delete CodeGraph's binary,
+configuration, or index.
+
+Restart your coding agent after setup. Structurely exposes only
+`structurely_explore`, `structurely_search`, `structurely_callers`,
+`structurely_callees`, `structurely_impact`, `structurely_status`,
+`structurely_files`, and `structurely_node`.
+
+To configure another MCP client manually, run:
 
 ```bash
 structurely serve --mcp --path /absolute/path/to/project
 ```
 
-Structurely implements `codegraph_explore`, `codegraph_search`,
-`codegraph_callers`, `codegraph_callees`, `codegraph_impact`,
-`codegraph_status`, `codegraph_files`, and `codegraph_node`. It advertises only
-`codegraph_explore` by default for CodeGraph compatibility. Set
-`CODEGRAPH_MCP_TOOLS` to a comma-separated list to advertise more tools:
+Structurely advertises only `structurely_explore` by default. Set
+`STRUCTURELY_MCP_TOOLS` to advertise more tools:
 
 ```bash
-CODEGRAPH_MCP_TOOLS=explore,node,search,callers \
+STRUCTURELY_MCP_TOOLS=explore,node,search,callers \
   structurely serve --mcp --path /path/to/project
 ```
+
+## Benchmarks against CodeGraph
+
+This pinned July 29 run used the same 441-file corpus for Structurely commit
+`bc708fc` and CodeGraph 1.5.0 commit `572d22b`.
+
+| Metric | Structurely | CodeGraph 1.5.0 | Result |
+|---|---:|---:|---:|
+| Fresh indexing p50 | 2.796 s | 6.640 s | 2.375× faster |
+| Query-process p50 | 28.836 ms | 303.848 ms | 10.537× faster |
+| Peak indexing memory | 156.0 MiB | 1,012.8 MiB | 84.60% lower |
+| Database size | 40.47 MiB | 42.39 MiB | 4.54% smaller |
+| Targeted MCP checks | 25/25 | 25/25 | parity |
+
+These results describe this pinned corpus and protocol, not every repository or
+feature. Query timing includes process startup. Review the
+[raw results and methodology](benchmarks/release-hardening-2026-07-29/README.md)
+and [comparison scope](docs/codegraph-parity.md).
 
 ## Supported languages
 

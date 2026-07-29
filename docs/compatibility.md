@@ -1,10 +1,11 @@
-# CodeGraph compatibility contract
+# MCP interface
 
-Structurely targets behavioral compatibility at the agent-facing seam, not
-database-file compatibility. The current contract is audited against CodeGraph
-1.5.0 source commit `572d22bfbe82602080e457bec655f72e3314f9ef`.
+Structurely owns its agent-facing interface. Its behavior and schemas are
+benchmarked against CodeGraph 1.5.0 commit
+`572d22bfbe82602080e457bec655f72e3314f9ef`, but its tools use Structurely
+names.
 
-Initial compatibility commands:
+CLI commands:
 
 - `structurely init [path]`
 - `structurely sync [path]`
@@ -13,21 +14,21 @@ Initial compatibility commands:
 - `structurely explore <query> [--path <path>]`
 - `structurely serve --mcp [--path <path>]`
 
-Initial MCP tools:
+MCP tools:
 
-- `codegraph_search`
-- `codegraph_explore`
-- `codegraph_callers`
-- `codegraph_callees`
-- `codegraph_impact`
-- `codegraph_status`
-- `codegraph_files`
-- `codegraph_node`
+- `structurely_search`
+- `structurely_explore`
+- `structurely_callers`
+- `structurely_callees`
+- `structurely_impact`
+- `structurely_status`
+- `structurely_files`
+- `structurely_node`
 
-Like the pinned upstream version, `tools/list` advertises only
-`codegraph_explore` by default. Set `CODEGRAPH_MCP_TOOLS` to a comma-separated
-list such as `explore,node,search,callers` to advertise additional tools. All
-eight handlers remain callable and available through the CLI.
+`tools/list` advertises only `structurely_explore` by default. Set
+`STRUCTURELY_MCP_TOOLS` to a comma-separated list such as
+`explore,node,search,callers` to advertise additional tools. All eight handlers
+remain callable and available through the CLI.
 
 Existing arguments and required response fields remain compatible. Structurely
 may add `confidence`, `provenance`, and `explanation`. Contract fixtures will
@@ -38,8 +39,7 @@ malformed requests, and reports tool execution failures through MCP `isError`
 content without terminating the session.
 
 Initialization negotiates MCP revisions `2024-11-05`, `2025-03-26`, and
-`2025-06-18`. Unknown or omitted revisions fall back to CodeGraph 1.5.0's
-`2024-11-05` revision.
+`2025-06-18`. Unknown or omitted revisions fall back to `2024-11-05`.
 
-The SQLite schema is explicitly not compatible. A future importer may read an
-existing CodeGraph index, but Structurely owns its versioned graph model.
+Structurely owns its versioned SQLite graph model and does not import another
+indexer's database.

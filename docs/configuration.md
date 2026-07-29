@@ -46,8 +46,8 @@ graph. Structurely rejects lexical and symlink escapes outside the project.
 
 ## Understand precedence and errors
 
-Structurely reads `structurely.json` first. It reads `codegraph.json` only when
-`structurely.json` does not exist.
+Structurely reads only `structurely.json`. Migration from another indexer does
+not import its configuration implicitly.
 
 Configuration fails closed. Structurely stops indexing when JSON is malformed,
 a field has the wrong type, a language is unknown, a glob is empty or invalid,
@@ -64,9 +64,9 @@ The indexer uses available CPU parallelism with a default maximum of eight
 workers. Set `STRUCTURELY_PARSE_WORKERS` to a positive integer to change the
 limit. Structurely caps the value at 16 and at the number of changed files.
 
-Set `CODEGRAPH_MCP_TOOLS` to control which compatible MCP tools appear in
+Set `STRUCTURELY_MCP_TOOLS` to control which Structurely MCP tools appear in
 `tools/list`:
 
 ```bash
-CODEGRAPH_MCP_TOOLS=explore,node,search,callers
+STRUCTURELY_MCP_TOOLS=explore,node,search,callers
 ```

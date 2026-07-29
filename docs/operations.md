@@ -68,6 +68,19 @@ its own branch-specific graph.
 
 ## Coding-agent integrations
 
+Use one command for the normal first run:
+
+```bash
+cd /absolute/project
+structurely setup codex
+```
+
+To replace an existing CodeGraph entry while preserving unrelated settings:
+
+```bash
+structurely setup codex --replace-codegraph
+```
+
 Structurely can configure a project-local MCP entry for Codex, Claude Code, or
 Cursor:
 
@@ -90,10 +103,16 @@ file.
 
 ## Uninstall
 
-Remove the binary managed by Cargo:
+Remove a native Unix installation:
 
 ```bash
-cargo uninstall structurely
+rm "${STRUCTURELY_INSTALL_DIR:-${XDG_BIN_HOME:-$HOME/.local/bin}}/structurely"
+```
+
+Remove a native Windows installation:
+
+```powershell
+Remove-Item "$env:LOCALAPPDATA\Programs\Structurely\bin\structurely.exe"
 ```
 
 Indexes belong to individual projects. Uninstalling the binary deliberately
@@ -107,10 +126,10 @@ remote query service. Source text, symbols, relationships, and query history
 are not transmitted by the application. Indexes remain in
 `<project>/.structurely/graph.db`.
 
-The installation commands contact GitHub and the Rust package ecosystem to
-fetch source and dependencies. GitHub Actions contacts GitHub services to
-publish and attest releases. These build and distribution operations are
-separate from Structurely runtime behavior.
+The native installation commands contact GitHub to fetch a release archive and
+its checksum. GitHub Actions contacts GitHub services to publish and attest
+releases. These build and distribution operations are separate from Structurely
+runtime behavior.
 
 ## Troubleshooting
 
