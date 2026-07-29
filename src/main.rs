@@ -204,18 +204,18 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&engine.sync()?)?);
         }
         Command::Status { path } => {
-            let engine = Engine::open(path)?;
+            let engine = Engine::open_read_only(path)?;
             println!("{}", serde_json::to_string_pretty(&engine.status()?)?);
         }
         Command::Search { query, path, limit } => {
-            let engine = Engine::open(path)?;
+            let engine = Engine::open_read_only(path)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&engine.search(&query, limit)?)?
             );
         }
         Command::Explore { query, path, limit } => {
-            let engine = Engine::open(path)?;
+            let engine = Engine::open_read_only(path)?;
             let hits = engine.explore(&query, limit)?;
             print!("{}", mcp::format_explore_text(&engine, &query, &hits)?);
         }
@@ -225,7 +225,7 @@ fn main() -> Result<()> {
             path,
             limit,
         } => {
-            let engine = Engine::open(path)?;
+            let engine = Engine::open_read_only(path)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&engine.callers_named(
@@ -241,7 +241,7 @@ fn main() -> Result<()> {
             path,
             limit,
         } => {
-            let engine = Engine::open(path)?;
+            let engine = Engine::open_read_only(path)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&engine.callees_named(
@@ -257,7 +257,7 @@ fn main() -> Result<()> {
             path,
             depth,
         } => {
-            let engine = Engine::open(path)?;
+            let engine = Engine::open_read_only(path)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&engine.impact_named(
@@ -268,7 +268,7 @@ fn main() -> Result<()> {
             );
         }
         Command::Snapshot { path } => {
-            let engine = Engine::open(path)?;
+            let engine = Engine::open_read_only(path)?;
             println!("{}", serde_json::to_string_pretty(&engine.snapshot()?)?);
         }
         Command::Benchmark {
@@ -289,7 +289,7 @@ fn main() -> Result<()> {
             );
         }
         Command::Quality { path, manifest } => {
-            let engine = Engine::open(path)?;
+            let engine = Engine::open_read_only(path)?;
             let report = engine.evaluate_quality(manifest)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             if !report.passed {

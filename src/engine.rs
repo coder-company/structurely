@@ -5,14 +5,17 @@ use crate::{
     parser::parse_file_as,
     project_resolution::ProjectResolutionContext,
     source::{read_source_snapshot, SourceRead},
-    store::{ConcurrentPublication, FileSummary, SearchHit, StorageMetrics, Store},
+    store::{
+        is_corrupt_database, ConcurrentPublication, FileSummary, SearchHit, StorageMetrics, Store,
+    },
 };
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use fs2::FileExt;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use serde::Serialize;
 use std::{
     collections::{HashMap, HashSet},
-    fs,
+    fs::{self, OpenOptions},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -28,6 +31,8 @@ pub const DATABASE_FILE: &str = "graph.db";
 pub struct Engine {
     root: PathBuf,
     store: Store,
+    storage_recovery: Option<String>,
+    _writer_lock: Option<std::fs::File>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -56,6 +61,8 @@ pub struct ProjectStatus {
     pub pending_files: usize,
     pub skipped_files: usize,
     pub storage: StorageMetrics,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage_recovery: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -170,25 +177,67 @@ fn relevant_watch_event(root: &Path, event: &Event) -> bool {
 impl Engine {
     pub fn init(root: impl AsRef<Path>) -> Result<(Self, IndexReport)> {
         let root = absolute(root.as_ref())?;
-        fs::create_dir_all(root.join(PROJECT_DIR))?;
+        ensure_project_directory(&root, true)?;
         let mut engine = Self::open(&root)?;
         let report = engine.sync()?;
         Ok((engine, report))
     }
 
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
-        let root = absolute(root.as_ref())?;
+        Self::open_inner(root.as_ref())
+    }
+
+    pub(crate) fn open_for_daemon(root: impl AsRef<Path>) -> Result<Self> {
+        Self::open_inner(root.as_ref())
+    }
+
+    fn open_inner(root: &Path) -> Result<Self> {
+        let root = absolute(root)?;
+        ensure_project_directory(&root, false)?;
         let database = root.join(PROJECT_DIR).join(DATABASE_FILE);
-        if !root.join(PROJECT_DIR).exists() {
-            bail!(
-                "{} is not initialized; run `structurely init {}`",
-                root.display(),
-                root.display()
-            );
-        }
+        let mut writer_lock = Some(writer_coordination_lock(&database, false)?);
+        let (store, storage_recovery) = match Store::open(&database) {
+            Ok(store) => (store, None),
+            Err(error) if is_corrupt_database(&error) => {
+                drop(writer_lock.take());
+                let recovery_lock = Some(writer_coordination_lock(&database, true).map_err(
+                    |lock_error| {
+                        anyhow!("coordinate graph database recovery after {error}: {lock_error}")
+                    },
+                )?);
+                let recovery = quarantine_database_set(&database)
+                    .with_context(|| format!("preserve corrupt graph database: {error}"))?;
+                let store = Store::open(&database)
+                    .with_context(|| format!("rebuild graph database after {error}"))?;
+                drop(recovery_lock);
+                writer_lock = Some(writer_coordination_lock(&database, false)?);
+                (
+                    store,
+                    Some(format!(
+                        "corrupt graph database was preserved at {} and rebuilt",
+                        recovery.display()
+                    )),
+                )
+            }
+            Err(error) => return Err(error),
+        };
         Ok(Self {
             root,
-            store: Store::open(&database)?,
+            store,
+            storage_recovery,
+            _writer_lock: writer_lock,
+        })
+    }
+
+    pub fn open_read_only(root: impl AsRef<Path>) -> Result<Self> {
+        let root = absolute(root.as_ref())?;
+        ensure_project_directory(&root, false)?;
+        let database = root.join(PROJECT_DIR).join(DATABASE_FILE);
+        Ok(Self {
+            root,
+            store: Store::open_read_only(&database)?,
+            storage_recovery: None,
+            _writer_lock: None,
         })
     }
 
@@ -208,6 +257,12 @@ impl Engine {
             match self.sync_once() {
                 Ok(mut report) => {
                     report.duration_ms = started.elapsed().as_millis();
+                    if let Some(recovery) = &self.storage_recovery {
+                        report.maintenance_warning = Some(match report.maintenance_warning {
+                            Some(warning) => format!("{recovery}; {warning}"),
+                            None => recovery.clone(),
+                        });
+                    }
                     return Ok(report);
                 }
                 Err(error)
@@ -373,6 +428,7 @@ impl Engine {
             pending_files: pending,
             skipped_files: delta.files_skipped,
             storage: self.store.storage_metrics()?,
+            storage_recovery: self.storage_recovery.clone(),
         })
     }
 
@@ -1048,6 +1104,141 @@ fn absolute(path: &Path) -> Result<PathBuf> {
     }
 }
 
+fn ensure_project_directory(root: &Path, create: bool) -> Result<()> {
+    let project = root.join(PROJECT_DIR);
+    match project.symlink_metadata() {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                bail!(
+                    "refusing unsafe project state directory {}",
+                    project.display()
+                );
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => {
+            fs::create_dir_all(&project)
+                .with_context(|| format!("create project state directory {}", project.display()))?;
+            let metadata = project.symlink_metadata().with_context(|| {
+                format!("inspect project state directory {}", project.display())
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                bail!(
+                    "refusing unsafe project state directory {}",
+                    project.display()
+                );
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            bail!(
+                "{} is not initialized; run `structurely init {}`",
+                root.display(),
+                root.display()
+            );
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect project state directory {}", project.display()))
+        }
+    }
+    Ok(())
+}
+
+fn writer_coordination_lock(database: &Path, exclusive: bool) -> Result<std::fs::File> {
+    let parent = database
+        .parent()
+        .ok_or_else(|| anyhow!("graph database has no parent directory"))?;
+    let recovery_lock_path = parent.join("recovery.lock");
+    if recovery_lock_path
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        bail!(
+            "refusing unsafe recovery lock file {}",
+            recovery_lock_path.display()
+        );
+    }
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&recovery_lock_path)
+        .with_context(|| format!("open recovery lock {}", recovery_lock_path.display()))?;
+    if exclusive {
+        lock.try_lock_exclusive()
+            .context("cannot recover graph database while another Structurely writer is running")?;
+    } else {
+        FileExt::try_lock_shared(&lock)
+            .context("cannot open graph database while recovery is running")?;
+    }
+    Ok(lock)
+}
+
+fn quarantine_database_set(database: &Path) -> Result<PathBuf> {
+    let parent = database
+        .parent()
+        .ok_or_else(|| anyhow!("graph database has no parent directory"))?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let recovery = (0usize..)
+        .map(|attempt| parent.join(format!("recovery-{timestamp}-{attempt}")))
+        .find(|candidate| !candidate.exists())
+        .ok_or_else(|| anyhow!("unable to allocate recovery directory"))?;
+    fs::create_dir(&recovery)
+        .with_context(|| format!("create recovery directory {}", recovery.display()))?;
+
+    let candidates = [
+        database.to_path_buf(),
+        PathBuf::from(format!("{}-wal", database.display())),
+        PathBuf::from(format!("{}-shm", database.display())),
+    ];
+    let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for source in candidates.into_iter().filter(|path| path.exists()) {
+        let name = source
+            .file_name()
+            .ok_or_else(|| anyhow!("database recovery source has no file name"))?;
+        let destination = recovery.join(name);
+        if let Err(error) = fs::rename(&source, &destination) {
+            let mut rollback_failures = Vec::new();
+            for (original, quarantined) in moved.into_iter().rev() {
+                if let Err(rollback_error) = fs::rename(&quarantined, &original) {
+                    rollback_failures.push(format!(
+                        "{} -> {}: {rollback_error}",
+                        quarantined.display(),
+                        original.display()
+                    ));
+                }
+            }
+            if rollback_failures.is_empty() {
+                let _ = fs::remove_dir(&recovery);
+                return Err(error).with_context(|| {
+                    format!(
+                        "move database recovery file {} to {}",
+                        source.display(),
+                        destination.display()
+                    )
+                });
+            }
+            bail!(
+                "move database recovery file {} to {}: {error}; partial recovery remains at {}; \
+                 rollback failures: {}",
+                source.display(),
+                destination.display(),
+                recovery.display(),
+                rollback_failures.join("; ")
+            );
+        }
+        moved.push((source, destination));
+    }
+    anyhow::ensure!(
+        !moved.is_empty(),
+        "no graph database files were available to preserve"
+    );
+    Ok(recovery)
+}
+
 fn percentile(sorted: &[u128], percentile: usize) -> u128 {
     let index = ((sorted.len() - 1) * percentile).div_ceil(100);
     sorted[index]
@@ -1527,6 +1718,160 @@ mod tests {
             "WAL was {} bytes",
             status.storage.wal_bytes
         );
+    }
+
+    #[test]
+    fn corrupt_database_set_is_preserved_and_rebuilt_before_sync() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("main.ts"), "function main() {}\n").unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        drop(engine);
+        let database = temp.path().join(PROJECT_DIR).join(DATABASE_FILE);
+        let wal = PathBuf::from(format!("{}-wal", database.display()));
+        let shm = PathBuf::from(format!("{}-shm", database.display()));
+        fs::write(&database, b"not a sqlite database").unwrap();
+        fs::write(&wal, b"preserved wal evidence").unwrap();
+        fs::write(&shm, b"preserved shm evidence").unwrap();
+
+        let mut engine = Engine::open(temp.path()).unwrap();
+        let second_writer = Engine::open(temp.path()).unwrap();
+        drop(second_writer);
+        let status = engine.status().unwrap();
+        let recovery = status.storage_recovery.unwrap();
+        let recovery = recovery
+            .strip_prefix("corrupt graph database was preserved at ")
+            .unwrap()
+            .strip_suffix(" and rebuilt")
+            .unwrap();
+        let recovery = PathBuf::from(recovery);
+        assert_eq!(
+            fs::read(recovery.join(DATABASE_FILE)).unwrap(),
+            b"not a sqlite database"
+        );
+        assert_eq!(
+            fs::read(recovery.join(format!("{DATABASE_FILE}-wal"))).unwrap(),
+            b"preserved wal evidence"
+        );
+        assert_eq!(
+            fs::read(recovery.join(format!("{DATABASE_FILE}-shm"))).unwrap(),
+            b"preserved shm evidence"
+        );
+
+        let report = engine.sync().unwrap();
+        assert!(report
+            .maintenance_warning
+            .as_deref()
+            .unwrap()
+            .contains("corrupt graph database was preserved"));
+        assert!(!engine.search("main", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn corruption_recovery_refuses_to_race_an_existing_writer() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("main.ts"), "function main() {}\n").unwrap();
+        let (writer, _) = Engine::init(temp.path()).unwrap();
+        let database = temp.path().join(PROJECT_DIR).join(DATABASE_FILE);
+        fs::write(&database, b"not a sqlite database").unwrap();
+
+        let error = Engine::open(temp.path()).err().unwrap().to_string();
+
+        assert!(
+            error.contains("another Structurely writer is running"),
+            "{error}"
+        );
+        assert_eq!(fs::read(&database).unwrap(), b"not a sqlite database");
+        assert!(!fs::read_dir(temp.path().join(PROJECT_DIR))
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .any(|entry| entry.file_name().to_string_lossy().starts_with("recovery-")));
+        drop(writer);
+    }
+
+    #[test]
+    fn query_only_open_does_not_change_database_or_existing_wal_contents() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("main.ts"), "function main() {}\n").unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        drop(engine);
+        let database = temp.path().join(PROJECT_DIR).join(DATABASE_FILE);
+        let wal = PathBuf::from(format!("{}-wal", database.display()));
+        let shm = PathBuf::from(format!("{}-shm", database.display()));
+        let before_database = fs::read(&database).unwrap();
+        let before_wal = fs::read(&wal).ok();
+        let before_shm = fs::read(&shm).ok();
+
+        let engine = Engine::open_read_only(temp.path()).unwrap();
+        assert!(!engine.search("main", 10).unwrap().is_empty());
+        drop(engine);
+
+        assert_eq!(fs::read(&database).unwrap(), before_database);
+        if let Some(before) = before_wal {
+            assert_eq!(fs::read(&wal).unwrap(), before);
+        }
+        if let Some(before) = before_shm {
+            assert_eq!(fs::read(&shm).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn query_only_open_observes_committed_live_wal_state() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("main.ts"), "function main() {}\n").unwrap();
+        let (mut writer, _) = Engine::init(temp.path()).unwrap();
+        writer
+            .store
+            .set_metadata_value("graph_epoch", "77")
+            .unwrap();
+        let database = temp.path().join(PROJECT_DIR).join(DATABASE_FILE);
+        let wal = PathBuf::from(format!("{}-wal", database.display()));
+        assert!(wal.metadata().is_ok_and(|metadata| metadata.len() > 0));
+
+        let reader = Engine::open_read_only(temp.path()).unwrap();
+
+        assert_eq!(reader.committed_epoch().unwrap(), 77);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn initialization_rejects_symbolic_link_state_directories() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), root.path().join(PROJECT_DIR)).unwrap();
+
+        let error = Engine::init(root.path()).err().unwrap().to_string();
+
+        assert!(error.contains("refusing unsafe project state directory"));
+        assert!(!outside.path().join(DATABASE_FILE).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn database_open_rejects_symbolic_link_sidecars() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("main.ts"), "function main() {}\n").unwrap();
+        let (engine, _) = Engine::init(root.path()).unwrap();
+        drop(engine);
+        let database = root.path().join(PROJECT_DIR).join(DATABASE_FILE);
+        let wal = PathBuf::from(format!("{}-wal", database.display()));
+        if wal.exists() {
+            fs::remove_file(&wal).unwrap();
+        }
+        let outside = root.path().join("outside-wal");
+        fs::write(&outside, b"must remain untouched").unwrap();
+        symlink(&outside, &wal).unwrap();
+
+        let error = Engine::open_read_only(root.path())
+            .err()
+            .unwrap()
+            .to_string();
+
+        assert!(error.contains("refusing unsafe graph database file"));
+        assert_eq!(fs::read(outside).unwrap(), b"must remain untouched");
     }
 
     #[test]

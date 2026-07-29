@@ -14,6 +14,7 @@ use serde::Serialize;
 use std::{
     cell::Cell,
     collections::{HashMap, HashSet, VecDeque},
+    io::Read,
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -27,6 +28,10 @@ const CALL_RESULT_DEPENDENT_CAP: usize = 100_000;
 #[derive(Debug, thiserror::Error)]
 #[error("graph changed concurrently; retry publication")]
 pub(crate) struct ConcurrentPublication;
+
+#[derive(Debug, thiserror::Error)]
+#[error("graph database failed SQLite integrity check: {0}")]
+struct CorruptDatabase(String);
 
 pub struct Store {
     connection: Connection,
@@ -89,19 +94,19 @@ pub struct StorageMetrics {
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
-        if path
-            .symlink_metadata()
-            .is_ok_and(|metadata| metadata.file_type().is_symlink())
-        {
-            anyhow::bail!("refusing symbolic-link graph database {}", path.display());
-        }
-        preflight_schema_version(path)?;
+        validate_database_path(path)?;
+        preflight_database(path)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create {}", parent.display()))?;
         }
-        let connection = Connection::open(path)
-            .with_context(|| format!("open graph database {}", path.display()))?;
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .with_context(|| format!("open graph database {}", path.display()))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.pragma_update(None, "synchronous", "NORMAL")?;
@@ -115,6 +120,30 @@ impl Store {
         };
         store.migrate()?;
         Ok(store)
+    }
+
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        validate_database_path(path)?;
+        anyhow::ensure!(
+            path.is_file(),
+            "graph database does not exist: {}",
+            path.display()
+        );
+        validate_database_header(path)?;
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .with_context(|| format!("open read-only graph database {}", path.display()))?;
+        validate_schema_version(&connection)?;
+        connection.pragma_update(None, "query_only", "ON")?;
+        connection.pragma_update(None, "foreign_keys", "ON")?;
+        connection.pragma_update(None, "busy_timeout", 5_000)?;
+        Ok(Self {
+            connection,
+            path: path.to_owned(),
+            checkpoint_failure_injected: false,
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -169,16 +198,8 @@ impl Store {
         Ok(StorageMetrics {
             database_bytes: file_size(&self.path)?,
             wal_bytes: file_size(&wal_path)?,
-            wal_autocheckpoint_pages: self.connection.pragma_query_value(
-                None,
-                "wal_autocheckpoint",
-                |row| row.get(0),
-            )?,
-            journal_size_limit_bytes: self.connection.pragma_query_value(
-                None,
-                "journal_size_limit",
-                |row| row.get(0),
-            )?,
+            wal_autocheckpoint_pages: WAL_AUTOCHECKPOINT_PAGES,
+            journal_size_limit_bytes: JOURNAL_SIZE_LIMIT_BYTES,
         })
     }
 
@@ -5001,22 +5022,103 @@ impl Store {
     }
 }
 
-fn preflight_schema_version(path: &Path) -> Result<()> {
-    let Ok(metadata) = path.metadata() else {
+fn validate_database_path(path: &Path) -> Result<()> {
+    for candidate in [
+        path.to_path_buf(),
+        PathBuf::from(format!("{}-wal", path.display())),
+        PathBuf::from(format!("{}-shm", path.display())),
+    ] {
+        match candidate.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                anyhow::bail!(
+                    "refusing unsafe graph database file {}",
+                    candidate.display()
+                )
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("inspect graph database file {}", candidate.display())
+                })
+            }
+        }
+    }
+    Ok(())
+}
+
+fn preflight_database(path: &Path) -> Result<()> {
+    if !path.exists() {
         return Ok(());
+    }
+    validate_database_header(path)?;
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .with_context(|| format!("preflight graph database {}", path.display()))?;
+    preflight_connection(&connection, path)
+}
+
+fn validate_database_header(path: &Path) -> Result<()> {
+    let metadata = match path.metadata() {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspect graph database {}", path.display()))
+        }
     };
     if metadata.len() == 0 {
         return Ok(());
     }
-    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .with_context(|| format!("preflight graph database {}", path.display()))?;
-    if let Some(version) = existing_schema_version(&connection)? {
+    let mut header = [0u8; 16];
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("read graph database header {}", path.display()))?;
+    if file.read_exact(&mut header).is_err() || &header != b"SQLite format 3\0" {
+        return Err(CorruptDatabase("invalid or truncated SQLite header".to_owned()).into());
+    }
+    Ok(())
+}
+
+fn preflight_connection(connection: &Connection, path: &Path) -> Result<()> {
+    let integrity: String = connection
+        .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
+        .with_context(|| format!("integrity-check graph database {}", path.display()))?;
+    if integrity != "ok" {
+        return Err(CorruptDatabase(integrity).into());
+    }
+    validate_schema_version(connection)
+}
+
+fn validate_schema_version(connection: &Connection) -> Result<()> {
+    if let Some(version) = existing_schema_version(connection)? {
         anyhow::ensure!(
             version <= SCHEMA_VERSION,
             "graph database schema {version} is newer than supported schema {SCHEMA_VERSION}"
         );
     }
     Ok(())
+}
+
+pub(crate) fn is_corrupt_database(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        if cause.downcast_ref::<CorruptDatabase>().is_some() {
+            return true;
+        }
+        cause
+            .downcast_ref::<rusqlite::Error>()
+            .is_some_and(|error| {
+                matches!(
+                    error,
+                    rusqlite::Error::SqliteFailure(sqlite, _)
+                        if matches!(
+                            sqlite.code,
+                            rusqlite::ErrorCode::DatabaseCorrupt
+                                | rusqlite::ErrorCode::NotADatabase
+                        )
+                )
+            })
+    })
 }
 
 fn existing_schema_version(connection: &Connection) -> Result<Option<u32>> {

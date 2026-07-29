@@ -158,7 +158,7 @@ pub fn run(project: impl AsRef<Path>, debounce: Duration) -> Result<()> {
         }
     });
 
-    let mut engine = Engine::open(&project)?;
+    let mut engine = Engine::open_for_daemon(&project)?;
     let initial_epoch = match engine.sync() {
         Ok(report) => {
             write_state(&paths.state, &DaemonState::running(&project, report.epoch))?;
