@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path};
 
-pub const GRAPH_MODEL_VERSION: u32 = 57;
+pub const GRAPH_MODEL_VERSION: u32 = 58;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -416,6 +416,62 @@ pub(crate) struct ModuleExportFact {
     pub is_star: bool,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct FastApiFacts {
+    pub routers: Vec<FastApiRouterFact>,
+    pub aliases: Vec<FastApiAliasFact>,
+    pub factories: Vec<FastApiFactoryFact>,
+    pub mounts: Vec<FastApiMountFact>,
+    pub routes: Vec<FastApiRouteFact>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct FastApiAliasFact {
+    pub name: String,
+    pub router: FastApiRouterRef,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct FastApiRouterRef {
+    pub target_file_hint: Option<String>,
+    pub name: String,
+    pub factory: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct FastApiRouterFact {
+    pub name: String,
+    pub prefix: String,
+    pub application: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct FastApiFactoryFact {
+    pub name: String,
+    pub router: FastApiRouterRef,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct FastApiMountFact {
+    pub parent: FastApiRouterRef,
+    pub child: FastApiRouterRef,
+    pub prefix: String,
+    pub line: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct FastApiRouteFact {
+    pub router: FastApiRouterRef,
+    pub verb: String,
+    pub path: String,
+    pub handler_id: String,
+    pub handler_name: String,
+    pub start_byte: usize,
+    pub end_byte: usize,
+    pub line: usize,
+    pub end_line: usize,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct UnresolvedReference {
     pub source_id: String,
@@ -448,6 +504,7 @@ pub(crate) struct FileFacts {
     pub dynamic_events: Vec<DynamicEventFact>,
     pub literal_bindings: Vec<LiteralBindingFact>,
     pub module_exports: Vec<ModuleExportFact>,
+    pub fastapi: FastApiFacts,
 }
 
 #[cfg(test)]

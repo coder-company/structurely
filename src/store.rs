@@ -1,6 +1,6 @@
 use crate::model::{
-    ArkuiBuilderFlowFacts, EventChannel, Evidence, FileFacts, Language, Relationship,
-    RelationshipKind, Symbol, SymbolKind, GRAPH_MODEL_VERSION,
+    ArkuiBuilderFlowFacts, EventChannel, Evidence, FastApiFacts, FastApiRouterRef, FileFacts,
+    Language, Relationship, RelationshipKind, SourceSpan, Symbol, SymbolKind, GRAPH_MODEL_VERSION,
 };
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -240,6 +240,14 @@ impl Store {
             CREATE TABLE IF NOT EXISTS arkui_builder_flow_batches (
                 file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
                 payload TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS fastapi_fact_batches (
+                file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+                payload TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS fastapi_generated_symbols (
+                public_id TEXT PRIMARY KEY,
+                file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS dynamic_events (
                 id INTEGER PRIMARY KEY,
@@ -645,6 +653,7 @@ impl Store {
 
     fn finish_epoch(tx: &Transaction<'_>, next_epoch: u64) -> Result<usize> {
         Self::clear_inline_callback_symbols(tx)?;
+        Self::clear_fastapi_generated_symbols(tx)?;
         let mut relationships_resolved = Self::resolve_calls(tx)?;
         let _ = Self::resolve_callback_arguments(tx)?;
         relationships_resolved += Self::publish_deferred_inline_calls(tx)?;
@@ -661,6 +670,7 @@ impl Store {
         relationships_resolved += Self::resolve_arkui_builder_flows(tx)?;
         relationships_resolved += Self::resolve_interface_dispatch(tx)?;
         relationships_resolved += Self::resolve_dynamic_events(tx)?;
+        relationships_resolved += Self::materialize_fastapi_routes(tx)?;
         tx.execute(
             "UPDATE metadata SET value = ?1 WHERE key = 'graph_epoch'",
             [next_epoch.to_string()],
@@ -671,6 +681,28 @@ impl Store {
             [GRAPH_MODEL_VERSION.to_string()],
         )?;
         Ok(relationships_resolved)
+    }
+
+    fn clear_fastapi_generated_symbols(tx: &Transaction<'_>) -> Result<()> {
+        tx.execute(
+            "DELETE FROM relationships
+             WHERE source_public_id IN (SELECT public_id FROM fastapi_generated_symbols)
+                OR target_public_id IN (SELECT public_id FROM fastapi_generated_symbols)
+                OR provenance = 'framework/fastapi-route'",
+            [],
+        )?;
+        tx.execute(
+            "DELETE FROM symbol_search
+             WHERE public_id IN (SELECT public_id FROM fastapi_generated_symbols)",
+            [],
+        )?;
+        tx.execute(
+            "DELETE FROM symbols
+             WHERE public_id IN (SELECT public_id FROM fastapi_generated_symbols)",
+            [],
+        )?;
+        tx.execute("DELETE FROM fastapi_generated_symbols", [])?;
+        Ok(())
     }
 
     fn clear_inline_callback_symbols(tx: &Transaction<'_>) -> Result<()> {
@@ -908,6 +940,16 @@ impl Store {
                 "INSERT INTO arkui_builder_flow_batches(file_id,payload) VALUES (?1,?2)",
             )?
             .execute(params![file_id, payload])?;
+        }
+        if !file.fastapi.routers.is_empty()
+            || !file.fastapi.aliases.is_empty()
+            || !file.fastapi.factories.is_empty()
+            || !file.fastapi.mounts.is_empty()
+            || !file.fastapi.routes.is_empty()
+        {
+            let payload = serde_json::to_string(&file.fastapi)?;
+            tx.prepare_cached("INSERT INTO fastapi_fact_batches(file_id,payload) VALUES (?1,?2)")?
+                .execute(params![file_id, payload])?;
         }
         for event in &file.dynamic_events {
             let (channel, target_file_hint, export_name, member_path) = match &event.channel {
@@ -1770,6 +1812,284 @@ impl Store {
                 )?;
                 resolved += 1;
             }
+        }
+        Ok(resolved)
+    }
+
+    fn materialize_fastapi_routes(tx: &Transaction<'_>) -> Result<usize> {
+        const DEPTH_CAP: usize = 16;
+        const WORK_CAP: usize = 10_000;
+        type RouterKey = (String, String);
+
+        let mut statement = tx.prepare(
+            "SELECT f.id,f.path,b.payload
+             FROM fastapi_fact_batches b JOIN files f ON f.id=b.file_id
+             ORDER BY f.path",
+        )?;
+        let batches = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        if batches.is_empty() {
+            return Ok(0);
+        }
+        let mut files = HashMap::new();
+        let mut paths = Vec::new();
+        for (file_id, path, payload) in batches {
+            let facts = serde_json::from_str::<FastApiFacts>(&payload)?;
+            paths.push(path.clone());
+            files.insert(path, (file_id, facts));
+        }
+        paths.sort();
+
+        let mut declarations = HashMap::<RouterKey, (String, bool)>::new();
+        let mut aliases = HashMap::<RouterKey, FastApiRouterRef>::new();
+        let mut factories = HashMap::<RouterKey, FastApiRouterRef>::new();
+        for (path, (_, facts)) in &files {
+            for router in &facts.routers {
+                declarations.insert(
+                    (path.clone(), router.name.clone()),
+                    (router.prefix.clone(), router.application),
+                );
+            }
+            for factory in &facts.factories {
+                factories.insert((path.clone(), factory.name.clone()), factory.router.clone());
+            }
+            for alias in &facts.aliases {
+                aliases.insert((path.clone(), alias.name.clone()), alias.router.clone());
+            }
+        }
+
+        let resolve = |reference: &FastApiRouterRef, current_file: &str| {
+            resolve_fastapi_router_ref(
+                reference,
+                current_file,
+                &paths,
+                &declarations,
+                &aliases,
+                &factories,
+                0,
+                &mut HashSet::new(),
+            )
+        };
+        let mut edges = HashMap::<RouterKey, Vec<(RouterKey, String, String, usize)>>::new();
+        let mut routes = HashMap::<RouterKey, Vec<(String, crate::model::FastApiRouteFact)>>::new();
+        for (path, (_, facts)) in &files {
+            for mount in &facts.mounts {
+                let (Some(parent), Some(child)) =
+                    (resolve(&mount.parent, path), resolve(&mount.child, path))
+                else {
+                    continue;
+                };
+                edges.entry(parent).or_default().push((
+                    child,
+                    mount.prefix.clone(),
+                    path.clone(),
+                    mount.line,
+                ));
+            }
+            for route in &facts.routes {
+                if let Some(router) = resolve(&route.router, path) {
+                    routes
+                        .entry(router)
+                        .or_default()
+                        .push((path.clone(), route.clone()));
+                }
+            }
+        }
+        for children in edges.values_mut() {
+            children.sort_by(|left, right| {
+                left.0
+                    .cmp(&right.0)
+                    .then_with(|| left.1.cmp(&right.1))
+                    .then_with(|| left.2.cmp(&right.2))
+                    .then_with(|| left.3.cmp(&right.3))
+            });
+            children.dedup_by(|left, right| left.0 == right.0 && left.1 == right.1);
+        }
+
+        let mut roots = declarations
+            .iter()
+            .filter(|(_, (_, application))| *application)
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        roots.sort();
+        let mut materialized = Vec::new();
+        let mut work = 0usize;
+        for root in roots {
+            let root_identity = format!("{}#{}", root.0, root.1);
+            let mut stack = vec![(
+                root,
+                String::new(),
+                root_identity,
+                Vec::<RouterKey>::new(),
+                0usize,
+            )];
+            while let Some((router, inherited, mount_identity, mut ancestry, depth)) = stack.pop() {
+                if depth > DEPTH_CAP || work >= WORK_CAP || ancestry.contains(&router) {
+                    continue;
+                }
+                work += 1;
+                ancestry.push(router.clone());
+                let own_prefix = &declarations[&router].0;
+                let effective_prefix = join_route_path(&inherited, own_prefix);
+                if let Some(handlers) = routes.get(&router) {
+                    for (file, route) in handlers {
+                        let path = join_route_path(&effective_prefix, &route.path);
+                        if path.is_empty() {
+                            continue;
+                        }
+                        materialized.push((
+                            route.verb.clone(),
+                            if path.is_empty() {
+                                "/".to_owned()
+                            } else {
+                                path
+                            },
+                            file.clone(),
+                            mount_identity.clone(),
+                            route.clone(),
+                        ));
+                    }
+                }
+                if let Some(children) = edges.get(&router) {
+                    for (child, mount_prefix, mount_file, _) in children.iter().rev() {
+                        stack.push((
+                            child.clone(),
+                            join_route_path(&effective_prefix, mount_prefix),
+                            format!(
+                                "{mount_identity}>{mount_file}:{}#{}:{mount_prefix}",
+                                child.0, child.1
+                            ),
+                            ancestry.clone(),
+                            depth + 1,
+                        ));
+                    }
+                }
+            }
+        }
+        materialized.sort_by(|left, right| {
+            left.1
+                .cmp(&right.1)
+                .then_with(|| left.0.cmp(&right.0))
+                .then_with(|| left.2.cmp(&right.2))
+                .then_with(|| left.3.cmp(&right.3))
+                .then_with(|| left.4.line.cmp(&right.4.line))
+                .then_with(|| left.4.handler_name.cmp(&right.4.handler_name))
+        });
+
+        let mut resolved = 0;
+        for (verb, path, endpoint_file, mount_identity, route_fact) in materialized {
+            let Some((file_id, _)) = files.get(&endpoint_file) else {
+                continue;
+            };
+            let handler_exists = tx
+                .query_row(
+                    "SELECT 1 FROM symbols
+                     WHERE file_id=?1 AND public_id=?2 AND kind IN ('function','method')",
+                    params![file_id, route_fact.handler_id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if !handler_exists {
+                continue;
+            }
+            let file_symbol_id: String = tx.query_row(
+                "SELECT public_id FROM symbols WHERE file_id=?1 AND kind='file'",
+                [file_id],
+                |row| row.get(0),
+            )?;
+            let name = format!("{verb} {path}");
+            let symbol = Symbol::new_disambiguated(
+                Language::Python,
+                SymbolKind::Route,
+                &name,
+                &name,
+                &endpoint_file,
+                SourceSpan {
+                    start_byte: route_fact.start_byte,
+                    end_byte: route_fact.end_byte,
+                    start_line: route_fact.line,
+                    end_line: route_fact.end_line,
+                },
+                &format!(
+                    "fastapi|{verb}|{path}|{}|mount:{mount_identity}",
+                    route_fact.handler_name
+                ),
+            );
+            tx.prepare_cached(
+                "INSERT INTO symbols(
+                    public_id,semantic_key,file_id,language,kind,name,qualified_name,
+                    start_byte,end_byte,start_line,end_line
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            )?
+            .execute(params![
+                symbol.id,
+                symbol.semantic_key,
+                file_id,
+                symbol.language.to_string(),
+                symbol.kind.to_string(),
+                symbol.name,
+                symbol.qualified_name,
+                symbol.start_byte as i64,
+                symbol.end_byte as i64,
+                symbol.start_line as i64,
+                symbol.end_line as i64
+            ])?;
+            tx.prepare_cached(
+                "INSERT INTO symbol_search(public_id,name,qualified_name,file,segments)
+                 VALUES (?1,?2,?3,?4,?5)",
+            )?
+            .execute(params![
+                symbol.id,
+                symbol.name,
+                symbol.qualified_name,
+                symbol.file,
+                identifier_segments(&format!("{} {}", symbol.name, symbol.qualified_name))
+                    .join(" ")
+            ])?;
+            tx.prepare_cached(
+                "INSERT INTO fastapi_generated_symbols(public_id,file_id) VALUES (?1,?2)",
+            )?
+            .execute(params![symbol.id, file_id])?;
+            Self::insert_relationship(
+                tx,
+                &Relationship {
+                    source_id: file_symbol_id,
+                    target_id: symbol.id.clone(),
+                    kind: RelationshipKind::Contains,
+                    evidence: Evidence::new(
+                        "framework/fastapi-route",
+                        1.0,
+                        format!("{name} is registered through exact FastAPI router composition"),
+                        &endpoint_file,
+                        route_fact.line,
+                    ),
+                },
+            )?;
+            Self::insert_relationship(
+                tx,
+                &Relationship {
+                    source_id: symbol.id,
+                    target_id: route_fact.handler_id.clone(),
+                    kind: RelationshipKind::Calls,
+                    evidence: Evidence::new(
+                        "framework/fastapi-route",
+                        0.995,
+                        format!("{name} decorates handler {}", route_fact.handler_name),
+                        &endpoint_file,
+                        route_fact.line,
+                    ),
+                },
+            )?;
+            resolved += 1;
         }
         Ok(resolved)
     }
@@ -3642,6 +3962,96 @@ fn module_hint_matches(hint: &str, candidate: &str) -> bool {
         || candidate_without_extension.starts_with(&format!("{hint}/"))
         || candidate_without_extension.ends_with(&format!("/{hint}"))
         || candidate_without_extension.ends_with(&format!("/{hint}/index"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_fastapi_router_ref(
+    reference: &FastApiRouterRef,
+    current_file: &str,
+    paths: &[String],
+    declarations: &HashMap<(String, String), (String, bool)>,
+    aliases: &HashMap<(String, String), FastApiRouterRef>,
+    factories: &HashMap<(String, String), FastApiRouterRef>,
+    depth: usize,
+    seen: &mut HashSet<(String, String)>,
+) -> Option<(String, String)> {
+    if depth > 16 {
+        return None;
+    }
+    let target_file = match reference.target_file_hint.as_deref() {
+        None => current_file.to_owned(),
+        Some(hint) => {
+            let matches = paths
+                .iter()
+                .filter(|path| **path == hint || python_module_hint_matches(hint, path))
+                .cloned()
+                .collect::<HashSet<_>>();
+            let matches = matches.into_iter().collect::<Vec<_>>();
+            let [path] = matches.as_slice() else {
+                return None;
+            };
+            path.clone()
+        }
+    };
+    let key = (target_file, reference.name.clone());
+    if !reference.factory {
+        if declarations.contains_key(&key) {
+            return Some(key);
+        }
+        if !seen.insert(key.clone()) {
+            return None;
+        }
+        let aliased = aliases.get(&key)?;
+        let resolved = resolve_fastapi_router_ref(
+            aliased,
+            &key.0,
+            paths,
+            declarations,
+            aliases,
+            factories,
+            depth + 1,
+            seen,
+        );
+        seen.remove(&key);
+        return resolved;
+    }
+    if !seen.insert(key.clone()) {
+        return None;
+    }
+    let returned = factories.get(&key)?;
+    let resolved = resolve_fastapi_router_ref(
+        returned,
+        &key.0,
+        paths,
+        declarations,
+        aliases,
+        factories,
+        depth + 1,
+        seen,
+    );
+    seen.remove(&key);
+    resolved
+}
+
+fn python_module_hint_matches(hint: &str, candidate: &str) -> bool {
+    if hint.starts_with('.') || hint.starts_with("./") || hint.starts_with("../") {
+        return false;
+    }
+    let hint = hint
+        .trim_matches(['\'', '"'])
+        .replace(['.', '\\'], "/")
+        .trim_matches('/')
+        .to_owned();
+    let candidate = candidate.replace('\\', "/");
+    let candidate = candidate
+        .rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(&candidate);
+    candidate == hint || candidate.ends_with(&format!("/{hint}"))
+}
+
+fn join_route_path(prefix: &str, path: &str) -> String {
+    format!("{prefix}{path}")
 }
 
 fn harmony_project_root(path: &str) -> Option<String> {

@@ -4107,7 +4107,11 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         fs::write(
             temp.path().join("api.py"),
-            "@app.get('/users/{user_id}')\n\
+            "from fastapi import FastAPI, APIRouter\n\
+             app = FastAPI()\n\
+             router = APIRouter(prefix='/created')\n\
+             app.include_router(router)\n\n\
+             @app.get('/users/{user_id}')\n\
              async def show_user(user_id: str):\n\
              \x20   return user_id\n\n\
              @router.post(\n\
@@ -4128,10 +4132,10 @@ mod tests {
         assert!(routes
             .iter()
             .any(|route| route.name == "GET /users/{user_id}"));
-        assert!(routes.iter().any(|route| route.name == "POST /"));
+        assert!(routes.iter().any(|route| route.name == "POST /created"));
         for (route_name, handler_name) in [
             ("GET /users/{user_id}", "show_user"),
-            ("POST /", "create_user"),
+            ("POST /created", "create_user"),
         ] {
             let route = routes
                 .iter()
@@ -4141,7 +4145,7 @@ mod tests {
             assert_eq!(callees.len(), 1);
             assert_eq!(callees[0].0.name, handler_name);
             assert_eq!(callees[0].1.provenance, "framework/fastapi-route");
-            assert_eq!(callees[0].1.confidence, 0.99);
+            assert_eq!(callees[0].1.confidence, 0.995);
         }
     }
 
@@ -6659,6 +6663,583 @@ mod tests {
             .symbols
             .iter()
             .all(|symbol| symbol.kind != crate::model::SymbolKind::Route));
+    }
+
+    #[test]
+    fn fastapi_composes_nested_imported_factory_and_constructed_class_routers() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("routers.py"),
+            "from fastapi import APIRouter\n\
+             v1 = APIRouter(prefix='/items')\n\
+             nested = APIRouter(prefix='/detail')\n\
+             v1.include_router(nested, prefix='/nested')\n\n\
+             @nested.get('/{item_id}')\n\
+             def show_item(item_id: str):\n\
+             \x20   return item_id\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("factory.py"),
+            "from fastapi import APIRouter\n\
+             router = APIRouter(prefix='/factory')\n\n\
+             @router.post('/run')\n\
+             def run_factory():\n\
+             \x20   return None\n\n\
+             def create_router(config, *, enabled=True):\n\
+             \x20   return router\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("main.py"),
+            "from fastapi import FastAPI, APIRouter\n\
+             from .routers import v1\n\
+             import factory\n\n\
+             class HealthRoutes:\n\
+             \x20   def __init__(self):\n\
+             \x20       self.router = APIRouter(prefix='/health')\n\n\
+             \x20   @self.router.get('/ready')\n\
+             \x20   def ready(self):\n\
+             \x20       return True\n\n\
+             health = HealthRoutes()\n\
+             app = FastAPI()\n\
+             app.include_router(v1, prefix='/api')\n\
+             app.include_router(factory.create_router({'mode': 'safe'}, enabled=True), prefix='/api')\n\
+             app.include_router(health.router, prefix='/ops')\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let snapshot = engine.snapshot().unwrap();
+        let mut names = snapshot
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.kind == crate::model::SymbolKind::Route)
+            .map(|symbol| symbol.name.as_str())
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "GET /api/items/nested/detail/{item_id}",
+                "GET /ops/health/ready",
+                "POST /api/factory/run"
+            ]
+        );
+        for route in snapshot
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.kind == crate::model::SymbolKind::Route)
+        {
+            let callees = engine.callees(&route.id).unwrap();
+            assert_eq!(callees.len(), 1);
+            assert_eq!(callees[0].1.provenance, "framework/fastapi-route");
+            assert_eq!(callees[0].1.confidence, 0.995);
+        }
+    }
+
+    #[test]
+    fn fastapi_exact_composition_rejects_spoofs_dynamic_prefixes_ambiguity_and_cycles() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("api.py"),
+            "from fastapi import FastAPI, APIRouter\n\
+             app = FastAPI()\n\
+             first = APIRouter(prefix='/first')\n\
+             second = APIRouter(prefix='/second')\n\
+             first.include_router(second)\n\
+             second.include_router(first)\n\
+             dynamic = '/dynamic'\n\
+             app.include_router(first, prefix=dynamic)\n\
+             ambiguous = APIRouter()\n\
+             ambiguous = APIRouter(prefix='/changed')\n\n\
+             @second.get('/safe')\n\
+             def safe(): return True\n\n\
+             @ambiguous.get('/excluded')\n\
+             def excluded(): return False\n\n\
+             class Fake:\n\
+             \x20   def get(self, path): return lambda fn: fn\n\
+             fake = Fake()\n\
+             @fake.get('/spoof')\n\
+             def spoof(): return False\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let routes = engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .into_iter()
+            .filter(|symbol| symbol.kind == crate::model::SymbolKind::Route)
+            .map(|symbol| symbol.name)
+            .collect::<Vec<_>>();
+        assert!(routes.is_empty());
+    }
+
+    #[test]
+    fn fastapi_materialization_is_stable_and_cleans_up_incrementally() {
+        let temp = tempfile::tempdir().unwrap();
+        let router_path = temp.path().join("router.py");
+        fs::write(
+            &router_path,
+            "from fastapi import APIRouter\n\
+             router = APIRouter(prefix='/users')\n\
+             @router.get('/all')\n\
+             def list_users(): return []\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("main.py"),
+            "from fastapi import FastAPI\n\
+             from .router import router\n\
+             app = FastAPI()\n\
+             app.include_router(router, prefix='/api')\n",
+        )
+        .unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let original = engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .into_iter()
+            .find(|symbol| symbol.name == "GET /api/users/all")
+            .unwrap();
+        engine.sync().unwrap();
+        let unchanged = engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .into_iter()
+            .find(|symbol| symbol.name == "GET /api/users/all")
+            .unwrap();
+        assert_eq!(original.id, unchanged.id);
+
+        fs::write(
+            &router_path,
+            "from fastapi import APIRouter\nrouter = APIRouter(prefix='/users')\n",
+        )
+        .unwrap();
+        engine.sync().unwrap();
+        assert!(engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .iter()
+            .all(|symbol| symbol.kind != crate::model::SymbolKind::Route));
+    }
+
+    #[test]
+    fn fastapi_supports_verified_module_style_constructors() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("api.py"),
+            "import fastapi as framework\n\
+             app = framework.FastAPI()\n\
+             router = framework.APIRouter(prefix='/items')\n\
+             app.include_router(prefix='/api', router=router)\n\
+             @router.get('/all')\n\
+             def all_items(): return []\n\
+             @router.get('/')\n\
+             def item_root(): return []\n\
+             @router.trace('/trace')\n\
+             def trace_items(): return None\n\
+             @router.websocket('/events')\n\
+             async def item_events(socket): return None\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let mut routes = engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .into_iter()
+            .filter(|symbol| symbol.kind == crate::model::SymbolKind::Route)
+            .map(|symbol| symbol.name)
+            .collect::<Vec<_>>();
+        routes.sort();
+        assert_eq!(
+            routes,
+            [
+                "GET /api/items/",
+                "GET /api/items/all",
+                "TRACE /api/items/trace",
+                "WEBSOCKET /api/items/events"
+            ]
+        );
+    }
+
+    #[test]
+    fn fastapi_does_not_publish_unmounted_routers_when_an_application_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("api.py"),
+            "from fastapi import FastAPI, APIRouter\n\
+             app = FastAPI()\n\
+             mounted = APIRouter(prefix='/mounted')\n\
+             hidden = APIRouter(prefix='/hidden')\n\
+             app.include_router(mounted)\n\
+             @mounted.get('/yes')\n\
+             def yes(): return True\n\
+             @hidden.get('/no')\n\
+             def no(): return False\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let routes = engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .into_iter()
+            .filter(|symbol| symbol.kind == crate::model::SymbolKind::Route)
+            .map(|symbol| symbol.name)
+            .collect::<Vec<_>>();
+        assert_eq!(routes, ["GET /mounted/yes"]);
+    }
+
+    #[test]
+    fn fastapi_duplicate_mount_ids_survive_unrelated_mount_removal() {
+        let temp = tempfile::tempdir().unwrap();
+        let api = temp.path().join("api.py");
+        fs::write(
+            &api,
+            "from fastapi import FastAPI, APIRouter\n\
+             app = FastAPI()\n\
+             router = APIRouter()\n\
+             app.include_router(router, prefix='/earlier')\n\
+             app.include_router(router, prefix='/same')\n\
+             @router.get('/route')\n\
+             def route(): return True\n",
+        )
+        .unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let original_id = engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .into_iter()
+            .filter(|symbol| symbol.name == "GET /same/route")
+            .map(|symbol| symbol.id)
+            .next()
+            .unwrap();
+
+        fs::write(
+            &api,
+            "from fastapi import FastAPI, APIRouter\n\
+             app = FastAPI()\n\
+             router = APIRouter()\n\
+             # unrelated text may freely shift mount source lines\n\
+             # first mount removed\n\
+             app.include_router(router, prefix='/same')\n\
+             @router.get('/route')\n\
+             def route(): return True\n",
+        )
+        .unwrap();
+        engine.sync().unwrap();
+        let remaining_ids = engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .into_iter()
+            .filter(|symbol| symbol.name == "GET /same/route")
+            .map(|symbol| symbol.id)
+            .collect::<Vec<_>>();
+        assert_eq!(remaining_ids.len(), 1);
+        assert_eq!(remaining_ids[0], original_id);
+    }
+
+    #[test]
+    fn fastapi_lexical_bindings_reject_parameter_and_local_router_shadows() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("api.py"),
+            "from fastapi import FastAPI, APIRouter\n\
+             app = FastAPI()\n\
+             router = APIRouter()\n\
+             app.include_router(router)\n\
+             @router.get('/real')\n\
+             def real(): return True\n\
+             def register_parameter(router):\n\
+             \x20   @router.get('/parameter-fake')\n\
+             \x20   def parameter_fake(): return False\n\
+             def register_local():\n\
+             \x20   router = object()\n\
+             \x20   @router.get('/local-fake')\n\
+             \x20   def local_fake(): return False\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let routes = engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .into_iter()
+            .filter(|symbol| symbol.kind == crate::model::SymbolKind::Route)
+            .map(|symbol| symbol.name)
+            .collect::<Vec<_>>();
+        assert_eq!(routes, ["GET /real"]);
+    }
+
+    #[test]
+    fn fastapi_same_named_local_factory_routers_compose_independently() {
+        let temp = tempfile::tempdir().unwrap();
+        let api = temp.path().join("api.py");
+        fs::write(
+            &api,
+            "from fastapi import FastAPI, APIRouter\n\
+             def create_alpha():\n\
+             \x20   router = APIRouter(prefix='/alpha')\n\
+             \x20   @router.get('/value')\n\
+             \x20   def alpha_value(): return 'alpha'\n\
+             \x20   return router\n\
+             def create_beta():\n\
+             \x20   router = APIRouter(prefix='/beta')\n\
+             \x20   @router.get('/value')\n\
+             \x20   def beta_value(): return 'beta'\n\
+             \x20   return router\n\
+             app = FastAPI()\n\
+             app.include_router(create_alpha())\n\
+             app.include_router(create_beta())\n",
+        )
+        .unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let mut routes = engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .into_iter()
+            .filter(|symbol| symbol.kind == crate::model::SymbolKind::Route)
+            .map(|symbol| (symbol.name, symbol.id))
+            .collect::<Vec<_>>();
+        routes.sort();
+        assert_eq!(
+            routes
+                .iter()
+                .map(|route| route.0.as_str())
+                .collect::<Vec<_>>(),
+            ["GET /alpha/value", "GET /beta/value"]
+        );
+        let stable_ids = routes
+            .iter()
+            .map(|route| route.1.clone())
+            .collect::<Vec<_>>();
+
+        let original = fs::read_to_string(&api).unwrap();
+        fs::write(&api, format!("# unrelated insertion\n{original}")).unwrap();
+        engine.sync().unwrap();
+        let mut shifted = engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .into_iter()
+            .filter(|symbol| symbol.kind == crate::model::SymbolKind::Route)
+            .map(|symbol| (symbol.name, symbol.id))
+            .collect::<Vec<_>>();
+        shifted.sort();
+        assert_eq!(
+            shifted.into_iter().map(|route| route.1).collect::<Vec<_>>(),
+            stable_ids
+        );
+    }
+
+    #[test]
+    fn fastapi_rejects_reassigned_and_comprehensively_shadowed_bindings() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("routes.py"),
+            "from fastapi import APIRouter\n\
+             router = APIRouter()\n\
+             @router.get('/leak')\n\
+             def leak(): return False\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("api.py"),
+            "from fastapi import FastAPI, APIRouter\n\
+             from .routes import router\n\
+             app = FastAPI()\n\
+             for router in []:\n\
+             \x20   pass\n\
+             app.include_router(router)\n\
+             local = APIRouter()\n\
+             local: object = object()\n\
+             app.include_router(local)\n\
+             @local.get('/also-leaks')\n\
+             def also_leaks(): return False\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let routes = engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .into_iter()
+            .filter(|symbol| symbol.kind == crate::model::SymbolKind::Route)
+            .map(|symbol| symbol.name)
+            .collect::<Vec<_>>();
+        assert!(routes.is_empty(), "unexpected routes: {routes:?}");
+    }
+
+    #[test]
+    fn fastapi_factories_require_one_proven_return_target() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("api.py"),
+            "from fastapi import FastAPI, APIRouter\n\
+             app = FastAPI()\n\
+             wanted = APIRouter(prefix='/wanted')\n\
+             other = APIRouter(prefix='/other')\n\
+             @wanted.get('/route')\n\
+             def route(): return True\n\
+             def choose(flag):\n\
+             \x20   if flag:\n\
+             \x20       return other\n\
+             \x20   return wanted\n\
+             app.include_router(choose(True))\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        assert!(engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .iter()
+            .all(|symbol| symbol.kind != crate::model::SymbolKind::Route));
+    }
+
+    #[test]
+    fn fastapi_preserves_literal_double_slashes_and_valid_empty_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("api.py"),
+            "from fastapi import FastAPI, APIRouter\n\
+             app = FastAPI()\n\
+             router = APIRouter(prefix='//items')\n\
+             app.include_router(router, prefix='//api')\n\
+             @router.get('')\n\
+             def root(): return True\n\
+             @router.get('//detail')\n\
+             def detail(): return True\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let mut routes = engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .into_iter()
+            .filter(|symbol| symbol.kind == crate::model::SymbolKind::Route)
+            .map(|symbol| symbol.name)
+            .collect::<Vec<_>>();
+        routes.sort();
+        assert_eq!(routes, ["GET //api//items", "GET //api//items//detail"]);
+    }
+
+    #[test]
+    fn fastapi_resolves_router_reexports_through_python_package_initializers() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join("pkg")).unwrap();
+        fs::write(
+            temp.path().join("pkg/routes.py"),
+            "from fastapi import APIRouter\n\
+             router = APIRouter(prefix='/pkg')\n\
+             @router.get('/route')\n\
+             def route(): return True\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("pkg/__init__.py"),
+            "from .routes import router\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("main.py"),
+            "from fastapi import FastAPI\n\
+             from pkg import router\n\
+             app = FastAPI()\n\
+             app.include_router(router)\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let routes = engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .into_iter()
+            .filter(|symbol| symbol.kind == crate::model::SymbolKind::Route)
+            .map(|symbol| symbol.name)
+            .collect::<Vec<_>>();
+        assert_eq!(routes, ["GET /pkg/route"]);
+    }
+
+    #[test]
+    fn fastapi_composes_imported_only_mounts_and_decorators_through_proven_declarations() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("application.py"),
+            "from fastapi import FastAPI\napp = FastAPI()\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("routes.py"),
+            "from fastapi import APIRouter\n\
+             router = APIRouter(prefix='/items')\n\
+             @router.get('/base')\n\
+             def base(): return True\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("mounts.py"),
+            "from application import app\n\
+             from routes import router\n\
+             app.include_router(router, prefix='/api')\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("extra.py"),
+            "from routes import router\n\
+             @router.post('/extra')\n\
+             def extra(): return True\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("lookalike.py"),
+            "app = object()\n\
+             router = object()\n\
+             @router.get('/spoof')\n\
+             def spoof(): return False\n\
+             app.include_router(router)\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("spoof_mounts.py"),
+            "from lookalike import app, router\napp.include_router(router)\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let mut routes = engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .into_iter()
+            .filter(|symbol| symbol.kind == crate::model::SymbolKind::Route)
+            .map(|symbol| symbol.name)
+            .collect::<Vec<_>>();
+        routes.sort();
+        assert_eq!(routes, ["GET /api/items/base", "POST /api/items/extra"]);
+        for route_name in routes {
+            let route = engine
+                .search(&route_name, 10)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.name == route_name)
+                .unwrap()
+                .symbol;
+            let callees = engine.callees(&route.id).unwrap();
+            assert_eq!(callees.len(), 1);
+            assert_eq!(callees[0].1.provenance, "framework/fastapi-route");
+            assert_eq!(callees[0].1.confidence, 0.995);
+        }
     }
 
     #[test]

@@ -1,8 +1,9 @@
 use crate::model::{
     ArkuiBuilderDeclarationFact, ArkuiBuilderParamAssignmentFact, ArkuiBuilderParamDeclarationFact,
     ArkuiBuilderParamInvocationFact, DynamicEventFact, EventAction, EventChannel, Evidence,
-    FileFacts, Language, LiteralBindingFact, ModuleExportFact, Relationship, RelationshipKind,
-    SourceSpan, Symbol, SymbolKind, UnresolvedCall, UnresolvedReference,
+    FastApiAliasFact, FastApiFactoryFact, FastApiMountFact, FastApiRouteFact, FastApiRouterFact,
+    FastApiRouterRef, FileFacts, Language, LiteralBindingFact, ModuleExportFact, Relationship,
+    RelationshipKind, SourceSpan, Symbol, SymbolKind, UnresolvedCall, UnresolvedReference,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -4693,113 +4694,806 @@ fn collect_javascript_registrations(node: Node<'_>, source: &[u8], facts: &mut F
     }
 }
 
-fn collect_fastapi_routes(node: Node<'_>, source: &[u8], facts: &mut FileFacts) {
-    if node.kind() == "decorated_definition" {
-        enrich_fastapi_definition(node, source, facts);
+fn collect_fastapi_routes(root: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+    let imports = fastapi_imports(root, source);
+    let mut assignment_counts = HashMap::new();
+    collect_python_assignment_counts(root, source, None, None, &mut assignment_counts);
+    facts.fastapi.aliases.extend(
+        imports
+            .iter()
+            .filter(|(binding, (module, imported))| {
+                !imported.is_empty()
+                    && module != "fastapi"
+                    && !assignment_counts.contains_key(*binding)
+            })
+            .map(|(binding, (module, imported))| FastApiAliasFact {
+                name: binding.clone(),
+                router: FastApiRouterRef {
+                    target_file_hint: Some(module.clone()),
+                    name: imported.clone(),
+                    factory: false,
+                },
+            }),
+    );
+    let mut constructors = imports
+        .iter()
+        .filter(|(_, (module, name))| {
+            module == "fastapi" && matches!(name.as_str(), "FastAPI" | "APIRouter")
+        })
+        .map(|(binding, (_, name))| (binding.clone(), name.clone()))
+        .chain(
+            imports
+                .iter()
+                .filter(|(_, (module, name))| module == "fastapi" && name.is_empty())
+                .flat_map(|(binding, _)| {
+                    ["FastAPI", "APIRouter"]
+                        .into_iter()
+                        .map(move |name| (format!("{binding}.{name}"), name.to_owned()))
+                }),
+        )
+        .collect::<HashMap<_, _>>();
+    constructors.retain(|binding, _| {
+        let root_binding = binding.split('.').next().unwrap_or(binding);
+        !assignment_counts.contains_key(root_binding)
+    });
+    let mut instances = HashMap::new();
+    collect_fastapi_declarations(
+        root,
+        source,
+        &constructors,
+        &imports,
+        &assignment_counts,
+        None,
+        None,
+        facts,
+        &mut instances,
+    );
+    let router_counts =
+        facts
+            .fastapi
+            .routers
+            .iter()
+            .fold(HashMap::<String, usize>::new(), |mut counts, router| {
+                *counts.entry(router.name.clone()).or_default() += 1;
+                counts
+            });
+    facts
+        .fastapi
+        .routers
+        .retain(|router| router_counts.get(&router.name) == Some(&1));
+    collect_fastapi_factories(
+        root,
+        source,
+        &imports,
+        &instances,
+        &assignment_counts,
+        None,
+        facts,
+    );
+    collect_fastapi_mounts_and_routes(
+        root,
+        source,
+        &imports,
+        &instances,
+        &assignment_counts,
+        None,
+        None,
+        facts,
+    );
+}
+
+type PythonImports = HashMap<String, (String, String)>;
+
+fn fastapi_imports(root: Node<'_>, source: &[u8]) -> PythonImports {
+    let mut imports = HashMap::new();
+    collect_python_imports(root, source, &mut imports);
+    imports
+}
+
+fn collect_python_imports(node: Node<'_>, source: &[u8], imports: &mut PythonImports) {
+    if matches!(node.kind(), "function_definition" | "class_definition") {
+        return;
+    }
+    let statement = text(node, source);
+    if node.kind() == "import_from_statement" {
+        if let Some(body) = statement.trim().strip_prefix("from ") {
+            if let Some((module, names)) = body.split_once(" import ") {
+                for item in names.trim_matches(['(', ')']).split(',') {
+                    let words = item.split_whitespace().collect::<Vec<_>>();
+                    let (name, binding) = match words.as_slice() {
+                        [name] => (*name, *name),
+                        [name, "as", binding] => (*name, *binding),
+                        _ => continue,
+                    };
+                    imports.insert(
+                        binding.trim().to_owned(),
+                        (module.trim().to_owned(), name.trim().to_owned()),
+                    );
+                }
+            }
+        }
+        return;
+    }
+    if node.kind() == "import_statement" {
+        if let Some(body) = statement.trim().strip_prefix("import ") {
+            for item in body.split(',') {
+                let words = item.split_whitespace().collect::<Vec<_>>();
+                let (module, binding) = match words.as_slice() {
+                    [module] => (*module, module.split('.').next().unwrap_or(module)),
+                    [module, "as", binding] => (*module, *binding),
+                    _ => continue,
+                };
+                imports.insert(
+                    binding.trim().to_owned(),
+                    (module.trim().to_owned(), String::new()),
+                );
+            }
+        }
         return;
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        collect_fastapi_routes(child, source, facts);
+        collect_python_imports(child, source, imports);
     }
 }
 
-fn enrich_fastapi_definition(definition: Node<'_>, source: &[u8], facts: &mut FileFacts) {
-    let mut cursor = definition.walk();
-    let children = definition.named_children(&mut cursor).collect::<Vec<_>>();
-    let Some(handler) = children
-        .iter()
-        .copied()
-        .find(|child| child.kind() == "function_definition")
-    else {
-        return;
+fn collect_python_assignment_counts(
+    node: Node<'_>,
+    source: &[u8],
+    scope: Option<&str>,
+    class_name: Option<&str>,
+    counts: &mut HashMap<String, usize>,
+) {
+    if matches!(node.kind(), "function_definition" | "class_definition") {
+        if let Some(name) = node.child_by_field_name("name") {
+            let binding = python_binding_key(scope, class_name, &text(name, source));
+            *counts.entry(binding).or_default() += 1;
+        }
+    }
+    let next_scope = python_lexical_scope(node, source, scope);
+    let next_class = if node.kind() == "class_definition" {
+        next_scope.clone()
+    } else {
+        class_name.map(str::to_owned)
     };
-    let Some(handler_name) = handler
+    if node.kind() == "function_definition" {
+        if let Some(parameters) = node.child_by_field_name("parameters") {
+            collect_python_bind_target(
+                parameters,
+                source,
+                next_scope.as_deref(),
+                next_class.as_deref(),
+                counts,
+            );
+        }
+    }
+    let target = match node.kind() {
+        "assignment" | "augmented_assignment" | "annotated_assignment" => {
+            node.child_by_field_name("left")
+        }
+        "named_expression" => node.child_by_field_name("name"),
+        "for_statement" => node.child_by_field_name("left"),
+        "with_item" | "except_clause" => node.child_by_field_name("alias"),
+        _ => None,
+    };
+    if let Some(target) = target {
+        collect_python_bind_target(
+            target,
+            source,
+            next_scope.as_deref(),
+            next_class.as_deref(),
+            counts,
+        );
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_python_assignment_counts(
+            child,
+            source,
+            next_scope.as_deref(),
+            next_class.as_deref(),
+            counts,
+        );
+    }
+}
+
+fn collect_python_bind_target(
+    node: Node<'_>,
+    source: &[u8],
+    scope: Option<&str>,
+    class_name: Option<&str>,
+    counts: &mut HashMap<String, usize>,
+) {
+    if node.kind() == "attribute" {
+        let binding = text(node, source);
+        if binding.starts_with("self.") {
+            let binding = python_binding_key(scope, class_name, &binding);
+            *counts.entry(binding).or_default() += 1;
+        }
+        return;
+    }
+    if node.kind() == "identifier" {
+        let binding = python_binding_key(scope, class_name, &text(node, source));
+        *counts.entry(binding).or_default() += 1;
+        return;
+    }
+    if matches!(
+        node.kind(),
+        "type" | "type_parameter" | "default_parameter" | "typed_default_parameter"
+    ) {
+        if let Some(name) = node.child_by_field_name("name") {
+            collect_python_bind_target(name, source, scope, class_name, counts);
+        }
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_python_bind_target(child, source, scope, class_name, counts);
+    }
+}
+
+fn python_binding_key(scope: Option<&str>, class_name: Option<&str>, binding: &str) -> String {
+    if binding.starts_with("self.") {
+        return class_name
+            .map(|class| format!("{class}::{binding}"))
+            .unwrap_or_else(|| binding.to_owned());
+    }
+    python_scoped_binding(scope, binding)
+}
+
+fn python_lexical_scope(node: Node<'_>, source: &[u8], parent: Option<&str>) -> Option<String> {
+    if !matches!(node.kind(), "function_definition" | "class_definition") {
+        return parent.map(str::to_owned);
+    }
+    let name = node
         .child_by_field_name("name")
-        .map(|name| text(name, source))
-    else {
-        return;
+        .map(|name| text(name, source))?;
+    Some(match parent {
+        Some(parent) => format!("{parent}.{name}"),
+        None => name,
+    })
+}
+
+fn python_scoped_binding(scope: Option<&str>, binding: &str) -> String {
+    match scope {
+        Some(scope) if !binding.starts_with("self.") => format!("{scope}::{binding}"),
+        _ => binding.to_owned(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_fastapi_declarations(
+    node: Node<'_>,
+    source: &[u8],
+    constructors: &HashMap<String, String>,
+    imports: &PythonImports,
+    assignment_counts: &HashMap<String, usize>,
+    class_name: Option<&str>,
+    scope: Option<&str>,
+    facts: &mut FileFacts,
+    instances: &mut HashMap<String, FastApiRouterRef>,
+) {
+    let next_scope = python_lexical_scope(node, source, scope);
+    let next_class = if node.kind() == "class_definition" {
+        next_scope.clone()
+    } else {
+        class_name.map(str::to_owned)
     };
-    for decorator in children
+    if node.kind() == "assignment" {
+        let left = node.child_by_field_name("left").map(|n| text(n, source));
+        let right = node.child_by_field_name("right");
+        if let (Some(left), Some(right)) = (left, right) {
+            if let Some(call) = (right.kind() == "call").then_some(right) {
+                if let Some(function) = call.child_by_field_name("function") {
+                    let constructor = text(function, source);
+                    let scoped_left = python_scoped_binding(next_scope.as_deref(), &left);
+                    let binding_key =
+                        python_binding_key(next_scope.as_deref(), next_class.as_deref(), &left);
+                    if assignment_counts.get(&binding_key) == Some(&1) {
+                        if let Some(kind) = constructors.get(&constructor) {
+                            let name = if left == "self.router" {
+                                next_class
+                                    .as_ref()
+                                    .map(|class| format!("{class}.router"))
+                                    .unwrap_or(left.clone())
+                            } else {
+                                scoped_left.clone()
+                            };
+                            let prefix = if kind == "APIRouter" {
+                                let Ok(prefix) =
+                                    python_optional_literal_keyword(call, "prefix", source)
+                                else {
+                                    return;
+                                };
+                                prefix.unwrap_or_default()
+                            } else {
+                                String::new()
+                            };
+                            if !prefix.is_empty()
+                                && (!prefix.starts_with('/') || prefix.ends_with('/'))
+                            {
+                                return;
+                            }
+                            facts.fastapi.routers.push(FastApiRouterFact {
+                                name,
+                                prefix,
+                                application: kind == "FastAPI",
+                            });
+                        } else if !left.contains('.') {
+                            if let Some(class) = python_constructed_class(function, source, imports)
+                            {
+                                instances.insert(
+                                    scoped_left,
+                                    FastApiRouterRef {
+                                        target_file_hint: class.0,
+                                        name: format!("{}.router", class.1),
+                                        factory: false,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_fastapi_declarations(
+            child,
+            source,
+            constructors,
+            imports,
+            assignment_counts,
+            next_class.as_deref(),
+            next_scope.as_deref(),
+            facts,
+            instances,
+        );
+    }
+}
+
+fn python_constructed_class(
+    function: Node<'_>,
+    source: &[u8],
+    imports: &PythonImports,
+) -> Option<(Option<String>, String)> {
+    let expression = text(function, source);
+    if expression.contains('.') {
+        let (module, member) = expression.split_once('.')?;
+        let (hint, imported) = imports.get(module)?;
+        if !imported.is_empty() {
+            return None;
+        }
+        return Some((Some(hint.clone()), member.to_owned()));
+    }
+    if let Some((hint, imported)) = imports.get(&expression) {
+        return Some((Some(hint.clone()), imported.clone()));
+    }
+    Some((None, expression))
+}
+
+fn collect_fastapi_factories(
+    node: Node<'_>,
+    source: &[u8],
+    imports: &PythonImports,
+    instances: &HashMap<String, FastApiRouterRef>,
+    assignment_counts: &HashMap<String, usize>,
+    scope: Option<&str>,
+    facts: &mut FileFacts,
+) {
+    if node.kind() == "function_definition" {
+        if let Some(name) = node.child_by_field_name("name").map(|n| text(n, source)) {
+            let function_scope = python_lexical_scope(node, source, scope);
+            if let Some(returned) = python_proven_router_return(
+                node,
+                source,
+                function_scope.as_deref(),
+                imports,
+                instances,
+                assignment_counts,
+            ) {
+                {
+                    let name = python_scoped_binding(scope, &name);
+                    facts.fastapi.factories.push(FastApiFactoryFact {
+                        name,
+                        router: returned,
+                    });
+                }
+            }
+        }
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_fastapi_factories(
+            child,
+            source,
+            imports,
+            instances,
+            assignment_counts,
+            scope,
+            facts,
+        );
+    }
+}
+
+fn python_proven_router_return(
+    node: Node<'_>,
+    source: &[u8],
+    scope: Option<&str>,
+    imports: &PythonImports,
+    instances: &HashMap<String, FastApiRouterRef>,
+    assignment_counts: &HashMap<String, usize>,
+) -> Option<FastApiRouterRef> {
+    let body = node.child_by_field_name("body")?;
+    let statement = body.named_child(body.named_child_count().checked_sub(1)?)?;
+    if statement.kind() != "return_statement" {
+        return None;
+    }
+    let mut returns = Vec::new();
+    collect_python_returns(body, source, &mut returns);
+    let mut resolved = returns.into_iter().map(|returned| {
+        fastapi_router_reference(
+            &returned,
+            None,
+            scope,
+            imports,
+            instances,
+            assignment_counts,
+        )
+    });
+    let first = resolved.next()??;
+    resolved
+        .all(|candidate| {
+            candidate.is_some_and(|candidate| {
+                candidate.target_file_hint == first.target_file_hint
+                    && candidate.name == first.name
+                    && candidate.factory == first.factory
+            })
+        })
+        .then_some(first)
+}
+
+fn collect_python_returns(node: Node<'_>, source: &[u8], returns: &mut Vec<String>) {
+    if node.kind() == "return_statement" {
+        if let Some(value) = node.named_child(0) {
+            returns.push(text(value, source));
+        } else {
+            returns.push(String::new());
+        }
+        return;
+    }
+    if matches!(
+        node.kind(),
+        "function_definition" | "class_definition" | "lambda"
+    ) {
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_python_returns(child, source, returns);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_fastapi_mounts_and_routes(
+    node: Node<'_>,
+    source: &[u8],
+    imports: &PythonImports,
+    instances: &HashMap<String, FastApiRouterRef>,
+    assignment_counts: &HashMap<String, usize>,
+    class_name: Option<&str>,
+    scope: Option<&str>,
+    facts: &mut FileFacts,
+) {
+    let next_scope = python_lexical_scope(node, source, scope);
+    let next_class = if node.kind() == "class_definition" {
+        next_scope.clone()
+    } else {
+        class_name.map(str::to_owned)
+    };
+    if node.kind() == "call" {
+        if let Some(function) = node.child_by_field_name("function") {
+            if member_method(function, source).as_deref() == Some("include_router") {
+                if let Some(receiver) = fastapi_member_receiver(function, source) {
+                    let argument = python_call_argument(node, "router", source);
+                    if let (Some(parent), Some(child)) = (
+                        fastapi_router_reference(
+                            &receiver,
+                            next_class.as_deref(),
+                            next_scope.as_deref(),
+                            imports,
+                            instances,
+                            assignment_counts,
+                        ),
+                        argument.and_then(|argument| {
+                            let value = if argument.kind() == "keyword_argument" {
+                                argument.child_by_field_name("value")?
+                            } else {
+                                argument
+                            };
+                            fastapi_router_reference(
+                                &text(value, source),
+                                next_class.as_deref(),
+                                next_scope.as_deref(),
+                                imports,
+                                instances,
+                                assignment_counts,
+                            )
+                        }),
+                    ) {
+                        let Ok(prefix) = python_optional_literal_keyword(node, "prefix", source)
+                        else {
+                            return;
+                        };
+                        if prefix.as_deref().is_some_and(|prefix| {
+                            !prefix.is_empty()
+                                && (!prefix.starts_with('/') || prefix.ends_with('/'))
+                        }) {
+                            return;
+                        }
+                        facts.fastapi.mounts.push(FastApiMountFact {
+                            parent,
+                            child,
+                            prefix: prefix.unwrap_or_default(),
+                            line: node.start_position().row + 1,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    if node.kind() == "decorated_definition" {
+        let mut cursor = node.walk();
+        let children = node.named_children(&mut cursor).collect::<Vec<_>>();
+        if let Some(handler) = children
+            .iter()
+            .find(|child| child.kind() == "function_definition")
+        {
+            if let Some(handler_name) = handler
+                .child_by_field_name("name")
+                .map(|name| text(name, source))
+            {
+                let handler_id = facts
+                    .symbols
+                    .iter()
+                    .find(|symbol| {
+                        symbol.name == handler_name && symbol.start_byte == handler.start_byte()
+                    })
+                    .map(|symbol| symbol.id.clone());
+                for decorator in children.iter().filter(|child| child.kind() == "decorator") {
+                    let Some(call) = first_descendant_of_kind(*decorator, "call") else {
+                        continue;
+                    };
+                    let Some(function) = call.child_by_field_name("function") else {
+                        continue;
+                    };
+                    let Some(method) = member_method(function, source).filter(|method| {
+                        matches!(
+                            method.as_str(),
+                            "get"
+                                | "post"
+                                | "put"
+                                | "patch"
+                                | "delete"
+                                | "options"
+                                | "head"
+                                | "trace"
+                                | "websocket"
+                        )
+                    }) else {
+                        continue;
+                    };
+                    let Some(receiver) = fastapi_member_receiver(function, source) else {
+                        continue;
+                    };
+                    let Some(router) = fastapi_router_reference(
+                        &receiver,
+                        next_class.as_deref(),
+                        next_scope.as_deref(),
+                        imports,
+                        instances,
+                        assignment_counts,
+                    ) else {
+                        continue;
+                    };
+                    let Some(arguments) = call.child_by_field_name("arguments") else {
+                        continue;
+                    };
+                    let Some(handler_id) = handler_id.clone() else {
+                        continue;
+                    };
+                    let mut argument_cursor = arguments.walk();
+                    let Some(path) = arguments
+                        .named_children(&mut argument_cursor)
+                        .next()
+                        .and_then(|argument| string_literal(argument, source))
+                    else {
+                        continue;
+                    };
+                    if !path.is_empty() && !path.starts_with('/') {
+                        continue;
+                    }
+                    facts.fastapi.routes.push(FastApiRouteFact {
+                        router,
+                        verb: if method == "websocket" {
+                            "WEBSOCKET".to_owned()
+                        } else {
+                            method.to_ascii_uppercase()
+                        },
+                        path,
+                        handler_id,
+                        handler_name: handler_name.clone(),
+                        start_byte: decorator.start_byte(),
+                        end_byte: decorator.end_byte(),
+                        line: decorator.start_position().row + 1,
+                        end_line: decorator.end_position().row + 1,
+                    });
+                }
+            }
+        }
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_fastapi_mounts_and_routes(
+            child,
+            source,
+            imports,
+            instances,
+            assignment_counts,
+            next_class.as_deref(),
+            next_scope.as_deref(),
+            facts,
+        );
+    }
+}
+
+fn python_call_argument<'tree>(
+    call: Node<'tree>,
+    keyword: &str,
+    source: &[u8],
+) -> Option<Node<'tree>> {
+    let arguments = call.child_by_field_name("arguments")?;
+    let mut cursor = arguments.walk();
+    let children = arguments.named_children(&mut cursor).collect::<Vec<_>>();
+    children
         .iter()
-        .copied()
-        .filter(|child| child.kind() == "decorator")
-    {
-        let Some(call) = first_descendant_of_kind(decorator, "call") else {
-            continue;
-        };
-        let Some(function) = call.child_by_field_name("function") else {
-            continue;
-        };
-        let Some(method) = member_method(function, source) else {
-            continue;
-        };
-        let Some(receiver) = member_receiver(function, source) else {
-            continue;
-        };
-        if !matches!(receiver.as_str(), "app" | "router")
-            || !matches!(
-                method.as_str(),
-                "get" | "post" | "put" | "patch" | "delete" | "options" | "head"
-            )
+        .find(|argument| {
+            argument.kind() == "keyword_argument"
+                && argument
+                    .child_by_field_name("name")
+                    .is_some_and(|name| text(name, source) == keyword)
+        })
+        .and_then(|argument| argument.child_by_field_name("value"))
+        .or_else(|| {
+            children
+                .into_iter()
+                .find(|argument| argument.kind() != "keyword_argument")
+        })
+}
+
+fn fastapi_router_reference(
+    expression: &str,
+    class_name: Option<&str>,
+    scope: Option<&str>,
+    imports: &PythonImports,
+    instances: &HashMap<String, FastApiRouterRef>,
+    _assignment_counts: &HashMap<String, usize>,
+) -> Option<FastApiRouterRef> {
+    let expression = expression.trim();
+    if expression == "self.router" {
+        return class_name.map(|class| FastApiRouterRef {
+            target_file_hint: None,
+            name: format!("{class}.router"),
+            factory: false,
+        });
+    }
+    if let Some(instance) = expression.strip_suffix(".router").and_then(|name| {
+        instances
+            .get(&python_scoped_binding(scope, name))
+            .or_else(|| instances.get(name))
+    }) {
+        return Some(instance.clone());
+    }
+    if let Some(factory) = python_call_callee(expression) {
+        let mut reference = fastapi_router_reference(
+            factory,
+            class_name,
+            scope,
+            imports,
+            instances,
+            _assignment_counts,
+        )?;
+        reference.factory = true;
+        return Some(reference);
+    }
+    if let Some((root, member)) = expression.split_once('.') {
+        let (hint, imported) = imports.get(root)?;
+        return Some(FastApiRouterRef {
+            target_file_hint: Some(if imported.is_empty() {
+                hint.clone()
+            } else if hint.ends_with('.') {
+                format!("{hint}{imported}")
+            } else {
+                format!("{hint}.{imported}")
+            }),
+            name: member.to_owned(),
+            factory: false,
+        });
+    }
+    let scoped_expression = python_scoped_binding(scope, expression);
+    if _assignment_counts.contains_key(&scoped_expression) {
+        return Some(FastApiRouterRef {
+            target_file_hint: None,
+            name: scoped_expression,
+            factory: false,
+        });
+    }
+    if let Some((hint, imported)) = imports.get(expression) {
+        if imported.is_empty() || matches!(hint.as_str(), "fastapi") {
+            return None;
+        }
+        return Some(FastApiRouterRef {
+            target_file_hint: Some(hint.clone()),
+            name: imported.clone(),
+            factory: false,
+        });
+    }
+    (!expression.is_empty() && !expression.contains(['(', ')', '[', ']'])).then(|| {
+        FastApiRouterRef {
+            target_file_hint: None,
+            name: expression.to_owned(),
+            factory: false,
+        }
+    })
+}
+
+fn python_call_callee(expression: &str) -> Option<&str> {
+    let expression = expression.trim();
+    let (callee, _) = expression.split_once('(')?;
+    let callee = callee.trim();
+    (!callee.is_empty()
+        && expression.ends_with(')')
+        && callee
+            .chars()
+            .all(|character| character == '.' || character == '_' || character.is_alphanumeric()))
+    .then_some(callee)
+}
+
+fn python_optional_literal_keyword(
+    call: Node<'_>,
+    name: &str,
+    source: &[u8],
+) -> Result<Option<String>, ()> {
+    let Some(arguments) = call.child_by_field_name("arguments") else {
+        return Ok(None);
+    };
+    let mut cursor = arguments.walk();
+    for argument in arguments.named_children(&mut cursor) {
+        if argument.kind() != "keyword_argument"
+            || argument
+                .child_by_field_name("name")
+                .is_none_or(|node| text(node, source) != name)
         {
             continue;
         }
-        let Some(arguments) = call.child_by_field_name("arguments") else {
-            continue;
-        };
-        let mut argument_cursor = arguments.walk();
-        let Some(path_argument) = arguments.named_children(&mut argument_cursor).next() else {
-            continue;
-        };
-        let Some(mut path) = string_literal(path_argument, source) else {
-            continue;
-        };
-        if path.is_empty() {
-            path.push('/');
-        }
-        let verb = method.to_ascii_uppercase();
-        let name = format!("{verb} {path}");
-        let route = Symbol::new_disambiguated(
-            facts.language,
-            SymbolKind::Route,
-            &name,
-            &name,
-            &facts.path,
-            span(decorator),
-            &format!("fastapi|{verb}|{path}|{handler_name}"),
-        );
-        let file_symbol = facts.symbols.first().expect("file symbol");
-        facts.relationships.push(Relationship {
-            source_id: file_symbol.id.clone(),
-            target_id: route.id.clone(),
-            kind: RelationshipKind::Contains,
-            evidence: Evidence::new(
-                "framework/fastapi-route",
-                1.0,
-                format!("{name} is registered in {}", facts.path),
-                &facts.path,
-                decorator.start_position().row + 1,
-            ),
-        });
-        facts.unresolved_calls.push(UnresolvedCall {
-            caller_id: route.id.clone(),
-            fallback_caller_id: None,
-            callee_name: handler_name.clone(),
-            receiver_binding: None,
-            receiver_type: None,
-            receiver_call_start_byte: None,
-            target_file_hint: None,
-            provenance: "framework/fastapi-route".to_owned(),
-            confidence: 0.99,
-            explanation: format!("FastAPI route {name} decorates handler {handler_name}"),
-            resolvable: true,
-            file: facts.path.clone(),
-            line: decorator.start_position().row + 1,
-            start_byte: decorator.start_byte(),
-        });
-        facts.symbols.push(route);
+        let value = argument.child_by_field_name("value").ok_or(())?;
+        return string_literal(value, source).map(Some).ok_or(());
     }
+    Ok(None)
+}
+
+fn fastapi_member_receiver(function: Node<'_>, source: &[u8]) -> Option<String> {
+    matches!(function.kind(), "attribute")
+        .then(|| {
+            function
+                .child_by_field_name("object")
+                .or_else(|| function.child_by_field_name("value"))
+        })
+        .flatten()
+        .map(|receiver| text(receiver, source))
 }
 
 fn collect_django_routes(node: Node<'_>, source: &[u8], facts: &mut FileFacts) {

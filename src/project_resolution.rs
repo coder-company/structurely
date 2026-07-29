@@ -167,6 +167,42 @@ impl ProjectResolutionContext {
                     format!("{} through project import resolution", call.explanation);
             }
         }
+        for reference in facts
+            .fastapi
+            .aliases
+            .iter_mut()
+            .map(|fact| &mut fact.router)
+            .chain(
+                facts
+                    .fastapi
+                    .factories
+                    .iter_mut()
+                    .map(|fact| &mut fact.router),
+            )
+            .chain(
+                facts
+                    .fastapi
+                    .mounts
+                    .iter_mut()
+                    .flat_map(|fact| [&mut fact.parent, &mut fact.child]),
+            )
+            .chain(facts.fastapi.routes.iter_mut().map(|fact| &mut fact.router))
+        {
+            let Some(hint) = reference.target_file_hint.as_deref() else {
+                continue;
+            };
+            let python_hint = (facts.language == crate::model::Language::Python)
+                .then(|| python_relative_import_hint(hint));
+            let hint = python_hint.as_deref().unwrap_or(hint);
+            if let Some((resolved, _)) = self.resolve_import_from(&facts.path, hint).or_else(|| {
+                (facts.language == crate::model::Language::Python && !hint.starts_with('.'))
+                    .then(|| canonical_source_hint(&self.root, Path::new(&hint.replace('.', "/"))))
+                    .flatten()
+                    .map(|resolved| (resolved, "python/project-import"))
+            }) {
+                reference.target_file_hint = Some(resolved);
+            }
+        }
     }
 
     fn harmony_scope_for(&self, file: &str) -> String {
@@ -804,7 +840,7 @@ fn normalize_relative_checked(path: &Path) -> Option<PathBuf> {
 fn canonical_source_hint(root: &Path, relative: &Path) -> Option<String> {
     const EXTENSIONS: &[&str] = &[
         "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts", "vue", "svelte", "astro", "ets",
-        "json", "rs",
+        "json", "rs", "py", "pyi",
     ];
     let direct = root.join(relative);
     if direct.is_file() {
@@ -816,6 +852,12 @@ fn canonical_source_hint(root: &Path, relative: &Path) -> Option<String> {
             return Some(normalize_source_hint(&candidate));
         }
     }
+    for extension in ["py", "pyi"] {
+        let candidate = relative.join(format!("__init__.{extension}"));
+        if root.join(&candidate).is_file() {
+            return Some(normalize_source_hint(&candidate));
+        }
+    }
     for extension in EXTENSIONS {
         let candidate = relative.join(format!("index.{extension}"));
         if root.join(&candidate).is_file() {
@@ -823,6 +865,17 @@ fn canonical_source_hint(root: &Path, relative: &Path) -> Option<String> {
         }
     }
     None
+}
+
+fn python_relative_import_hint(module: &str) -> String {
+    let dots = module.bytes().take_while(|byte| *byte == b'.').count();
+    if dots == 0 {
+        return module.to_owned();
+    }
+    let mut hint = "../".repeat(dots.saturating_sub(1));
+    hint.push_str("./");
+    hint.push_str(module[dots..].replace('.', "/").as_str());
+    hint
 }
 
 fn normalize_path(path: &Path) -> String {
