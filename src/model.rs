@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path};
 
-pub const GRAPH_MODEL_VERSION: u32 = 36;
+pub const GRAPH_MODEL_VERSION: u32 = 37;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -288,7 +288,6 @@ pub(crate) struct CallbackArgumentFact {
     pub argument_index: usize,
     pub target_name: String,
     pub target_qualified_hint: Option<String>,
-    pub file: String,
     pub line: usize,
 }
 

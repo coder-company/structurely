@@ -1019,7 +1019,6 @@ fn collect_callback_arguments(
             argument_index,
             target_name,
             target_qualified_hint,
-            file: context.file.to_owned(),
             line: call.start_position().row + 1,
         });
     }

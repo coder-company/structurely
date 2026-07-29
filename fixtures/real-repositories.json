@@ -375,18 +375,18 @@
         },
         {
           "command": "callees",
-          "query": "ResourceManager.getAppIconWithCache",
-          "file": "code/SystemFeature/ApplicationModels/Launcher/base/src/main/ets/default/manager/ResourceManager.ts",
+          "query": "RequestDownload.downloadFile",
+          "file": "code/BasicFeature/Connectivity/UploadAndDownLoad/features/uploadanddownload/src/main/ets/download/RequestDownload.ets",
           "contains": [
-            "\"qualified_name\": \"DeleteDialog.iconLoadCallback\"",
+            "\"qualified_name\": \"Download.downloadFileCallback\"",
             "\"provenance\": \"dynamic/callback-argument\""
           ],
           "recordContains": [
-            "\"qualified_name\": \"DeleteDialog.iconLoadCallback\"",
-            "code/SystemFeature/ApplicationModels/Launcher/base/src/main/ets/default/components/DeleteDialog.ets",
+            "\"qualified_name\": \"Download.downloadFileCallback\"",
+            "code/BasicFeature/Connectivity/UploadAndDownLoad/entry/src/main/ets/pages/Download.ets",
             "\"provenance\": \"dynamic/callback-argument\"",
             "\"confidence\": 0.96",
-            "\"line\": 41"
+            "\"line\": 401"
           ]
         }
       ]

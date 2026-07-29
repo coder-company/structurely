@@ -177,19 +177,10 @@ impl Store {
                 parameter_index INTEGER NOT NULL,
                 PRIMARY KEY(file_id,owner_public_id,parameter_index)
             );
-            CREATE TABLE IF NOT EXISTS callback_arguments (
-                id INTEGER PRIMARY KEY,
-                file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-                caller_public_id TEXT NOT NULL,
-                callee_name TEXT NOT NULL,
-                argument_index INTEGER NOT NULL,
-                target_name TEXT NOT NULL,
-                target_qualified_hint TEXT,
-                evidence_file TEXT NOT NULL,
-                evidence_line INTEGER NOT NULL
+            CREATE TABLE IF NOT EXISTS callback_argument_batches (
+                file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+                payload TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS callback_arguments_call_idx
-                ON callback_arguments(caller_public_id,callee_name,evidence_file,evidence_line);
             CREATE TABLE IF NOT EXISTS dynamic_events (
                 id INTEGER PRIMARY KEY,
                 file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
@@ -321,6 +312,8 @@ impl Store {
             "target_file_hint",
             "TEXT",
         )?;
+        self.connection
+            .execute_batch("DROP TABLE IF EXISTS callback_arguments;")?;
         self.connection.execute(
             "INSERT INTO metadata(key, value) VALUES ('schema_version', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -684,23 +677,26 @@ impl Store {
                 invocation.parameter_index as i64
             ])?;
         }
-        for argument in &file.callback_arguments {
+        if !file.callback_arguments.is_empty() {
+            let arguments = file
+                .callback_arguments
+                .iter()
+                .map(|argument| {
+                    (
+                        argument.caller_id.as_str(),
+                        argument.callee_name.as_str(),
+                        argument.argument_index,
+                        argument.target_name.as_str(),
+                        argument.target_qualified_hint.as_deref(),
+                        argument.line,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let payload = serde_json::to_string(&arguments)?;
             tx.prepare_cached(
-                "INSERT INTO callback_arguments(
-                    file_id,caller_public_id,callee_name,argument_index,target_name,
-                    target_qualified_hint,evidence_file,evidence_line
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                "INSERT INTO callback_argument_batches(file_id,payload) VALUES (?1,?2)",
             )?
-            .execute(params![
-                file_id,
-                argument.caller_id,
-                argument.callee_name,
-                argument.argument_index as i64,
-                argument.target_name,
-                argument.target_qualified_hint,
-                argument.file,
-                argument.line as i64
-            ])?;
+            .execute(params![file_id, payload])?;
         }
         for event in &file.dynamic_events {
             let (channel, target_file_hint, export_name, member_path) = match &event.channel {
@@ -1104,26 +1100,88 @@ impl Store {
             "DELETE FROM relationships WHERE provenance='dynamic/callback-argument'",
             [],
         )?;
+        type StoredCallbackArgument = (String, String, usize, String, Option<String>, usize);
+        let mut arguments = Vec::new();
         let mut statement = tx.prepare(
-            "SELECT a.file_id,a.caller_public_id,a.callee_name,a.argument_index,
-                    a.target_name,a.target_qualified_hint,a.evidence_file,a.evidence_line
-             FROM callback_arguments a
-             ORDER BY a.evidence_file,a.evidence_line,a.id",
+            "SELECT b.file_id,f.path,b.payload
+             FROM callback_argument_batches b
+             JOIN files f ON f.id=b.file_id
+             ORDER BY f.path",
         )?;
-        let arguments = statement
+        for row in statement
             .query_map([], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, i64>(7)? as usize,
                 ))
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        {
+            let payload = serde_json::from_str::<Vec<StoredCallbackArgument>>(&row.2)
+                .with_context(|| format!("decode callback argument observations for {}", row.1))?;
+            arguments.extend(payload.into_iter().map(
+                |(caller, callee, index, target, hint, line)| {
+                    (
+                        row.0,
+                        caller,
+                        callee,
+                        index,
+                        target,
+                        hint,
+                        row.1.clone(),
+                        line,
+                    )
+                },
+            ));
+        }
+        drop(statement);
+
+        let mut resolved_callees =
+            HashMap::<(String, String, usize, String), Vec<(String, String)>>::new();
+        let mut statement = tx.prepare(
+            "SELECT r.source_public_id,r.evidence_file,r.evidence_line,s.name,
+                    r.target_public_id,s.qualified_name
+             FROM relationships r
+             JOIN symbols s ON s.public_id=r.target_public_id
+             WHERE r.kind='calls' AND r.provenance!='dynamic/callback-argument'
+             ORDER BY r.source_public_id,r.evidence_file,r.evidence_line,s.name,
+                      s.qualified_name,r.target_public_id",
+        )?;
+        for row in statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)? as usize,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        {
+            resolved_callees
+                .entry((row.0, row.1, row.2, row.3))
+                .or_default()
+                .push((row.4, row.5));
+        }
+        drop(statement);
+
+        let mut invoked_parameters = HashSet::new();
+        let mut statement = tx.prepare(
+            "SELECT owner_public_id,parameter_index
+             FROM callback_parameter_invocations
+             ORDER BY owner_public_id,parameter_index",
+        )?;
+        for invocation in statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        {
+            invoked_parameters.insert(invocation);
+        }
         drop(statement);
 
         let mut resolved = 0;
@@ -1138,32 +1196,15 @@ impl Store {
             line,
         ) in arguments
         {
-            let mut callee_statement = tx.prepare(
-                "SELECT DISTINCT r.target_public_id,s.qualified_name
-                 FROM relationships r
-                 JOIN symbols s ON s.public_id=r.target_public_id
-                 WHERE r.source_public_id=?1 AND r.evidence_file=?2 AND r.evidence_line=?3
-                   AND s.name=?4 AND r.provenance!='dynamic/callback-argument'
-                 ORDER BY s.qualified_name,r.target_public_id",
-            )?;
-            let callees = callee_statement
-                .query_map(params![caller_id, file, line as i64, callee_name], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let callees = resolved_callees
+                .get(&(caller_id, file.clone(), line, callee_name))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
             if callees.len() != 1 {
                 continue;
             }
             let (callee_id, callee_qualified) = &callees[0];
-            let invokes_parameter = tx.query_row(
-                "SELECT EXISTS(
-                    SELECT 1 FROM callback_parameter_invocations
-                    WHERE owner_public_id=?1 AND parameter_index=?2
-                 )",
-                params![callee_id, argument_index],
-                |row| row.get::<_, bool>(0),
-            )?;
-            if !invokes_parameter {
+            if !invoked_parameters.contains(&(callee_id.clone(), argument_index)) {
                 continue;
             }
 
