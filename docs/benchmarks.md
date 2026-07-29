@@ -48,6 +48,21 @@ The comparator reports speedup ratios and preserves the raw normalized values.
 Semantic precision and recall must be reported separately; faster incorrect
 edges do not satisfy Structurely's acceptance gates.
 
+The accepted inline-callback rerun is recorded under
+[`codegraph-source-intersection-2026-07-29-post-inline-callback`](../benchmarks/codegraph-source-intersection-2026-07-29-post-inline-callback/README.md).
+After replacing repeated whole-graph resolution with targeted deferred
+publication, Structurely is 3.043× faster to index, 9.143× faster at query p50,
+uses 87.92% less peak memory, and produces a 10.00% smaller database. The
+matching
+[`MCP differential`](../benchmarks/differential-mcp-2026-07-29-post-inline-callback/README.md)
+retains 22/22 shared compatibility and 1.0000 usefulness for both engines.
+The pinned
+[`OpenHarmony inline-callback gate`](../benchmarks/openharmony-inline-callback-2026-07-29/README.md)
+passes 15/15 correlated assertions across 6,995 ETS files. Its new assertion
+follows a real inline closure through two cross-file forwarding steps to
+`connectIpc`, and the inventory records 68 direct, four delegated, and 67
+containment relationships.
+
 Checked-in raw comparisons live under `benchmarks/`. The
 [`semantic-2026-07-27`](../benchmarks/semantic-2026-07-27/README.md) run compares
 Structurely with pinned CodeGraph 1.5.0 on the four-file semantic fixture. It is

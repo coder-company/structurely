@@ -92,6 +92,12 @@ those 14/14 assertions after bounded formal delegation and records zero
 complete delegated registrations from 3,412 observations. It is negative
 prevalence evidence, not a fifteenth semantic assertion. Matching differential
 and performance artifacts pin clean optimized commit `23def02`.
+The `benchmarks/openharmony-inline-callback-2026-07-29/` gate adds the fifteenth
+correlated assertion: a real inline closure registered in `Index.test00`
+propagates across `ClientIpc.bindAbi` to the invoking `connectIpc` formal.
+Matching differential and performance artifacts pin clean optimized code
+commit `2ce5c88`; they retain 22/22 shared compatibility and both enforced 2×
+speed thresholds.
 
 The authoritative capability inventory is
 [`codegraph-parity.md`](codegraph-parity.md). A matching command name or schema

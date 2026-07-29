@@ -95,9 +95,8 @@ most sixteen hops, reject cycles, and require all candidates to converge to one
 canonical value. Numeric and string channel identities remain distinct;
 dynamic IDs, mutable exports, reassignment, lexical shadows, ambiguous
 registrations or exports, and cross-application matches fail closed. Named and
-inline callbacks are supported. Constructor-built descriptors,
-transitive callback delegation, and remaining cross-language emitter channels
-are intentionally not yet resolved.
+inline callbacks are supported. Constructor-built descriptors and remaining
+cross-language emitter channels are intentionally not yet resolved.
 
 Direct callback-argument propagation records exact formal and actual argument
 positions and byte-exact callsite identity. It emits an edge only after the
@@ -110,10 +109,27 @@ derived call relationships. Delegated edges carry separate provenance and
 lower confidence. Invocations inside nested closures retain the outer formal
 unless an inner formal shadows it. Forwarding through a crossed closure,
 mutated/default/rest/destructured formals, ambiguous callees, computed members,
-and stored or returned callbacks fail closed. Inline closure actuals remain
-unsupported. Callsite observations are persisted as compact per-file batches;
-the exact resolved-target join map is transaction-local and rebuilt each graph
-epoch.
+and stored or returned callbacks fail closed.
+
+Direct arrow and function-expression actuals in TypeScript, TSX, JavaScript,
+JSX, ArkTS, and the embedded script views of Vue and Svelte receive provisional
+callable identities. A provisional Symbol becomes searchable only after the
+ordinary callee resolves uniquely and the corresponding formal reaches a
+directly invoking terminal owner. Its lexical containment, callback
+registration, and body-call relationships publish in the same transaction.
+Rejected outer callbacks retain their body calls under the nearest declared
+caller but cannot leak nested callback registrations. Nested accepted
+registrations materialize in parser preorder through at most sixteen callback
+owners. IDs survive position, body, and comment-only edits; inserting an
+earlier registration with the same caller, selector, and argument position can
+renumber later ordinal identities.
+
+Callsite observations and provisional identities are persisted as compact
+per-file tuples. The exact resolved-target join map is transaction-local and
+rebuilt each graph epoch. Ordinary call resolution runs once; provisional body
+calls are withheld and then published from that target map under either the
+accepted synthetic caller or the declared fallback. This keeps the callback
+Resolver adapter local and avoids a whole-graph pass per nesting depth.
 
 ArkTS calls through imported singleton values prefer a unique candidate inside
 the caller's Harmony project root before language-wide fallback. This rank

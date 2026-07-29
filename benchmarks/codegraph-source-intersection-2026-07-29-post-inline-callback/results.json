@@ -1,0 +1,109 @@
+{
+  "protocol": {
+    "trials": 5,
+    "query_processes": 20,
+    "query": "CodeGraph",
+    "corpus_files": 441
+  },
+  "structurely": {
+    "fresh_index_wall_samples_ms": [
+      2709.482956,
+      2736.988763,
+      2748.275187,
+      2670.195858,
+      3432.388154
+    ],
+    "fresh_index_wall_p50_ms": 2736.988763,
+    "reported_engine_samples_ms": [
+      2669,
+      2633,
+      2724,
+      2625,
+      3388
+    ],
+    "reported_engine_p50_ms": 2669,
+    "query_samples_us": [
+      37149,
+      49772,
+      45123,
+      41998,
+      38623,
+      47779,
+      44180,
+      34484,
+      41519,
+      36618,
+      33682,
+      32693,
+      33627,
+      35048,
+      34402,
+      41014,
+      35822,
+      32958,
+      32712,
+      33110
+    ],
+    "query_p50_us": 36220.0,
+    "query_p95_us": 49772,
+    "database_bytes": 40009728,
+    "indexed_files": 441,
+    "symbols": 5177,
+    "relationships": 36881,
+    "max_rss_kb": 121380
+  },
+  "codegraph": {
+    "fresh_index_wall_samples_ms": [
+      7244.074781,
+      8329.291969,
+      7961.749291,
+      16933.838976,
+      10907.072392
+    ],
+    "fresh_index_wall_p50_ms": 8329.291969,
+    "reported_engine_samples_ms": [
+      3500,
+      4100,
+      4000,
+      9600,
+      6200
+    ],
+    "reported_engine_p50_ms": 4100,
+    "query_samples_us": [
+      401133,
+      401913,
+      355463,
+      363559,
+      363581,
+      429057,
+      326280,
+      341988,
+      386262,
+      317016,
+      321813,
+      314507,
+      324009,
+      324407,
+      317005,
+      332617,
+      311473,
+      329730,
+      352844,
+      314097
+    ],
+    "query_p50_us": 331173.5,
+    "query_p95_us": 429057,
+    "database_bytes": 44453888,
+    "indexed_files": 441,
+    "nodes": 8957,
+    "edges": 35801,
+    "max_rss_kb": 1004620
+  },
+  "acceptance": {
+    "index_speedup": 3.043232066422627,
+    "query_speedup": 9.143387631143016,
+    "minimum_index_speedup": 2.0,
+    "minimum_query_speedup": 2.0,
+    "passed": true
+  }
+}
