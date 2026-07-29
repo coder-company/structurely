@@ -144,6 +144,12 @@ v56 and materializes all 42 pinned Nest GraphQL resolver handlers across 13
 production files: 18 queries, 11 mutations, six subscriptions, five fields,
 and two federation references. Their route and handler edges add 84 exact
 framework relationships.
+The consolidated `benchmarks/codegraph-current-2026-07-29/` gate pins clean
+v56 against CodeGraph 1.5.0: both pass 22/22 shared scenarios with 1.0000
+usefulness, while Structurely is 2.611× faster to index, 9.491× faster at
+query p50, uses 87.50% less peak memory, and stores a 12.29% smaller database.
+The qualified semantic snapshot has zero additions, removals, or callback
+losses against accepted v51.
 
 The authoritative capability inventory is
 [`codegraph-parity.md`](codegraph-parity.md). A matching command name or schema

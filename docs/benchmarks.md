@@ -328,3 +328,11 @@ materializes all 42 pinned production resolver handlers across 13 files:
 18 queries, 11 mutations, six subscriptions, five fields, and two federation
 references. Their route and exact handler edges produce 84 framework
 relationships in a 4.350-second clean index.
+
+The
+[`current CodeGraph comparison`](../benchmarks/codegraph-current-2026-07-29/README.md)
+then reconfirms 22/22 shared MCP compatibility and 1.0000 usefulness for both
+engines. Structurely is 2.611× faster to index, 9.491× faster at query p50,
+uses 87.50% less peak memory, and has a 12.29% smaller database. Its normalized
+441-file semantic snapshot has zero additions, removals, or callback losses
+against accepted v51.

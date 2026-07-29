@@ -1,0 +1,63 @@
+{
+  "structurely_commit": "edcb16f428fc1027ea4fc6af4c3f9154a1f8657c",
+  "structurely_binary_sha256": "be80ec338f257d50b8b8520f03140412d471ae0987f4d0b98720ff65c2376047",
+  "codegraph": {
+    "version": "1.5.0",
+    "commit": "572d22bfbe82602080e457bec655f72e3314f9ef"
+  },
+  "differential": {
+    "shared_passed": 22,
+    "shared_total": 22,
+    "structurely_extension_passed": 1,
+    "structurely_extension_total": 1,
+    "structurely_usefulness": 1.0,
+    "codegraph_usefulness": 1.0,
+    "structurely_context_characters": 2459,
+    "codegraph_context_characters": 2532,
+    "baseline_matches": true,
+    "raw_sha256": "a9467faf7c76a0746f201d721ecc4c2b0c6f44273b2d3999a78cb270b62d006c"
+  },
+  "performance": {
+    "protocol": {
+      "corpus_files": 441,
+      "trials": 5,
+      "query_processes": 20,
+      "query": "CodeGraph"
+    },
+    "structurely": {
+      "index_wall_p50_ms": 2556.050178,
+      "engine_p50_ms": 2518,
+      "query_p50_us": 32025.0,
+      "query_p95_us": 39710,
+      "database_bytes": 38989824,
+      "max_rss_kib": 130020,
+      "source_symbols": 5177,
+      "resolver_reported_relationships": 34325
+    },
+    "codegraph": {
+      "index_wall_p50_ms": 6673.564658,
+      "engine_p50_ms": 3200,
+      "query_p50_us": 303964.5,
+      "query_p95_us": 317452,
+      "database_bytes": 44453888,
+      "max_rss_kib": 1040492,
+      "nodes": 8957,
+      "edges": 35801
+    },
+    "index_speedup": 2.6108895339534293,
+    "query_p50_speedup": 9.491475409836065,
+    "query_p95_speedup": 7.9942583732057425,
+    "database_reduction_percent": 12.292675650585623,
+    "memory_reduction_percent": 87.50399041991867,
+    "passed": true,
+    "raw_sha256": "ed1abb7bd1fd7f692f9c7f9679a22ffa96c6d0ab572d0014fcb4548842010857"
+  },
+  "semantic_snapshot": {
+    "comparison": "v56 against accepted v51 qualified semantic tuples",
+    "persisted_relationships": 38522,
+    "normalized_added": 0,
+    "normalized_removed": 0,
+    "callback_removed": 0,
+    "database_sha256": "aff66f93a14cd1cc6b3c935f4118f4bd9ce77d8deb10362164807d1df63a361c"
+  }
+}

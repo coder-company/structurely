@@ -7,8 +7,8 @@ behavioral evidence; matching a command or tool name is not enough.
 | Capability | Status | Current evidence | Required parity evidence |
 |---|---|---|---|
 | Stable graph epochs and rollback | Superior | deterministic snapshots and injected rollback tests | preserve while expanding every resolver |
-| Index/query performance | Superior | pinned 441-file benchmark | rerun after each major semantic layer |
-| Core CLI/MCP names and schemas | Compatible (core) | eight handlers, pinned contract fixture, persistent-stdio binary test, and 22-scenario live differential run against identity-verified pinned CodeGraph | pagination and cross-platform suites |
+| Index/query performance | Superior | current pinned 441-file v56 benchmark: 2.611× index, 9.491× query p50, 7.994× query p95, 87.50% less peak memory, 12.29% smaller database | rerun after each major semantic layer |
+| Core CLI/MCP names and schemas | Compatible (core) | eight handlers, pinned contract fixture, persistent-stdio binary test, and current 22/22 live differential run against identity-verified pinned CodeGraph | pagination and cross-platform suites |
 | Explore context usefulness | Compatible (core) | global/per-symbol budgets, exact/corroborated ranking, line-numbered excerpts, omission/staleness disclosure, and a pinned differential flow scoring 1.0000 for both engines | broaden usefulness queries and add blinded large-repo evaluation |
 | Project config and custom extensions | Compatible (core) | `structurely.json`/`codegraph.json`; extension, exclude, include, includeIgnored, precedence and malformed-config tests | differential configuration fixture |
 | TS/JS path aliases | Compatible (core) | JSONC baseUrl/paths, wildcard specificity, target fallback, index/extension canonicalization and escape tests | representative real-repo evidence |
