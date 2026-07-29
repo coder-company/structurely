@@ -54,6 +54,9 @@ SAMPLERATE_LINEAR = f"{SAMPLERATE_BASE}/src/src_linear.c"
 SAMPLERATE_ZOH = f"{SAMPLERATE_BASE}/src/src_zoh.c"
 SAMPLERATE_SINC = f"{SAMPLERATE_BASE}/src/src_sinc.c"
 SAMPLERATE_PUBLIC = f"{SAMPLERATE_BASE}/include/samplerate.h"
+SAMPLERATE_VARISPEED = f"{SAMPLERATE_BASE}/examples/varispeed-play.c"
+SAMPLERATE_CALLBACK_TEST = f"{SAMPLERATE_BASE}/tests/callback_test.c"
+SAMPLERATE_CALLBACK_HANG = f"{SAMPLERATE_BASE}/tests/callback_hang_test.c"
 SAMPLERATE_FILES = (
     SAMPLERATE_COMMON,
     SAMPLERATE_DRIVER,
@@ -61,6 +64,9 @@ SAMPLERATE_FILES = (
     SAMPLERATE_ZOH,
     SAMPLERATE_SINC,
     SAMPLERATE_PUBLIC,
+    SAMPLERATE_VARISPEED,
+    SAMPLERATE_CALLBACK_TEST,
+    SAMPLERATE_CALLBACK_HANG,
 )
 SAMPLERATE_PROCESS_TARGETS = frozenset(
     {
@@ -71,6 +77,14 @@ SAMPLERATE_PROCESS_TARGETS = frozenset(
         "sinc_quad_vari_process",
         "sinc_stereo_vari_process",
         "sinc_mono_vari_process",
+    }
+)
+SAMPLERATE_CALLBACK_TARGETS = frozenset(
+    {
+        "src_input_callback",
+        "test_callback_func",
+        "eos_callback_func",
+        "input_callback",
     }
 )
 
@@ -299,6 +313,35 @@ def evaluate_samplerate(snapshot: dict[str, Any]) -> dict[str, Any]:
             "libsamplerate dispatch crossed an unexpected file boundary: "
             + json.dumps(malformed)
         )
+    callback_read = [
+        (source, target, edge)
+        for source, target, edge in edges
+        if source["qualified_name"] == "src_callback_read"
+    ]
+    callback_targets = {
+        target["qualified_name"] for _, target, _ in callback_read
+    }
+    if callback_targets != SAMPLERATE_CALLBACK_TARGETS:
+        raise RuntimeError(
+            "libsamplerate callback formal-to-field inventory mismatch: "
+            + json.dumps(
+                {
+                    "missing": sorted(
+                        SAMPLERATE_CALLBACK_TARGETS - callback_targets
+                    ),
+                    "unexpected": sorted(
+                        callback_targets - SAMPLERATE_CALLBACK_TARGETS
+                    ),
+                },
+                sort_keys=True,
+            )
+        )
+    if len(callback_read) != 4 or {
+        edge["evidence"]["line"] for _, _, edge in callback_read
+    } != {195}:
+        raise RuntimeError(
+            "expected four src_callback_read edges at line 195"
+        )
     return {
         "checks": {
             "exactSevenProcessTargetFunctions": True,
@@ -307,9 +350,12 @@ def evaluate_samplerate(snapshot: dict[str, Any]) -> dict[str, Any]:
             "qualifiedSourceAndTargetFiles": True,
             "stableNonzeroEvidenceSites": True,
             "noDuplicateEvidenceIdentities": True,
+            "exactFormalToStoredCallbackTargets": True,
         },
         "srcProcessEdges": len(process),
         "srcProcessTargets": sorted(target_names),
+        "callbackReadEdges": len(callback_read),
+        "callbackReadTargets": sorted(callback_targets),
         "allCorpusDispatchEdges": len(edges),
     }
 

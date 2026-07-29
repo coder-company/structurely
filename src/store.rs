@@ -1009,6 +1009,8 @@ impl Store {
             || !file.c_function_pointers.dispatches.is_empty()
             || !file.c_function_pointers.arrays.is_empty()
             || !file.c_function_pointers.array_dispatches.is_empty()
+            || !file.c_function_pointers.formal_storages.is_empty()
+            || !file.c_function_pointers.arguments.is_empty()
             || !file.c_function_pointers.includes.is_empty()
         {
             let payload = serde_json::to_string(&file.c_function_pointers)?;
@@ -2001,8 +2003,36 @@ impl Store {
                 }
                 Some(layout_key)
             };
+        let is_function_pointer_field = |layout_key: &LayoutKey, field_name: &str| {
+            let Some(field) = layouts
+                .get(layout_key)
+                .and_then(|items| items.first())
+                .and_then(|layout| layout.fields.iter().find(|field| field.name == field_name))
+            else {
+                return false;
+            };
+            if field.function_pointer {
+                return true;
+            }
+            let Some(value_type) = field.value_type.as_deref() else {
+                return false;
+            };
+            let visible =
+                c_visible_files(&layout_key.0, &include_edges, INCLUDE_DEPTH_CAP, WORK_CAP);
+            let mut matches = visible
+                .into_iter()
+                .filter_map(|path| files.get(&path))
+                .flat_map(|facts| facts.typedefs.iter())
+                .filter(|typedef| typedef.name == value_type)
+                .map(|typedef| typedef.pointer)
+                .collect::<Vec<_>>();
+            matches.sort();
+            matches.dedup();
+            matches == [true]
+        };
 
         let mut symbols_by_file_name = HashMap::<(String, String), Vec<String>>::new();
+        let mut symbol_name_by_id = HashMap::<String, String>::new();
         let mut symbol_statement = tx.prepare(
             "SELECT f.path,s.name,s.public_id
              FROM symbols s JOIN files f ON f.id=s.file_id
@@ -2017,6 +2047,7 @@ impl Store {
             ))
         })? {
             let (file, name, id) = row?;
+            symbol_name_by_id.insert(id.clone(), name.clone());
             symbols_by_file_name
                 .entry((file, name))
                 .or_default()
@@ -2093,7 +2124,9 @@ impl Store {
                 } else {
                     None
                 };
-                let Some(field) = field.filter(|field| field.function_pointer) else {
+                let Some(field) =
+                    field.filter(|field| is_function_pointer_field(&layout_key, &field.name))
+                else {
                     continue;
                 };
                 let candidates = symbols_by_file_name
@@ -2105,6 +2138,69 @@ impl Store {
                 }
                 registered
                     .entry((layout_key.0, layout_key.1, field.name.clone()))
+                    .or_default()
+                    .insert(candidates[0].clone());
+            }
+        }
+
+        let mut formal_storages = Vec::<(String, usize, FieldKey)>::new();
+        for path in &paths {
+            for storage in &files[path].formal_storages {
+                if work >= WORK_CAP {
+                    break;
+                }
+                work += 1;
+                let (Some(owner_name), Some(receiver_type)) = (
+                    symbol_name_by_id.get(&storage.owner_id),
+                    storage.receiver_type.as_deref(),
+                ) else {
+                    continue;
+                };
+                let Some(layout_key) =
+                    resolve_path_layout(path, receiver_type, &storage.receiver_path)
+                else {
+                    continue;
+                };
+                let field_is_pointer = is_function_pointer_field(&layout_key, &storage.field_name);
+                if field_is_pointer {
+                    formal_storages.push((
+                        owner_name.clone(),
+                        storage.parameter_index,
+                        (layout_key.0, layout_key.1, storage.field_name.clone()),
+                    ));
+                }
+            }
+        }
+        formal_storages.sort();
+        formal_storages.dedup();
+        for path in &paths {
+            for argument in &files[path].arguments {
+                if work >= WORK_CAP {
+                    break;
+                }
+                work += 1;
+                let mut destinations = formal_storages
+                    .iter()
+                    .filter(|(callee_name, parameter_index, _)| {
+                        callee_name == &argument.callee_name
+                            && *parameter_index == argument.argument_index
+                    })
+                    .map(|(_, _, destination)| destination.clone())
+                    .collect::<Vec<_>>();
+                destinations.sort();
+                destinations.dedup();
+                if destinations.len() != 1 {
+                    continue;
+                }
+                let candidates = symbols_by_file_name
+                    .get(&(path.clone(), argument.target_name.clone()))
+                    .cloned()
+                    .unwrap_or_default();
+                if candidates.len() != 1 {
+                    continue;
+                }
+                registered
+                    .entry(destinations.remove(0))
                     .or_default()
                     .insert(candidates[0].clone());
             }
@@ -2129,22 +2225,10 @@ impl Store {
                 ) else {
                     continue;
                 };
-                let target_is_pointer = layouts
-                    .get(&target_layout_key)
-                    .and_then(|items| items.first())
-                    .is_some_and(|layout| {
-                        layout.fields.iter().any(|field| {
-                            field.name == propagation.target_field_name && field.function_pointer
-                        })
-                    });
-                let source_is_pointer = layouts
-                    .get(&source_layout_key)
-                    .and_then(|items| items.first())
-                    .is_some_and(|layout| {
-                        layout.fields.iter().any(|field| {
-                            field.name == propagation.source_field_name && field.function_pointer
-                        })
-                    });
+                let target_is_pointer =
+                    is_function_pointer_field(&target_layout_key, &propagation.target_field_name);
+                let source_is_pointer =
+                    is_function_pointer_field(&source_layout_key, &propagation.source_field_name);
                 if !target_is_pointer || !source_is_pointer {
                     continue;
                 }
@@ -2219,13 +2303,7 @@ impl Store {
                 let Some(layout_key) = layout_key else {
                     continue;
                 };
-                let Some(layout) = layouts.get(&layout_key).and_then(|items| items.first()) else {
-                    continue;
-                };
-                let field_is_pointer = layout
-                    .fields
-                    .iter()
-                    .any(|field| field.name == dispatch.field_name && field.function_pointer);
+                let field_is_pointer = is_function_pointer_field(&layout_key, &dispatch.field_name);
                 if !field_is_pointer {
                     continue;
                 }

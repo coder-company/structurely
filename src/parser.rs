@@ -1,8 +1,9 @@
 use crate::model::{
-    CFunctionPointerArrayDispatchFact, CFunctionPointerArrayFact, CFunctionPointerArrayTargetFact,
-    CFunctionPointerBindingFact, CFunctionPointerDispatchFact, CFunctionPointerFacts,
-    CFunctionPointerPropagationFact, CFunctionPointerTypedefFact, CIncludeFact, CStructFieldFact,
-    CStructLayoutFact, CallableReturnFact, CallbackArgumentFact, CallbackParameterDelegationFact,
+    CFunctionPointerArgumentFact, CFunctionPointerArrayDispatchFact, CFunctionPointerArrayFact,
+    CFunctionPointerArrayTargetFact, CFunctionPointerBindingFact, CFunctionPointerDispatchFact,
+    CFunctionPointerFacts, CFunctionPointerFormalStorageFact, CFunctionPointerPropagationFact,
+    CFunctionPointerTypedefFact, CIncludeFact, CStructFieldFact, CStructLayoutFact,
+    CallableReturnFact, CallbackArgumentFact, CallbackParameterDelegationFact,
     CallbackParameterInvocation, Evidence, FileFacts, Language, PythonCallbackFormalFact,
     Relationship, RelationshipKind, SourceSpan, Symbol, SymbolKind, UnresolvedCall,
     UnresolvedReference,
@@ -1268,6 +1269,12 @@ fn collect_c_function_pointer_facts(
     if facts.array_dispatches.len() > MAX_C_FUNCTION_POINTER_FACTS_PER_FILE {
         facts.array_dispatches.clear();
     }
+    if facts.formal_storages.len() > MAX_C_FUNCTION_POINTER_FACTS_PER_FILE {
+        facts.formal_storages.clear();
+    }
+    if facts.arguments.len() > MAX_C_FUNCTION_POINTER_FACTS_PER_FILE {
+        facts.arguments.clear();
+    }
     if facts.includes.len() > MAX_C_FUNCTION_POINTER_FACTS_PER_FILE {
         facts.includes.clear();
     }
@@ -1406,6 +1413,32 @@ fn collect_c_function_pointer_observations(
             node.child_by_field_name("left"),
             node.child_by_field_name("right"),
         ) {
+            if let (Some(mut path), Some(parameter_name)) = (
+                c_field_path(left, source),
+                (right.kind() == "identifier").then(|| node_text(right, source)),
+            ) {
+                if let (Some(field_name), Some(parameter_index)) =
+                    (path.pop(), c_parameter_index(node, &parameter_name, source))
+                {
+                    facts
+                        .formal_storages
+                        .push(CFunctionPointerFormalStorageFact {
+                            owner_id: owning_symbol_id(node, owners)
+                                .cloned()
+                                .unwrap_or_else(|| file_symbol_id.to_owned()),
+                            parameter_index,
+                            receiver_type: c_receiver_type(
+                                node,
+                                path.first().map(String::as_str),
+                                source,
+                            ),
+                            receiver_path: path,
+                            field_name,
+                            line: node.start_position().row + 1,
+                            site_start_byte: node.start_byte(),
+                        });
+                }
+            }
             if let (Some(mut target_path), Some(mut source_path)) =
                 (c_field_path(left, source), c_field_path(right, source))
             {
@@ -1466,6 +1499,29 @@ fn collect_c_function_pointer_observations(
         );
     } else if node.kind() == "call_expression" {
         if let Some(function) = node.child_by_field_name("function") {
+            if function.kind() == "identifier" {
+                if let Some(arguments) = node.child_by_field_name("arguments") {
+                    let mut argument_cursor = arguments.walk();
+                    for (argument_index, argument) in
+                        arguments.named_children(&mut argument_cursor).enumerate()
+                    {
+                        if let Some(target_name) =
+                            c_callable_reference(argument, source, callable_names)
+                        {
+                            facts.arguments.push(CFunctionPointerArgumentFact {
+                                caller_id: owning_symbol_id(node, owners)
+                                    .cloned()
+                                    .unwrap_or_else(|| file_symbol_id.to_owned()),
+                                callee_name: node_text(function, source),
+                                argument_index,
+                                target_name,
+                                line: argument.start_position().row + 1,
+                                site_start_byte: argument.start_byte(),
+                            });
+                        }
+                    }
+                }
+            }
             if function.kind() == "subscript_expression" {
                 if let Some(name) = function
                     .child_by_field_name("argument")
@@ -1484,22 +1540,24 @@ fn collect_c_function_pointer_observations(
                         });
                 }
             }
-            if let Some(mut path) = c_field_path(function, source) {
-                if let Some(field_name) = path.pop() {
-                    let receiver_type =
-                        c_receiver_type(node, path.first().map(String::as_str), source);
-                    facts.dispatches.push(CFunctionPointerDispatchFact {
-                        owner_id: owning_symbol_id(node, owners)
-                            .cloned()
-                            .unwrap_or_else(|| file_symbol_id.to_owned()),
-                        receiver_type,
-                        receiver_path: path,
-                        proven_function_pointer: language == Language::C
-                            || function_fields.contains(&field_name),
-                        field_name,
-                        line: node.start_position().row + 1,
-                        site_start_byte: node.start_byte(),
-                    });
+            if function.kind() == "field_expression" {
+                if let Some(mut path) = c_field_path(function, source) {
+                    if let Some(field_name) = path.pop() {
+                        let receiver_type =
+                            c_receiver_type(node, path.first().map(String::as_str), source);
+                        facts.dispatches.push(CFunctionPointerDispatchFact {
+                            owner_id: owning_symbol_id(node, owners)
+                                .cloned()
+                                .unwrap_or_else(|| file_symbol_id.to_owned()),
+                            receiver_type,
+                            receiver_path: path,
+                            proven_function_pointer: language == Language::C
+                                || function_fields.contains(&field_name),
+                            field_name,
+                            line: node.start_position().row + 1,
+                            site_start_byte: node.start_byte(),
+                        });
+                    }
                 }
             }
         }
@@ -1738,6 +1796,29 @@ fn c_receiver_type(node: Node<'_>, receiver: Option<&str>, source: &[u8]) -> Opt
     while let Some(ancestor) = callable {
         if ancestor.kind() == "function_definition" {
             return c_declared_type_in(ancestor, receiver, site, source);
+        }
+        callable = ancestor.parent();
+    }
+    None
+}
+
+fn c_parameter_index(node: Node<'_>, parameter_name: &str, source: &[u8]) -> Option<usize> {
+    let mut callable = node.parent();
+    while let Some(ancestor) = callable {
+        if ancestor.kind() == "function_definition" {
+            let declarator = ancestor.child_by_field_name("declarator")?;
+            let function = first_descendant_or_self(declarator, "function_declarator")?;
+            let parameters = function.child_by_field_name("parameters")?;
+            let mut cursor = parameters.walk();
+            return parameters
+                .named_children(&mut cursor)
+                .filter(|parameter| parameter.kind() == "parameter_declaration")
+                .enumerate()
+                .find_map(|(index, parameter)| {
+                    declarator_name(parameter)
+                        .filter(|name| node_text(*name, source) == parameter_name)
+                        .map(|_| index)
+                });
         }
         callable = ancestor.parent();
     }
@@ -5090,6 +5171,7 @@ mod tests {
         let source = r#"
 typedef int (*handler_t)(int);
 typedef int handler_fn(int);
+typedef struct CallbackBox { handler_t callback; } CallbackBox;
 typedef struct Ops {
   int tag;
   int (*run)(int);
@@ -5104,6 +5186,9 @@ static Ops table[] = {
   { .tag = 2, .run = leaf, .reset = &leaf },
 };
 static handler_t callbacks[] = { leaf, [2] = (handler_t)leaf };
+void store_callback(CallbackBox *box, handler_t callback) { box->callback = callback; }
+void wire_callback(CallbackBox *box) { store_callback(box, leaf); }
+int invoke_callback(CallbackBox *box, int x) { return box->callback(x); }
 void install(Ops *ops, Ops *other) {
   ops->run = &leaf;
   ops->reset = leaf;
@@ -5170,6 +5255,14 @@ int array_dispatch(int slot, int x) { return callbacks[slot](x); }
         assert_eq!(pointers.arrays[0].targets.len(), 2);
         assert_eq!(pointers.array_dispatches.len(), 1);
         assert_eq!(pointers.array_dispatches[0].name, "callbacks");
+        assert_eq!(pointers.formal_storages.len(), 1);
+        assert_eq!(pointers.formal_storages[0].parameter_index, 1);
+        assert_eq!(pointers.formal_storages[0].field_name, "callback");
+        assert!(pointers.arguments.iter().any(|argument| {
+            argument.callee_name == "store_callback"
+                && argument.argument_index == 1
+                && argument.target_name == "leaf"
+        }));
         assert!(pointers.bindings.iter().any(|binding| {
             binding.receiver_path == ["table"]
                 && binding.field_name.as_deref() == Some("reset")
@@ -5182,7 +5275,7 @@ int array_dispatch(int slot, int x) { return callbacks[slot](x); }
                 && binding.target_name == "leaf"
         }));
 
-        assert_eq!(pointers.dispatches.len(), 2);
+        assert_eq!(pointers.dispatches.len(), 3);
         assert!(pointers.dispatches.iter().any(|dispatch| {
             dispatch.receiver_type.as_deref() == Some("Ops")
                 && dispatch.receiver_path == ["ops", "next"]

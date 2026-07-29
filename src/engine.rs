@@ -8037,6 +8037,64 @@ def outer():
     }
 
     #[test]
+    fn c_function_pointer_formals_flow_from_callers_into_stored_dispatch() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("callback.h"),
+            "typedef int (*callback_t)(int);\n\
+             typedef struct Box { callback_t callback; } Box;\n\
+             void store_callback(Box *box, callback_t callback);\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("store.c"),
+            "#include \"callback.h\"\n\
+             void store_callback(Box *box, callback_t callback) { box->callback = callback; }\n\
+             int invoke_callback(Box *box, int value) { return box->callback(value); }\n",
+        )
+        .unwrap();
+        let caller = temp.path().join("caller.c");
+        fs::write(
+            &caller,
+            "#include \"callback.h\"\n\
+             static int real_handler(int value) { return value + 1; }\n\
+             void wire(Box *box) { store_callback(box, real_handler); }\n",
+        )
+        .unwrap();
+
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let targets = |engine: &Engine| {
+            let invoke = engine
+                .search("invoke_callback", 10)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.name == "invoke_callback")
+                .unwrap()
+                .symbol;
+            engine
+                .callees(&invoke.id)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, evidence)| {
+                    evidence.provenance == "dynamic/c-function-pointer-dispatch"
+                })
+                .map(|(target, _)| target.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(targets(&engine), ["real_handler"]);
+
+        fs::write(
+            &caller,
+            "#include \"callback.h\"\n\
+             static int real_handler(int value) { return value + 1; }\n\
+             void wire(Box *box) { (void)box; }\n",
+        )
+        .unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 1);
+        assert!(targets(&engine).is_empty());
+    }
+
+    #[test]
     fn watcher_makes_saved_symbols_query_visible() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("main.ts"), "function before() {}\n").unwrap();
