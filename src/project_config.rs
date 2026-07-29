@@ -1,8 +1,10 @@
 use crate::model::Language;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde_json::Value;
-use std::{collections::HashMap, fs, path::Path};
+use std::{collections::HashMap, path::Path};
+
+use crate::source::{read_source_snapshot, SourceRead};
 
 const CONFIG_FILES: [&str; 2] = ["structurely.json", "codegraph.json"];
 
@@ -19,33 +21,55 @@ impl ProjectConfig {
         let file = CONFIG_FILES
             .iter()
             .map(|name| root.join(name))
-            .find(|path| path.is_file());
+            .find(|path| path.symlink_metadata().is_ok());
         let value = match file {
             Some(ref path) => {
-                let source = fs::read_to_string(path)
-                    .with_context(|| format!("read project config {}", path.display()))?;
-                serde_json::from_str::<Value>(&source).unwrap_or(Value::Null)
+                let source = match read_source_snapshot(path)
+                    .with_context(|| format!("read project config {}", path.display()))?
+                {
+                    SourceRead::Snapshot(source) => source,
+                    SourceRead::TooLarge => {
+                        anyhow::bail!(
+                            "project config exceeds the bounded read limit: {}",
+                            path.display()
+                        )
+                    }
+                };
+                serde_json::from_str::<Value>(&source)
+                    .with_context(|| format!("parse project config {}", path.display()))?
             }
             None => Value::Null,
         };
+        if !value.is_null() && !value.is_object() {
+            bail!("project config root must be a JSON object");
+        }
 
         let mut extensions = HashMap::new();
-        if let Some(entries) = value.get("extensions").and_then(Value::as_object) {
+        if let Some(raw_extensions) = value.get("extensions") {
+            let entries = raw_extensions
+                .as_object()
+                .ok_or_else(|| anyhow::anyhow!("`extensions` must be a JSON object"))?;
             for (extension, language) in entries {
-                let Some(language) = language.as_str().and_then(parse_language) else {
-                    continue;
-                };
+                let language_name = language.as_str().ok_or_else(|| {
+                    anyhow::anyhow!("language for extension `{extension}` must be a string")
+                })?;
+                let language = parse_language(language_name).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "unsupported language `{language_name}` for extension `{extension}`"
+                    )
+                })?;
                 let extension = extension
                     .trim()
                     .trim_start_matches('.')
                     .to_ascii_lowercase();
-                if !extension.is_empty()
-                    && extension
+                if extension.is_empty()
+                    || !extension
                         .chars()
                         .all(|character| character.is_ascii_alphanumeric())
                 {
-                    extensions.insert(extension, language);
+                    bail!("invalid custom extension `{extension}`");
                 }
+                extensions.insert(extension, language);
             }
         }
 
@@ -101,15 +125,22 @@ fn build_matcher(
 ) -> Result<(Gitignore, bool)> {
     let mut builder = GitignoreBuilder::new(root);
     let mut has_patterns = false;
-    if let Some(patterns) = value.get(field).and_then(Value::as_array) {
-        for pattern in patterns.iter().filter_map(Value::as_str) {
-            if !pattern.trim().is_empty()
-                && builder
-                    .add_line(source.map(Path::to_path_buf), pattern.trim())
-                    .is_ok()
-            {
-                has_patterns = true;
+    if let Some(raw_patterns) = value.get(field) {
+        let patterns = raw_patterns
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("`{field}` must be an array of glob strings"))?;
+        for pattern in patterns {
+            let pattern = pattern
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("`{field}` entries must be glob strings"))?
+                .trim();
+            if pattern.is_empty() {
+                bail!("`{field}` entries must not be empty");
             }
+            builder
+                .add_line(source.map(Path::to_path_buf), pattern)
+                .with_context(|| format!("invalid `{field}` glob `{pattern}`"))?;
+            has_patterns = true;
         }
     }
     Ok((builder.build()?, has_patterns))
@@ -147,6 +178,7 @@ fn parse_language(value: &str) -> Option<Language> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use tempfile::tempdir;
 
     #[test]
@@ -155,7 +187,7 @@ mod tests {
         fs::write(
             root.path().join("structurely.json"),
             r#"{
-                "extensions": { ".view": "typescript", "bad": "unknown" },
+                "extensions": { ".view": "typescript" },
                 "exclude": ["vendor/**"],
                 "include": ["Local/**"],
                 "includeIgnored": ["repos/child/**"]
@@ -175,14 +207,26 @@ mod tests {
     }
 
     #[test]
-    fn malformed_config_degrades_to_zero_config() {
+    fn malformed_config_fails_closed() {
         let root = tempdir().unwrap();
         fs::write(root.path().join("structurely.json"), "{not-json").unwrap();
-        let config = ProjectConfig::load(root.path()).unwrap();
-        assert_eq!(
-            config.language_for_path(Path::new("main.rs")),
-            Some(Language::Rust)
-        );
+        let error = ProjectConfig::load(root.path()).err().unwrap().to_string();
+        assert!(error.contains("parse project config"));
+    }
+
+    #[test]
+    fn invalid_config_policy_fields_fail_closed() {
+        let root = tempdir().unwrap();
+        for source in [
+            r#"{"extensions":[]}"#,
+            r#"{"extensions":{"view":"unknown"}}"#,
+            r#"{"exclude":"vendor/**"}"#,
+            r#"{"include":[42]}"#,
+            r#"{"includeIgnored":[""]}"#,
+        ] {
+            fs::write(root.path().join("structurely.json"), source).unwrap();
+            assert!(ProjectConfig::load(root.path()).is_err(), "{source}");
+        }
     }
 
     #[test]
