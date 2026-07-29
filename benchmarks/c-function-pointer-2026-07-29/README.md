@@ -1,15 +1,19 @@
 # C/C++ function-pointer acceptance — 2026-07-29
 
 This gate verifies Structurely commit
-`f373aba190270a9f661cd9d7455cf61a36a443ec` against 19 files from pinned
+`a754a2572370d37445d030006a95aa256dc320e4` against 19 files from pinned
 OpenHarmony commit `a826ab0e75fe51d028c1c5af58188e908736b53b`.
 
-Graph model v62 adds explicit C/C++ function-pointer facts and an include-aware,
+Graph model v64 adds explicit C/C++ function-pointer facts and an include-aware,
 bounded resolver adapter. It recognizes direct function-pointer fields,
 function-pointer typedef fields, field assignments, positional and designated
 table initializers, chained typed dispatch, bounded field-to-field propagation,
 file-local bare pointer arrays with indexed designators and casts, and exact
-call-argument → formal → stored-field callback flow.
+call-argument → formal → stored-field callback flow. C++ local aliases resolve
+from explicit address-of declarations and assignments using source-ordered,
+lexically scoped reaching definitions. Sequential kills and rebinds, nested
+shadowing, declarations in C++17 `if` initializers, conditional may-call unions,
+and calls before a declaration are covered by adversarial tests.
 Resolution requires a unique include-visible layout or typedef and a real
 same-file callable registration; ambiguity, unknown layouts, data typedefs,
 dynamic targets, and excessive fanout fail closed.
@@ -32,12 +36,12 @@ a 0.97-confidence may-call relationship rather than a path-sensitive must-call.
 Receiver chains are capped at eight members, include traversal at 16 levels,
 project work at 100,000 items, and target fanout at 300.
 
-The final gate passes 240 library tests, daemon and persistent MCP process
+The final gate passes 242 library tests, daemon and persistent MCP process
 tests, strict all-target/all-feature Clippy, formatting, and diff checks. The
 release binary SHA-256 is
-`7762661ac833bc132a58201522b0256bb5624436c6ed0052fa11982db7884e94`;
+`85ceb0a74300cd49c7eccc0a75c53473ec878fb7d9af4c7df0090f97f0e2ce82`;
 the raw result SHA-256 is
-`ec6382d0c81a95dc64831bc68c2e9c49197a403d79a8c9f8b4218b6353228619`.
+`10971571fd50c6f65d7eab1a3752762c1aeb3ebf2059cfcdbdad5cd5ef24f55c`.
 
 Reproduce with:
 

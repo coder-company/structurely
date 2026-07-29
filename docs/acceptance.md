@@ -173,6 +173,14 @@ Graph model v63 traces callbacks through exact call arguments and formal
 positions into stored function-pointer fields. On pinned libsamplerate this
 adds four exact `src_callback_read` targets supplied through
 `src_callback_new`, increasing the corpus gate from 23 to 27 dispatch edges.
+Graph model v64 adds source-ordered, lexically scoped C++ local
+function-pointer aliases. Adversarial coverage proves that calls before a
+declaration remain ordinary direct calls, nested aliases do not escape their
+blocks, sequential null writes kill stale targets, exact rebinds replace them,
+conditional assignments form bounded 0.97-confidence may-call unions, and
+C++17 `if`-initializer aliases do not leak past the statement. The unchanged
+19-file OpenHarmony gate still passes all 27 libsamplerate dispatch edges and
+both player callback flows with the v64 release binary.
 
 The authoritative capability inventory is
 [`codegraph-parity.md`](codegraph-parity.md). A matching command name or schema
