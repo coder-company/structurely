@@ -135,6 +135,10 @@ model to v54 and adds exact keyword-name-to-formal mapping after unique callee
 resolution. Pinned LightRAG and Django jointly materialize 30 keyword
 callback-argument relationships and 30 stable inline identities at confidence
 0.96.
+The `benchmarks/nestjs-transport-2026-07-29/` gate advances the graph model to
+v55 and materializes all 101 inventoried production Nest websocket,
+microservice, and gRPC handlers across 32 files. With two maintained test
+handlers, 103 route symbols produce 206 exact framework relationships.
 
 The authoritative capability inventory is
 [`codegraph-parity.md`](codegraph-parity.md). A matching command name or schema

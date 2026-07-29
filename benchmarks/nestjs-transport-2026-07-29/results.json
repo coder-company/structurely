@@ -1,0 +1,38 @@
+{
+  "structurely_commit": "adff100",
+  "graph_model_version": 55,
+  "release_binary_sha256": "3592ff09d7826e4a0f716c3d5cbd58c181c2bf1ce694c52af1dd613f9acd0947",
+  "repository": "nestjs/nest",
+  "repository_commit": "fafe503bd8ca073f2fdd41ed7138081af84c478e",
+  "verification": {
+    "rust_unit_tests": 191,
+    "daemon_integration_tests": 1,
+    "mcp_integration_tests": 1,
+    "clippy_all_targets_all_features": "pass",
+    "independent_review_blockers_remaining": 0
+  },
+  "fresh_index": {
+    "files_scanned": 1727,
+    "files_skipped": 0,
+    "wall_ms": 4400,
+    "reported_engine_ms": 4367,
+    "max_rss_kib": 66488,
+    "source_symbols": 8271,
+    "resolver_reported_relationships": 24722,
+    "persisted_symbols": 8298,
+    "persisted_relationships": 31223,
+    "database_bytes": 36708352,
+    "database_sha256": "5f095c6b882f02d255ea8eb29a24919217c3a333cb70a7ecd0586fd83088d70a"
+  },
+  "transport_acceptance": {
+    "production_handler_edges": 101,
+    "production_files": 32,
+    "test_handler_edges": 2,
+    "route_symbols": 103,
+    "websocket_routes": 21,
+    "microservice_and_grpc_routes": 82,
+    "websocket_relationships": 42,
+    "microservice_and_grpc_relationships": 164,
+    "total_new_framework_relationships": 206
+  }
+}

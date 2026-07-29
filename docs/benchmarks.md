@@ -314,3 +314,10 @@ The
 closes that deferred mapping with 30 exact keyword callback relationships
 across pinned LightRAG and Django. LightRAG reaches 46 accepted inline callback
 flows in total; Django reaches 90.
+
+The
+[`NestJS transport gate`](../benchmarks/nestjs-transport-2026-07-29/README.md)
+materializes all 101 inventoried production websocket, microservice, and gRPC
+handlers across 32 pinned Nest files. Including two maintained test handlers,
+103 route symbols produce 206 exact framework relationships in a 4.400-second
+clean index.
