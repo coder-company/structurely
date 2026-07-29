@@ -13,9 +13,15 @@ filesystem scan
     -> graph epoch
 ```
 
-The CLI and MCP compatibility surface call the same engine interface. SQLite
-is the durable source of truth; WAL mode permits concurrent read snapshots
-while one writer publishes an update.
+The CLI and MCP surfaces call the same engine interfaces. Three project-local
+SQLite stores separate distinct lifecycles:
+
+- `graph.db` contains rebuildable symbols and relationships;
+- `content.db` contains rebuildable repository chunks for research;
+- `state.db` contains durable workspaces, sessions, recaps, and memories.
+
+WAL mode permits concurrent read snapshots while one writer publishes an
+update. Rebuilding derived indexes does not discard durable agent state.
 
 The connection checkpoints after every published epoch, auto-checkpoints after
 256 WAL pages, applies a 16 MiB journal size limit, and waits up to five seconds
@@ -42,6 +48,35 @@ without shifting parser byte offsets, line evidence, or incremental hashes.
 5. Incremental and clean indexing of the same source produce the same graph.
 6. Storage row IDs are never public symbol identities.
 7. Parser failure for one file cannot corrupt the previous committed graph.
+8. Repository content is retrieved as bounded, line-addressable chunks rather
+   than represented as synthetic code symbols.
+9. Workspace state has an independent schema and rebuild lifecycle.
+
+## Repository research
+
+The content Module scans useful text across the repository while honoring
+ignore rules and excluding Structurely's own directory. It rejects symlinks,
+binary or invalid UTF-8 content, and files larger than 1 MiB. Each accepted file
+is split deterministically at 4 KiB or 80 lines, with at most 512 chunks per
+file. An FTS index ranks chunk text, titles, and paths.
+
+The workflow Module is the narrow composition seam. Research merges graph-backed
+symbol exploration with repository chunk retrieval, deduplicates files, and
+returns the committed graph epoch. Impact analysis remains a bounded reverse
+graph traversal. Path tracing performs a bounded shortest-path search and
+returns the stored provenance, confidence, location, and explanation for every
+relationship in the path.
+
+## Durable workflow state
+
+The state Module owns workspace namespaces, ordered session events,
+deterministic recaps, and workspace-scoped full-text memory. It validates
+identifiers and payload bounds at the interface and preserves foreign-key
+integrity internally. Completing a session prevents later event writes.
+Recaps are regenerated from persisted history; memory deletion is explicit.
+
+Team workspaces provide durable local namespaces. The runtime does not
+transmit this state.
 
 Call resolution ranks receiver-type evidence ahead of same-file, explicit
 import, and language-wide candidates. Locally constructed receivers in
@@ -195,6 +230,9 @@ Symbol.
 - `parser` converts supported source text into file-local facts.
 - `semantic` owns pure callback and framework Resolver adapters.
 - `store` owns schema migration, transactions, search, and graph epochs.
+- `content` owns repository-wide scanning, chunking, and full-text retrieval.
+- `state` owns durable workspaces, sessions, recaps, and memory.
+- `workflow` composes graph and content retrieval for research.
 - `engine` owns scan, incremental invalidation, resolution, and publication.
 - `mcp` adapts JSON-RPC/MCP requests to the engine.
 - `main` adapts command-line commands to the same engine.

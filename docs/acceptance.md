@@ -13,7 +13,8 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo build --release --locked
 python3 -m unittest \
   scripts/test_compare_benchmarks.py \
-  scripts/test_differential_mcp.py
+  scripts/test_differential_mcp.py \
+  scripts/test_benchmark_perseus_acceptance.py
 python3 scripts/check_docs.py
 ```
 
@@ -92,3 +93,28 @@ At accepted commit `bc708fcf1e40ee18ced7ee6ef92f4e687e3c7add`:
 Historical benchmark snapshots remain available in Git history. The repository
 keeps only the consolidated launch result so new readers do not mistake an
 intermediate run for the current product contract.
+
+## Verify the Perseus advantage
+
+Build the candidate and run the checked-in acceptance gate:
+
+```bash
+cargo build --release --locked
+python3 scripts/benchmark_perseus_acceptance.py \
+  --structurely target/release/structurely \
+  --project . \
+  --baseline benchmarks/perseus-2026-07-29/results.json \
+  --output /tmp/structurely-perseus-acceptance.json
+```
+
+The command synchronizes the project, runs five fixed research queries, and
+exits unsuccessfully unless all gates pass:
+
+- every required workflow is present: research, session history, recaps,
+  impact analysis, path tracing, memory, and local team workspaces;
+- repository content coverage meets the pinned Perseus file count and produces
+  retrievable chunks;
+- `src/atomic_file.rs` ranks first for “atomic file publication”;
+- rank-one recall is no worse than Perseus and top-ten recall is better.
+
+Cloud synchronization is intentionally outside Structurely's local-first scope.

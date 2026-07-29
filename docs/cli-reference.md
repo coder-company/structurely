@@ -48,10 +48,14 @@ recovery warnings. `daemon status` reports background-indexer health.
 ```bash
 structurely search <query> --path <project> [--limit <1-100>]
 structurely explore <query> --path <project> [--limit <1-100>]
+structurely research <query> --path <project> [--max-files <1-100>]
 ```
 
 `search` returns ranked symbols as JSON. `explore` returns bounded,
-line-numbered context for a task or concept.
+line-numbered symbol context for a task or concept. `research` combines that
+semantic context with ranked chunks from source, documentation, configuration,
+and other useful repository files. Its response identifies the graph epoch and
+keeps findings bounded by distinct file count.
 
 ## Follow relationships
 
@@ -59,11 +63,58 @@ line-numbered context for a task or concept.
 structurely callers <symbol> --path <project> [--file <relative-path>] [--limit <1-100>]
 structurely callees <symbol> --path <project> [--file <relative-path>] [--limit <1-100>]
 structurely impact <symbol> --path <project> [--file <relative-path>] [--depth <1-20>]
+structurely trace <source> <target> --path <project> \
+  [--source-file <relative-path>] [--target-file <relative-path>] [--depth <1-20>]
 ```
 
 Use `--file` when multiple files declare the same symbol name. `impact`
 traverses callers to show what a change may affect. Traversal stops at the
-requested depth and at the built-in node and edge safety limits.
+requested depth and at the built-in node and edge safety limits. `trace`
+returns the shortest relationship path it can prove between two symbols,
+including the evidence attached to each edge. Use the file options to
+disambiguate repeated names.
+
+## Preserve team context
+
+Workspace IDs scope sessions and memories:
+
+```bash
+structurely workspace create <name> [--path <project>]
+structurely workspace list [--path <project>] [--limit <1-100>]
+structurely workspace rename <id> <name> [--path <project>]
+```
+
+Record an ordered session history and close it when the work is complete:
+
+```bash
+structurely session start <workspace-id> <title> [--path <project>]
+structurely session add <session-id> <kind> <body> [--path <project>]
+structurely session show <session-id> [--path <project>] [--limit <1-100>]
+structurely session list [--workspace <workspace-id>] [--limit <1-100>]
+structurely session end <session-id> [--path <project>]
+structurely recap <session-id> [--path <project>]
+```
+
+An event `kind` is a short caller-defined category such as `decision`,
+`finding`, or `result`. Events can be added only while a session is active.
+`recap` deterministically summarizes the ordered event history and can be run
+again after more events are added.
+
+Store knowledge that should survive individual sessions:
+
+```bash
+structurely memory remember <workspace-id> <body> \
+  [--tags <comma-separated-tags>] [--path <project>]
+structurely memory recall <workspace-id> <query> \
+  [--path <project>] [--limit <1-100>]
+structurely memory forget <memory-id> [--path <project>]
+```
+
+Recall is full-text ranked and remains scoped to one workspace. `forget`
+permanently removes the selected memory.
+
+Workspaces, sessions, recaps, and memories remain local to the project.
+Structurely does not expose a cloud synchronization command.
 
 ## Keep the graph current
 

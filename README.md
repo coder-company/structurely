@@ -2,7 +2,9 @@
 
 Structurely gives coding agents a local semantic map of your codebase. It
 indexes symbols, calls, routes, callbacks, UI flows, and framework relationships
-into a transactional SQLite graph. Your source code stays on your machine.
+into a transactional SQLite graph. It also indexes useful repository content
+into bounded chunks and stores agent sessions, recaps, and memory locally.
+Your source code stays on your machine.
 
 Structurely is a native Rust binary with its own CLI and MCP tools.
 
@@ -44,6 +46,7 @@ MCP entry, and verifies that everything is ready.
 
 ```bash
 structurely explore "authentication flow"
+structurely research "how releases are verified"
 ```
 
 ## Replace CodeGraph
@@ -59,10 +62,9 @@ unrelated agent settings. It builds a new Structurely graph because the database
 formats are intentionally different. It does not delete CodeGraph's binary,
 configuration, or index.
 
-Restart your coding agent after setup. Structurely exposes only
-`structurely_explore`, `structurely_search`, `structurely_callers`,
-`structurely_callees`, `structurely_impact`, `structurely_status`,
-`structurely_files`, and `structurely_node`.
+Restart your coding agent after setup. Structurely provides graph search,
+repository research, callers, callees, impact analysis, path tracing, durable
+sessions, recaps, memory, and team workspace namespaces over MCP.
 
 To configure another MCP client manually, run:
 
@@ -74,9 +76,28 @@ Structurely advertises only `structurely_explore` by default. Set
 `STRUCTURELY_MCP_TOOLS` to advertise more tools:
 
 ```bash
-STRUCTURELY_MCP_TOOLS=explore,node,search,callers \
+STRUCTURELY_MCP_TOOLS=explore,research,trace,session,memory,workspace \
   structurely serve --mcp --path /path/to/project
 ```
+
+## Keep agent work across sessions
+
+Create a workspace, record important work, and generate a deterministic recap:
+
+```bash
+structurely workspace create "Compiler team"
+structurely session start <workspace-id> "Harden atomic publication"
+structurely session add <session-id> decision "Keep rename and fsync in one seam."
+structurely recap <session-id>
+structurely memory remember <workspace-id> \
+  "Atomic publication is implemented in src/atomic_file.rs." \
+  --tags architecture,storage
+```
+
+All commands return JSON. Workspace state is project-local and survives index
+rebuilds. Use `structurely trace <source> <target>` for a bounded,
+evidence-backed relationship path and `structurely impact <symbol>` before
+changing a shared symbol.
 
 ## Benchmarks against CodeGraph
 
@@ -111,6 +132,10 @@ snapshot with Structurely 0.2.0 and Perseus 0.1.196.
 Perseus performs work on its hosted service, while Structurely runs locally.
 The table compares end-to-end CLI wait, not server resource consumption. See
 the [full Perseus protocol and results](benchmarks/perseus-2026-07-29/README.md).
+The checked-in [Perseus acceptance gate](docs/acceptance.md#verify-the-perseus-advantage)
+also enforces repository-wide content coverage, chunk retrieval, workflow
+availability, and the expected first-place result for “atomic file
+publication.”
 
 ## Supported languages
 

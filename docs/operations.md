@@ -124,7 +124,11 @@ does not delete them. To remove an index, delete only that project's
 Structurely has no telemetry, analytics, crash reporting, network indexing, or
 remote query service. Source text, symbols, relationships, and query history
 are not transmitted by the application. Indexes remain in
-`<project>/.structurely/graph.db`.
+`<project>/.structurely/graph.db` and `<project>/.structurely/content.db`.
+Durable workspace, session, recap, and memory data remains in
+`<project>/.structurely/state.db`.
+
+Structurely does not expose a cloud synchronization command or endpoint.
 
 The native installation commands contact GitHub to fetch a release archive and
 its checksum. GitHub Actions contacts GitHub services to publish and attest
@@ -160,8 +164,13 @@ Installation fails
 
 Disk usage keeps growing
 : Stop the writer and run `structurely sync` before inspecting
-  `.structurely/graph.db`. Do not edit the SQLite database manually. Report
-  reproducible unbounded WAL growth as a bug.
+  `.structurely/graph.db` and `.structurely/content.db`. Do not edit the SQLite
+  databases manually. Report reproducible unbounded WAL growth as a bug.
+
+A workspace, session, or memory is missing
+: Confirm that `--path` points to the project where the state was created.
+  Durable state is stored per project in `.structurely/state.db`; it is not
+  synchronized between checkouts or machines in the current release.
 
 Indexing needs a different CPU/memory tradeoff
 : Structurely uses the host's available parallelism, capped at eight workers by
@@ -171,8 +180,12 @@ Indexing needs a different CPU/memory tradeoff
 
 ## Backups and recovery
 
-The source tree is authoritative; the graph is reproducible derived data. Back
-up source control rather than the index. If an index is corrupt, stop watchers,
-move the specific project's `.structurely` directory aside, and run
-`structurely init /path/to/project`. Retain the moved database when filing a
-bug if it contains no sensitive source-derived data you are unable to share.
+The source tree is authoritative for `graph.db` and `content.db`; both are
+reproducible derived data. `state.db` is authoritative for workspace history
+and memory, so back it up before removing `.structurely`.
+
+If a derived index is corrupt, stop watchers, preserve `state.db`, move the
+specific project's graph and content databases aside, and run
+`structurely init /path/to/project`. Do not copy live SQLite files without
+their WAL state. Retain moved databases when filing a bug only when they
+contain no sensitive data you are unable to share.

@@ -27,7 +27,6 @@ WORKFLOW_CAPABILITIES = {
     "path_tracing": ("trace",),
     "durable_memory": ("memory",),
     "team_workspaces": ("workspace",),
-    "hosted_synchronization": ("cloud", "hosted", "remote"),
 }
 
 

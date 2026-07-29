@@ -13,10 +13,11 @@ clean committed Structurely snapshot on an 8-vCPU AMD EPYC 7R13 Linux host.
 | Expected file ranked first | 3/5 | 3/5 | tie |
 | Expected file within top 10 | 5/5 | 4/5 | +1 query |
 
-Structurely indexed 63 supported source files into 1,297 symbols and 4,873
-relationships. Perseus reported 96 repository files and 1,411 chunks. These
-counts are not equivalent: Perseus includes repository content that Structurely
-does not treat as source.
+The historical run indexed 63 supported source files into 1,297 symbols and
+4,873 relationships. Perseus reported 96 repository files and 1,411 chunks.
+These historical counts are not equivalent: that Structurely version did not
+yet index repository content separately from source. Current candidates must
+pass the repository-wide content gate described below.
 
 ## Protocol
 
@@ -37,3 +38,19 @@ observable from its CLI, so this comparison does not claim memory or database
 advantages. Wall time represents the user's end-to-end CLI wait.
 
 See [`results.json`](results.json) for versions, samples, queries, and ranks.
+
+## Candidate acceptance
+
+Use this artifact as the immutable baseline for the current executable gate:
+
+```bash
+python3 scripts/benchmark_perseus_acceptance.py \
+  --structurely target/release/structurely \
+  --project . \
+  --baseline benchmarks/perseus-2026-07-29/results.json
+```
+
+The gate checks workflow coverage, repository content coverage, chunk
+retrieval, and the same five relevance targets. It specifically requires
+`src/atomic_file.rs` to rank first for “atomic file publication.” The baseline
+numbers above remain historical and are not rewritten when a candidate passes.

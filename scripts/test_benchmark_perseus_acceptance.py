@@ -34,7 +34,7 @@ class PerseusAcceptanceTests(unittest.TestCase):
 
     def test_workflow_coverage_requires_every_named_capability(self) -> None:
         complete = (
-            "research session recap impact trace memory workspace cloud synchronization"
+            "research session recap impact trace memory workspace"
         )
         self.assertTrue(all(benchmark.workflow_coverage(complete).values()))
         self.assertFalse(

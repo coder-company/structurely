@@ -62,3 +62,23 @@ identity.
 The consolidated [launch result](../benchmarks/release-hardening-2026-07-29/README.md)
 is the only benchmark artifact retained on the current branch. Git history
 contains the intermediate development runs.
+
+## Enforce the Perseus acceptance gate
+
+The Perseus gate checks current behavior against the pinned July 29 baseline:
+
+```bash
+cargo build --release --locked
+python3 scripts/benchmark_perseus_acceptance.py \
+  --structurely target/release/structurely \
+  --project . \
+  --baseline benchmarks/perseus-2026-07-29/results.json \
+  --output /tmp/structurely-perseus-acceptance.json
+```
+
+It fails unless Structurely exposes every named workflow, indexes at least as
+many useful repository files as the pinned Perseus run, has chunk retrieval,
+ranks `src/atomic_file.rs` first for “atomic file publication,” matches or
+beats Perseus rank-one recall, and exceeds its top-ten recall. This is a
+regression gate against a fixed baseline, not a fresh hosted-service latency
+comparison.
