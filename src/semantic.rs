@@ -724,6 +724,7 @@ fn enrich_ohos_emitter_parts(
                 facts.unresolved_calls.push(UnresolvedCall {
                     caller_id: owner.id.clone(),
                     callee_name: name.clone(),
+                    receiver_binding: None,
                     receiver_type,
                     target_file_hint,
                     provenance: "framework/ohos-emitter-registration".to_owned(),
@@ -1412,6 +1413,7 @@ fn enrich_arkui_component(component: Node<'_>, source: &[u8], facts: &mut FileFa
         facts.unresolved_calls.push(UnresolvedCall {
             caller_id: owner.id.clone(),
             callee_name: "build".to_owned(),
+            receiver_binding: None,
             receiver_type: Some(component_name.clone()),
             target_file_hint: Some(facts.path.clone()),
             provenance: "framework/arkui-state".to_owned(),
@@ -1615,6 +1617,7 @@ fn collect_arkui_route_call(
             .next()
             .unwrap_or(&url)
             .to_owned(),
+        receiver_binding: None,
         receiver_type: None,
         target_file_hint: Some(target_file_hint),
         provenance: "framework/arkui-route".to_owned(),
@@ -1948,6 +1951,7 @@ fn append_arkui_call(
     facts.unresolved_calls.push(UnresolvedCall {
         caller_id: owner.id.clone(),
         callee_name: target.clone(),
+        receiver_binding: None,
         receiver_type: (provenance == "framework/arkui-event").then(|| component_name.to_owned()),
         target_file_hint: (provenance == "framework/arkui-event").then(|| facts.path.clone()),
         provenance: provenance.to_owned(),
@@ -2125,6 +2129,7 @@ fn collect_component_template_edges(root: Node<'_>, source: &[u8], facts: &mut F
         facts.unresolved_calls.push(UnresolvedCall {
             caller_id: component.id.clone(),
             callee_name: target.clone(),
+            receiver_binding: None,
             receiver_type: None,
             target_file_hint,
             provenance: provenance.to_owned(),
@@ -2365,6 +2370,7 @@ fn enrich_nestjs_controller(class: Node<'_>, source: &[u8], facts: &mut FileFact
                     facts.unresolved_calls.push(UnresolvedCall {
                         caller_id: route.id.clone(),
                         callee_name: handler.clone(),
+                        receiver_binding: None,
                         receiver_type: None,
                         target_file_hint: None,
                         provenance: "framework/nestjs-route".to_owned(),
@@ -2614,6 +2620,7 @@ fn enrich_fastapi_definition(definition: Node<'_>, source: &[u8], facts: &mut Fi
         facts.unresolved_calls.push(UnresolvedCall {
             caller_id: route.id.clone(),
             callee_name: handler_name.clone(),
+            receiver_binding: None,
             receiver_type: None,
             target_file_hint: None,
             provenance: "framework/fastapi-route".to_owned(),
@@ -2721,6 +2728,7 @@ fn enrich_django_call(call: Node<'_>, source: &[u8], facts: &mut FileFacts) {
     facts.unresolved_calls.push(UnresolvedCall {
         caller_id: route.id.clone(),
         callee_name: handler.clone(),
+        receiver_binding: None,
         receiver_type: None,
         target_file_hint,
         provenance: "framework/django-route".to_owned(),
@@ -2892,6 +2900,7 @@ fn enrich_javascript_call(call: Node<'_>, source: &[u8], facts: &mut FileFacts) 
         facts.unresolved_calls.push(UnresolvedCall {
             caller_id,
             callee_name: target_name,
+            receiver_binding: None,
             receiver_type: None,
             target_file_hint: None,
             provenance: provenance.to_owned(),
@@ -2948,6 +2957,7 @@ fn collect_react_class_rerenders(node: Node<'_>, source: &[u8], facts: &mut File
                 facts.unresolved_calls.push(UnresolvedCall {
                     caller_id: owner.id.clone(),
                     callee_name: "render".to_owned(),
+                    receiver_binding: None,
                     receiver_type: Some(class_name.clone()),
                     target_file_hint: Some(facts.path.clone()),
                     provenance: "framework/react-render".to_owned(),
@@ -3055,6 +3065,7 @@ fn append_jsx_child_render(element: Node<'_>, source: &[u8], facts: &mut FileFac
     facts.unresolved_calls.push(UnresolvedCall {
         caller_id: owner.id.clone(),
         callee_name: child.clone(),
+        receiver_binding: None,
         receiver_type: None,
         target_file_hint,
         provenance: "framework/jsx-render".to_owned(),
@@ -3205,6 +3216,7 @@ fn append_react_route(
     facts.unresolved_calls.push(UnresolvedCall {
         caller_id: route.id.clone(),
         callee_name: component.clone(),
+        receiver_binding: None,
         receiver_type: None,
         target_file_hint: None,
         provenance: "framework/react-router".to_owned(),

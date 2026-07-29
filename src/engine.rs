@@ -2125,6 +2125,76 @@ mod tests {
     }
 
     #[test]
+    fn harmony_imported_singletons_prefer_the_unique_project_callback_callee() {
+        let temp = tempfile::tempdir().unwrap();
+        let page = temp.path().join("Demo/entry/src/main/ets/Page.ets");
+        let local = temp
+            .path()
+            .join("Demo/features/download/src/main/ets/Request.ets");
+        let other = temp.path().join("Other/entry/src/main/ets/Request.ets");
+        fs::create_dir_all(page.parent().unwrap()).unwrap();
+        fs::create_dir_all(local.parent().unwrap()).unwrap();
+        fs::create_dir_all(other.parent().unwrap()).unwrap();
+        fs::write(
+            &page,
+            "import { requestDownload } from '@ohos/download'\n\
+             @Component\n\
+             struct Page {\n\
+               callback = (): void => {}\n\
+               run(): void { requestDownload.downloadFile(this.callback) }\n\
+               build() { Column() }\n\
+             }\n",
+        )
+        .unwrap();
+        fs::write(
+            &local,
+            "class RequestDownload {\n\
+               downloadFile(callback: () => void): void { callback() }\n\
+             }\n",
+        )
+        .unwrap();
+        fs::write(
+            &other,
+            "class RequestDownload {\n\
+               downloadFile(callback: () => void): void { callback() }\n\
+             }\n",
+        )
+        .unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let local_invoke = engine
+            .search("RequestDownload.downloadFile", 20)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.file == "Demo/features/download/src/main/ets/Request.ets")
+            .unwrap()
+            .symbol;
+        let callbacks = |engine: &Engine| {
+            engine
+                .callees(&local_invoke.id)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, evidence)| evidence.provenance == "dynamic/callback-argument")
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(callbacks(&engine).len(), 1);
+        assert_eq!(callbacks(&engine)[0].0.qualified_name, "Page.callback");
+
+        let duplicate = temp
+            .path()
+            .join("Demo/features/duplicate/src/main/ets/Request.ets");
+        fs::create_dir_all(duplicate.parent().unwrap()).unwrap();
+        fs::write(
+            &duplicate,
+            "class RequestDownload {\n\
+               downloadFile(callback: () => void): void { callback() }\n\
+             }\n",
+        )
+        .unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 1);
+        assert!(callbacks(&engine).is_empty());
+    }
+
+    #[test]
     fn callback_argument_propagation_fails_closed_for_unsafe_shapes_and_ambiguity() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(

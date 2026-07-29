@@ -160,6 +160,7 @@ impl Store {
                 file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
                 caller_public_id TEXT NOT NULL,
                 callee_name TEXT NOT NULL,
+                receiver_binding TEXT,
                 receiver_type TEXT,
                 target_file_hint TEXT,
                 provenance TEXT NOT NULL DEFAULT 'tree-sitter/name-resolution',
@@ -244,6 +245,12 @@ impl Store {
             INSERT OR IGNORE INTO metadata(key, value) VALUES ('graph_epoch', '0');
             COMMIT;
             ",
+        )?;
+        Self::ensure_column(
+            &self.connection,
+            "unresolved_calls",
+            "receiver_binding",
+            "TEXT",
         )?;
         Self::ensure_column(
             &self.connection,
@@ -647,14 +654,16 @@ impl Store {
         for call in &file.unresolved_calls {
             tx.prepare_cached(
                 "INSERT INTO unresolved_calls(
-                    file_id,caller_public_id,callee_name,receiver_type,target_file_hint,
-                    provenance,confidence,explanation,resolvable,evidence_file,evidence_line
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                    file_id,caller_public_id,callee_name,receiver_binding,receiver_type,
+                    target_file_hint,provenance,confidence,explanation,resolvable,
+                    evidence_file,evidence_line
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             )?
             .execute(params![
                 file_id,
                 call.caller_id,
                 call.callee_name,
+                call.receiver_binding,
                 call.receiver_type,
                 call.target_file_hint,
                 call.provenance,
@@ -803,9 +812,9 @@ impl Store {
             [],
         )?;
         let mut calls_statement = tx.prepare(
-            "SELECT u.caller_public_id,u.callee_name,u.receiver_type,u.target_file_hint,
-                    u.provenance,u.confidence,u.explanation,u.evidence_file,u.evidence_line,
-                    s.language,u.file_id,u.resolvable
+            "SELECT u.caller_public_id,u.callee_name,u.receiver_binding,u.receiver_type,
+                    u.target_file_hint,u.provenance,u.confidence,u.explanation,
+                    u.evidence_file,u.evidence_line,s.language,u.file_id,u.resolvable
              FROM unresolved_calls u
              JOIN symbols s ON s.public_id=u.caller_public_id
              ORDER BY u.evidence_file,u.evidence_line,u.id",
@@ -817,14 +826,15 @@ impl Store {
                     row.get::<_, String>(1)?,
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, Option<String>>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, f64>(5)?,
-                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, f64>(6)?,
                     row.get::<_, String>(7)?,
-                    row.get::<_, i64>(8)? as usize,
-                    row.get::<_, String>(9)?,
-                    row.get::<_, i64>(10)?,
-                    row.get::<_, bool>(11)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, i64>(9)? as usize,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, i64>(11)?,
+                    row.get::<_, bool>(12)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -924,12 +934,27 @@ impl Store {
             (by_route, module_roots)
         };
         let mut candidate_cache = HashMap::<
-            (String, String, i64, String, String, String),
+            (String, String, i64, String, String, String, String),
             Vec<(String, String, i64)>,
         >::new();
+        let imported_bindings = {
+            let mut statement = tx.prepare(
+                "SELECT DISTINCT file_id,binding_name
+                 FROM unresolved_references
+                 WHERE kind='imports'
+                 ORDER BY file_id,binding_name",
+            )?;
+            let bindings = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<HashSet<_>>>()?;
+            bindings
+        };
         for (
             caller_id,
             callee_name,
+            receiver_binding,
             receiver_type,
             target_file_hint,
             provenance,
@@ -945,12 +970,14 @@ impl Store {
             if !resolvable {
                 continue;
             }
+            let receiver_binding = receiver_binding.unwrap_or_default();
             let receiver_type = receiver_type.unwrap_or_default();
             let target_file_hint = target_file_hint.unwrap_or_default();
             let cache_key = (
                 callee_name.clone(),
                 language.clone(),
                 file_id,
+                receiver_binding.clone(),
                 receiver_type.clone(),
                 target_file_hint.clone(),
                 provenance.clone(),
@@ -1015,12 +1042,27 @@ impl Store {
                         }
                     }
                 }
+                if !is_arkui_route
+                    && targets.is_empty()
+                    && language == "arkts"
+                    && !receiver_binding.is_empty()
+                    && imported_bindings.contains(&(file_id, receiver_binding.clone()))
+                {
+                    if let Some(root) = harmony_project_root(&file) {
+                        targets.extend(
+                            direct
+                                .iter()
+                                .filter(|candidate| path_is_within(&candidate.3, &root))
+                                .map(|candidate| (candidate.0.clone(), candidate.1.clone(), 3)),
+                        );
+                    }
+                }
                 if !is_arkui_route && targets.is_empty() {
                     targets.extend(
                         direct
                             .iter()
                             .take(CALL_FANOUT_CAP + 1)
-                            .map(|candidate| (candidate.0.clone(), candidate.1.clone(), 3)),
+                            .map(|candidate| (candidate.0.clone(), candidate.1.clone(), 4)),
                     );
                 }
                 targets.sort_by(|left, right| {
@@ -1051,7 +1093,8 @@ impl Store {
                 (1, 1) => 0.99,
                 (2, 1) => 0.97,
                 (0..=2, _) => 0.65,
-                (3, 1) => 0.75,
+                (3, 1) => 0.9,
+                (4, 1) => 0.75,
                 _ => 0.35,
             };
             let scope = match (is_arkui_route, best_rank) {
@@ -1060,6 +1103,7 @@ impl Store {
                 (false, 0) => "receiver type",
                 (false, 1) => "same-file lexical scope",
                 (false, 2) => "explicit import scope",
+                (false, 3) => "verified Harmony project import scope",
                 _ => "language-wide fallback",
             };
             for (target_id, qualified_name, _) in
@@ -2296,6 +2340,20 @@ fn module_hint_matches(hint: &str, candidate: &str) -> bool {
         || candidate_without_extension.starts_with(&format!("{hint}/"))
         || candidate_without_extension.ends_with(&format!("/{hint}"))
         || candidate_without_extension.ends_with(&format!("/{hint}/index"))
+}
+
+fn harmony_project_root(path: &str) -> Option<String> {
+    let normalized = path.replace('\\', "/");
+    let components = normalized.split('/').collect::<Vec<_>>();
+    let marker = components
+        .iter()
+        .position(|component| matches!(*component, "entry" | "feature" | "features"))?;
+    (marker > 0).then(|| components[..marker].join("/"))
+}
+
+fn path_is_within(path: &str, root: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    normalized == root || normalized.starts_with(&format!("{root}/"))
 }
 
 fn arkui_route_parts(path: &str) -> Option<(String, String)> {

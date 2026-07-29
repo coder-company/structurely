@@ -814,6 +814,7 @@ fn collect_calls(
                 output.push(UnresolvedCall {
                     caller_id: caller_id.unwrap_or(context.file_symbol_id).to_owned(),
                     callee_name: name.clone(),
+                    receiver_binding: call_receiver_name(function, context.source),
                     receiver_type: receiver_type_hint(
                         function,
                         node,
