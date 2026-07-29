@@ -233,6 +233,36 @@ fn tool_definitions() -> Vec<Value> {
             "annotations": read_only_annotations()
         }),
         json!({
+            "name": "structurely_trace",
+            "description": "Trace the shortest evidence-backed path between two symbols.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": ResourceBudget::MAX_IDENTIFIER_BYTES
+                    },
+                    "target": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": ResourceBudget::MAX_IDENTIFIER_BYTES
+                    },
+                    "sourceFile": { "type": "string" },
+                    "targetFile": { "type": "string" },
+                    "depth": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": ResourceBudget::MAX_TRAVERSAL_DEPTH,
+                        "default": 6
+                    },
+                    "projectPath": { "type": "string" }
+                },
+                "required": ["source", "target"]
+            },
+            "annotations": read_only_annotations()
+        }),
+        json!({
             "name": "structurely_status",
             "description": "Index health check.",
             "inputSchema": {
@@ -529,6 +559,21 @@ fn dispatch_tool(engine: &Engine, name: &str, arguments: &Value) -> Result<Value
             let depth =
                 number_argument(arguments, "depth", 2, ResourceBudget::MAX_TRAVERSAL_DEPTH)?;
             serde_json::to_value(engine.impact_named(symbol, file, depth)?)?
+        }
+        "structurely_trace" => {
+            let source = required_string(arguments, "source")?;
+            let target = required_string(arguments, "target")?;
+            let source_file = optional_string(arguments, "sourceFile")?;
+            let target_file = optional_string(arguments, "targetFile")?;
+            let depth =
+                number_argument(arguments, "depth", 6, ResourceBudget::MAX_TRAVERSAL_DEPTH)?;
+            serde_json::to_value(engine.trace_path_named(
+                source,
+                source_file,
+                target,
+                target_file,
+                depth,
+            )?)?
         }
         "structurely_status" => serde_json::to_value(engine.status()?)?,
         "structurely_files" => {
@@ -858,6 +903,7 @@ mod tests {
             "structurely_explore",
             "structurely_research",
             "structurely_impact",
+            "structurely_trace",
         ] {
             assert!(names.contains(&expected.to_owned()));
         }

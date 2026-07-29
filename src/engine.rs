@@ -86,6 +86,38 @@ pub struct ImpactHit {
     pub evidence: Evidence,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathTraceStatus {
+    Found,
+    NoPath,
+    SourceNotFound,
+    TargetNotFound,
+    AmbiguousSource,
+    AmbiguousTarget,
+    AmbiguousEndpoints,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PathTraceStep {
+    pub source: crate::model::Symbol,
+    pub target: crate::model::Symbol,
+    pub relationship: RelationshipKind,
+    pub evidence: Evidence,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PathTraceResult {
+    pub status: PathTraceStatus,
+    pub source_candidates: Vec<crate::model::Symbol>,
+    pub target_candidates: Vec<crate::model::Symbol>,
+    pub path: Vec<PathTraceStep>,
+    pub examined_nodes: usize,
+    pub examined_edges: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guidance: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ExploreHit {
     pub symbol: crate::model::Symbol,
@@ -1065,6 +1097,197 @@ impl Engine {
         Ok(output)
     }
 
+    /// Finds the shortest directed relationship path between two symbols.
+    ///
+    /// Names and qualified names are accepted, but ambiguous endpoints are
+    /// returned to the caller instead of silently choosing one. A file suffix
+    /// can disambiguate either endpoint. Every step retains the graph evidence
+    /// that caused it to be traversed.
+    pub fn trace_path_named(
+        &self,
+        source: &str,
+        source_file: Option<&str>,
+        target: &str,
+        target_file: Option<&str>,
+        max_depth: usize,
+    ) -> Result<PathTraceResult> {
+        let source = ResourceBudget::identifier(source)?;
+        let target = ResourceBudget::identifier(target)?;
+        let source_file = source_file.map(ResourceBudget::identifier).transpose()?;
+        let target_file = target_file.map(ResourceBudget::identifier).transpose()?;
+        let max_depth = ResourceBudget::traversal_depth(max_depth)?;
+        let source_candidates = self.trace_candidates(source, source_file)?;
+        let target_candidates = self.trace_candidates(target, target_file)?;
+
+        let endpoint_status = match (source_candidates.len(), target_candidates.len()) {
+            (0, _) => Some(PathTraceStatus::SourceNotFound),
+            (_, 0) => Some(PathTraceStatus::TargetNotFound),
+            (1, 1) => None,
+            (1, _) => Some(PathTraceStatus::AmbiguousTarget),
+            (_, 1) => Some(PathTraceStatus::AmbiguousSource),
+            (_, _) => Some(PathTraceStatus::AmbiguousEndpoints),
+        };
+        if let Some(status) = endpoint_status {
+            let guidance = match status {
+                PathTraceStatus::SourceNotFound => "source symbol was not found",
+                PathTraceStatus::TargetNotFound => "target symbol was not found",
+                PathTraceStatus::AmbiguousSource => {
+                    "source matched multiple symbols; provide source_file or a symbol ID"
+                }
+                PathTraceStatus::AmbiguousTarget => {
+                    "target matched multiple symbols; provide target_file or a symbol ID"
+                }
+                PathTraceStatus::AmbiguousEndpoints => {
+                    "both endpoints matched multiple symbols; provide file suffixes or symbol IDs"
+                }
+                PathTraceStatus::Found | PathTraceStatus::NoPath => unreachable!(),
+            };
+            return Ok(PathTraceResult {
+                status,
+                source_candidates,
+                target_candidates,
+                path: Vec::new(),
+                examined_nodes: 0,
+                examined_edges: 0,
+                guidance: Some(guidance.to_owned()),
+            });
+        }
+
+        let origin = source_candidates[0].clone();
+        let destination = target_candidates[0].clone();
+        if origin.id == destination.id {
+            return Ok(PathTraceResult {
+                status: PathTraceStatus::Found,
+                source_candidates,
+                target_candidates,
+                path: Vec::new(),
+                examined_nodes: 1,
+                examined_edges: 0,
+                guidance: None,
+            });
+        }
+
+        type Predecessor = (
+            String,
+            crate::model::Symbol,
+            crate::model::Symbol,
+            RelationshipKind,
+            Evidence,
+        );
+        let mut queue = std::collections::VecDeque::from([(origin.clone(), 0usize)]);
+        let mut visited = HashSet::from([origin.id.clone()]);
+        let mut predecessors = HashMap::<String, Predecessor>::new();
+        let mut examined_edges = 0usize;
+        let relationship_kinds = [
+            RelationshipKind::Calls,
+            RelationshipKind::References,
+            RelationshipKind::Imports,
+            RelationshipKind::Extends,
+            RelationshipKind::Implements,
+            RelationshipKind::Contains,
+        ];
+
+        while let Some((current, depth)) = queue.pop_front() {
+            if depth >= max_depth {
+                continue;
+            }
+            for kind in relationship_kinds {
+                let neighbors = self.store.related(&current.id, false, kind)?;
+                examined_edges = examined_edges
+                    .checked_add(neighbors.len())
+                    .ok_or_else(|| anyhow!("path trace edge work counter overflowed"))?;
+                if examined_edges > ResourceBudget::MAX_IMPACT_EDGES {
+                    bail!(
+                        "path trace exceeded the {}-edge work limit",
+                        ResourceBudget::MAX_IMPACT_EDGES
+                    );
+                }
+                for (neighbor, evidence) in neighbors {
+                    if !visited.insert(neighbor.id.clone()) {
+                        continue;
+                    }
+                    if visited.len() > ResourceBudget::MAX_IMPACT_NODES {
+                        bail!(
+                            "path trace exceeded the {}-node work limit",
+                            ResourceBudget::MAX_IMPACT_NODES
+                        );
+                    }
+                    predecessors.insert(
+                        neighbor.id.clone(),
+                        (
+                            current.id.clone(),
+                            current.clone(),
+                            neighbor.clone(),
+                            kind,
+                            evidence,
+                        ),
+                    );
+                    if neighbor.id == destination.id {
+                        let mut path = Vec::new();
+                        let mut cursor = destination.id.clone();
+                        while cursor != origin.id {
+                            let (previous, source, target, relationship, evidence) =
+                                predecessors.remove(&cursor).ok_or_else(|| {
+                                    anyhow!("path trace predecessor chain is incomplete")
+                                })?;
+                            path.push(PathTraceStep {
+                                source,
+                                target,
+                                relationship,
+                                evidence,
+                            });
+                            cursor = previous;
+                        }
+                        path.reverse();
+                        return Ok(PathTraceResult {
+                            status: PathTraceStatus::Found,
+                            source_candidates,
+                            target_candidates,
+                            path,
+                            examined_nodes: visited.len(),
+                            examined_edges,
+                            guidance: None,
+                        });
+                    }
+                    queue.push_back((neighbor, depth + 1));
+                }
+            }
+        }
+
+        Ok(PathTraceResult {
+            status: PathTraceStatus::NoPath,
+            source_candidates,
+            target_candidates,
+            path: Vec::new(),
+            examined_nodes: visited.len(),
+            examined_edges,
+            guidance: Some(format!(
+                "no directed relationship path was found within depth {max_depth}"
+            )),
+        })
+    }
+
+    fn trace_candidates(
+        &self,
+        identifier: &str,
+        file: Option<&str>,
+    ) -> Result<Vec<crate::model::Symbol>> {
+        Ok(self
+            .store
+            .find_symbols(identifier)?
+            .into_iter()
+            .filter(|symbol| {
+                file.is_none_or(|suffix| {
+                    symbol.file == suffix
+                        || symbol.file.ends_with(suffix)
+                        || Path::new(&symbol.file)
+                            .file_name()
+                            .is_some_and(|name| name == suffix)
+                })
+            })
+            .collect())
+    }
+
     fn related_named(
         &self,
         identifier: &str,
@@ -1322,6 +1545,86 @@ mod tests {
         let callees = engine.callees(&a.symbol.id).unwrap();
         assert_eq!(callees[0].0.name, "b");
         assert_eq!(callees[0].1.confidence, 0.75);
+    }
+
+    #[test]
+    fn path_trace_returns_the_shortest_evidence_bearing_route() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("flow.ts"),
+            "function finish() {}\n\
+             function middle() { finish(); }\n\
+             function start() { middle(); }\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+
+        let trace = engine
+            .trace_path_named("start", None, "finish", None, 4)
+            .unwrap();
+
+        assert_eq!(trace.status, PathTraceStatus::Found);
+        assert_eq!(trace.path.len(), 2);
+        assert_eq!(trace.path[0].source.name, "start");
+        assert_eq!(trace.path[0].target.name, "middle");
+        assert_eq!(trace.path[1].target.name, "finish");
+        assert!(trace
+            .path
+            .iter()
+            .all(|step| step.relationship == RelationshipKind::Calls
+                && !step.evidence.provenance.is_empty()
+                && !step.evidence.file.is_empty()));
+        assert!(trace.examined_nodes >= 3);
+        assert!(trace.examined_edges >= 2);
+    }
+
+    #[test]
+    fn path_trace_exposes_ambiguous_endpoints_and_accepts_file_suffixes() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join("one")).unwrap();
+        fs::create_dir(temp.path().join("two")).unwrap();
+        fs::write(
+            temp.path().join("one/flow.ts"),
+            "function finish() {}\nfunction start() { finish(); }\n",
+        )
+        .unwrap();
+        fs::write(temp.path().join("two/flow.ts"), "function start() {}\n").unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+
+        let ambiguous = engine
+            .trace_path_named("start", None, "finish", None, 3)
+            .unwrap();
+        assert_eq!(ambiguous.status, PathTraceStatus::AmbiguousSource);
+        assert_eq!(ambiguous.source_candidates.len(), 2);
+        assert!(ambiguous.path.is_empty());
+        assert!(ambiguous.guidance.unwrap().contains("source_file"));
+
+        let resolved = engine
+            .trace_path_named("start", Some("one/flow.ts"), "finish", None, 3)
+            .unwrap();
+        assert_eq!(resolved.status, PathTraceStatus::Found);
+        assert_eq!(resolved.path.len(), 1);
+    }
+
+    #[test]
+    fn path_trace_honors_the_depth_bound() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("flow.ts"),
+            "function finish() {}\n\
+             function middle() { finish(); }\n\
+             function start() { middle(); }\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+
+        let trace = engine
+            .trace_path_named("start", None, "finish", None, 1)
+            .unwrap();
+
+        assert_eq!(trace.status, PathTraceStatus::NoPath);
+        assert!(trace.path.is_empty());
+        assert!(trace.guidance.unwrap().contains("depth 1"));
     }
 
     #[test]

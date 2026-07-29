@@ -127,6 +127,50 @@ enum Command {
         #[arg(long, default_value_t = 2, value_parser = parse_traversal_depth)]
         depth: usize,
     },
+    /// Trace the shortest evidence-backed path between two symbols.
+    Trace {
+        /// Starting symbol name, qualified name, or stable ID.
+        #[arg(value_parser = parse_identifier)]
+        source: String,
+        /// Target symbol name, qualified name, or stable ID.
+        #[arg(value_parser = parse_identifier)]
+        target: String,
+        /// Optional source file suffix used to disambiguate the symbol.
+        #[arg(long, value_parser = parse_identifier)]
+        source_file: Option<String>,
+        /// Optional target file suffix used to disambiguate the symbol.
+        #[arg(long, value_parser = parse_identifier)]
+        target_file: Option<String>,
+        /// Initialized project root.
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        /// Maximum traversal depth (1-20).
+        #[arg(long, default_value_t = 6, value_parser = parse_traversal_depth)]
+        depth: usize,
+    },
+    /// Manage durable team workspace namespaces.
+    Workspace {
+        #[command(subcommand)]
+        command: WorkspaceCommand,
+    },
+    /// Record and inspect durable coding-agent sessions.
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
+    /// Generate a deterministic recap from a session's event history.
+    Recap {
+        /// Session ID.
+        session: String,
+        /// Project root containing durable state.
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+    },
+    /// Store and retrieve durable workspace memory.
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommand,
+    },
     /// Export a deterministic JSON snapshot of the graph.
     Snapshot {
         /// Initialized project root.
@@ -277,6 +321,100 @@ enum IntegrationCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum WorkspaceCommand {
+    /// Create a workspace.
+    Create {
+        name: String,
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+    },
+    /// List workspaces.
+    List {
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value_t = 20, value_parser = parse_result_limit)]
+        limit: usize,
+    },
+    /// Rename a workspace.
+    Rename {
+        id: String,
+        name: String,
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionCommand {
+    /// Start a session in a workspace.
+    Start {
+        workspace: String,
+        title: String,
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+    },
+    /// List session history.
+    List {
+        #[arg(long)]
+        workspace: Option<String>,
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value_t = 20, value_parser = parse_result_limit)]
+        limit: usize,
+    },
+    /// Append an event to an active session.
+    Add {
+        session: String,
+        kind: String,
+        body: String,
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+    },
+    /// Show a session and its ordered event history.
+    Show {
+        session: String,
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value_t = 100, value_parser = parse_result_limit)]
+        limit: usize,
+    },
+    /// Complete a session.
+    End {
+        session: String,
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemoryCommand {
+    /// Save durable memory in a workspace.
+    Remember {
+        workspace: String,
+        body: String,
+        #[arg(long, value_delimiter = ',')]
+        tags: Vec<String>,
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+    },
+    /// Search durable memory in a workspace.
+    Recall {
+        workspace: String,
+        query: String,
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value_t = 10, value_parser = parse_result_limit)]
+        limit: usize,
+    },
+    /// Remove one memory by ID.
+    Forget {
+        id: String,
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+    },
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -379,6 +517,154 @@ fn main() -> Result<()> {
                 )?)?
             );
         }
+        Command::Trace {
+            source,
+            target,
+            source_file,
+            target_file,
+            path,
+            depth,
+        } => {
+            let engine = Engine::open_read_only(path)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&engine.trace_path_named(
+                    &source,
+                    source_file.as_deref(),
+                    &target,
+                    target_file.as_deref(),
+                    depth,
+                )?)?
+            );
+        }
+        Command::Workspace { command } => match command {
+            WorkspaceCommand::Create { name, path } => {
+                let store = structurely::state::StateStore::open(path)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&store.create_workspace(&name)?)?
+                );
+            }
+            WorkspaceCommand::List { path, limit } => {
+                let store = structurely::state::StateStore::open(path)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&store.list_workspaces(limit)?)?
+                );
+            }
+            WorkspaceCommand::Rename { id, name, path } => {
+                let store = structurely::state::StateStore::open(path)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&store.rename_workspace(&id, &name)?)?
+                );
+            }
+        },
+        Command::Session { command } => match command {
+            SessionCommand::Start {
+                workspace,
+                title,
+                path,
+            } => {
+                let store = structurely::state::StateStore::open(path)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&store.create_session(&workspace, &title)?)?
+                );
+            }
+            SessionCommand::List {
+                workspace,
+                path,
+                limit,
+            } => {
+                let store = structurely::state::StateStore::open(path)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &store.list_sessions(workspace.as_deref(), limit)?
+                    )?
+                );
+            }
+            SessionCommand::Add {
+                session,
+                kind,
+                body,
+                path,
+            } => {
+                let mut store = structurely::state::StateStore::open(path)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&store.append_event(&session, &kind, &body)?)?
+                );
+            }
+            SessionCommand::Show {
+                session,
+                path,
+                limit,
+            } => {
+                let store = structurely::state::StateStore::open(path)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "session": store.session(&session)?,
+                        "events": store.events(&session, limit)?,
+                        "recap": store.recap(&session)?,
+                    }))?
+                );
+            }
+            SessionCommand::End { session, path } => {
+                let store = structurely::state::StateStore::open(path)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&store.complete_session(&session)?)?
+                );
+            }
+        },
+        Command::Recap { session, path } => {
+            let store = structurely::state::StateStore::open(path)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&store.generate_recap(&session)?)?
+            );
+        }
+        Command::Memory { command } => match command {
+            MemoryCommand::Remember {
+                workspace,
+                body,
+                tags,
+                path,
+            } => {
+                let mut store = structurely::state::StateStore::open(path)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&store.remember(&workspace, &body, &tags)?)?
+                );
+            }
+            MemoryCommand::Recall {
+                workspace,
+                query,
+                path,
+                limit,
+            } => {
+                let store = structurely::state::StateStore::open(path)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &store.search_memories(&workspace, &query, limit)?
+                    )?
+                );
+            }
+            MemoryCommand::Forget { id, path } => {
+                let mut store = structurely::state::StateStore::open(path)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "id": id,
+                        "forgotten": store.forget(&id)?,
+                    }))?
+                );
+            }
+        },
         Command::Snapshot { path } => {
             let engine = Engine::open_read_only(path)?;
             println!("{}", serde_json::to_string_pretty(&engine.snapshot()?)?);

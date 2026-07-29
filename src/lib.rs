@@ -14,12 +14,13 @@ pub mod quality;
 mod semantic;
 pub mod setup;
 mod source;
+pub mod state;
 pub mod store;
 pub mod workflow;
 
 pub use engine::{
     BenchmarkReport, Engine, ExploreHit, ImpactHit, IndexReport, NodeFile, NodeResult,
-    ProjectStatus, RelatedHit,
+    PathTraceResult, PathTraceStatus, PathTraceStep, ProjectStatus, RelatedHit,
 };
 pub use model::{Evidence, Language, Relationship, RelationshipKind, Symbol, SymbolKind};
 pub use quality::{LanguageQuality, QualityReport};
