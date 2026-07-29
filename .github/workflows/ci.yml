@@ -74,5 +74,9 @@ jobs:
         if: runner.os == 'Linux'
         run: python3 -m unittest scripts/test_compare_benchmarks.py
 
+      - name: Check documentation
+        if: runner.os == 'Linux'
+        run: python3 scripts/check_docs.py
+
       - name: Build release binary
         run: cargo build --release --locked

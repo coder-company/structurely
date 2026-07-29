@@ -1,55 +1,53 @@
-# CodeGraph 1.5.0 parity matrix
+# CodeGraph compatibility
 
-This matrix audits Structurely against CodeGraph 1.5.0 commit
-`572d22bfbe82602080e457bec655f72e3314f9ef`. “Compatible” requires executable
-behavioral evidence; matching a command or tool name is not enough.
+Structurely targets the coding-agent behavior of CodeGraph 1.5.0 at commit
+`572d22bfbe82602080e457bec655f72e3314f9ef`. It does not read or write
+CodeGraph's database format.
 
-| Capability | Status | Current evidence | Required parity evidence |
-|---|---|---|---|
-| Stable graph epochs and rollback | Superior | deterministic snapshots and injected rollback tests | preserve while expanding every resolver |
-| Index/query performance | Superior | current pinned 441-file v56 benchmark: 2.611× index, 9.491× query p50, 7.994× query p95, 87.50% less peak memory, 12.29% smaller database | rerun after each major semantic layer |
-| Core CLI/MCP names and schemas | Compatible (core) | eight handlers, pinned contract fixture, persistent-stdio binary test, exact empty resource/template/prompt discovery probes, and current 25/25 live differential run against identity-verified pinned CodeGraph | pagination and cross-platform suites |
-| Explore context usefulness | Compatible (core) | global/per-symbol budgets, exact/corroborated ranking, line-numbered excerpts, omission/staleness disclosure, and a pinned differential flow scoring 1.0000 for both engines | broaden usefulness queries and add blinded large-repo evaluation |
-| Project config and custom extensions | Compatible (core) | `structurely.json`/`codegraph.json`; extension, exclude, include, includeIgnored, precedence and malformed-config tests | differential configuration fixture |
-| TS/JS path aliases | Compatible (core) | JSONC baseUrl/paths, wildcard specificity, target fallback, index/extension canonicalization and escape tests | representative real-repo evidence |
-| Workspace/package resolution | Compatible (core) | npm/yarn/pnpm workspaces, scoped packages, entrypoints/subpaths, Cargo crates, Go workspaces, and bounded Harmony ohpm `file:` dependencies with ambiguity/escape rejection, live differential, and pinned OpenHarmony evidence | Bun workspace fixture and broader representative monorepo gates |
-| Nested repositories and worktrees | Compatible (core) | opted-in embedded repositories and submodule gitdirs are indexed; linked worktree gitdirs are skipped as duplicate views; worktree roots require and support independent local indexes | real-git cross-platform subprocess coverage |
-| Framework resolvers | Partial | Express; all 53 deployed FastAPI endpoints and 49 exact dependency sites across pinned LightRAG and Graphiti, including ten endpoint-to-settings paths, with exact lexical/import/package-alias, immutable-path, `Annotated`, factory, nested-prefix, class-owned, evidence-site and incremental resolution; React Router JSX/object routes; Django `path`/`re_path`/legacy `url`; DRF viewsets; NestJS HTTP controllers plus import-proven websocket, message/event pattern, unary/streaming gRPC, and Query/Mutation/Subscription/ResolveField/ResolveReference GraphQL endpoints; and Vue/Svelte template children and events; adversarial fixtures and pinned real-repository gates | FastAPI `api_route(methods=...)`, dependency generator/yield semantics and function-local imports; non-Nest GraphQL ecosystems; broader Vue/Svelte directives; prioritized remaining adapters; and a second real repository per remaining adapter |
-| Callbacks and dynamic dispatch | Partial | named callbacks; exact byte-correlated positional and Python keyword-name-to-formal propagation, bounded formal-to-formal delegation, and bounded same-class callable-field storage/invocation; C/C++ direct and typedef function-pointer fields, assignments, positional/designated tables, include-visible chained layout dispatch, bounded field-to-field fixed-point propagation, typedef-proven file-local bare arrays with indexed/cast entries, exact argument-to-formal stored-field flow, and source-ordered, lexically scoped C++ local aliases with kills, rebinds, shadowing, conditional unions and C++17 `if`-initializer scope; type-proven same-file C++ function-pointer factories with explicit address return summaries, scoped local and immediate call-result dispatch, exact/may confidence, shadow/lambda rejection, incremental cleanup, and a pinned adversarial superiority gate where CodeGraph emits zero returned-target edges; per-translation-unit, project-confined compilation-database include resolution with ordered quote/general paths, duplicate-variant agreement, exact resolved paths, fail-closed ambiguity, canonical-context invalidation, bounded non-executing command parsing, incremental cleanup, and a pinned fixture where Structurely resolves both intended targets while CodeGraph resolves neither correctly; capped type-level may-call fanout, exact evidence sites, incremental cleanup, and pinned OpenHarmony player/libsamplerate evidence; accepted JS-family/ArkTS inline closure and Python lambda identities with nested ownership and rejected-call fallback; immediate TS/TSX/ArkTS call-result receivers through explicit simple nominal return annotations; scope-aware simple/nullable and outer-simple-generic receiver annotations, direct-new const arrow factories, exact Set/Array `for…of` elements, and bounded verified nearest-ancestor member lookup; initializer/object/array/assignment references; strict import/local/Harmony-project resolution; literal events; React `setState → render → JSX child`; bounded interface-to-implementation dispatch; app-scoped Harmony emitter channels with named/inline callbacks, immutable imported descriptors/member constants, exact top-level same-file constructor-built descriptors, bounded barrel forwarding, and real OpenHarmony, LightRAG, and Django evidence; fanout/depth/work caps, incremental cleanup, rollback, provenance, adversarial tests, and pinned differential checks | Cross-file/include-visible and C function-pointer factories, cast or bare-name returns, overload and transitive factory flow, macro/conditional table construction, compiler `-D`/`-U`, response files, external/system and non-indexed generated headers; qualified/Promise return flow; deeper call-result chains with measured project targets; cross-file inferred factories and descriptor getter/field flow; broader heap/alias callback flow; inline callable forms in remaining languages; broader collection/member/type dispatch; Flutter rebuilds; and remaining cross-language event channels |
-| Language/dialect breadth | Behind | 23 language dialects; `.mts`/`.cts` TypeScript detection; Vue/Svelte component flows; offset-exact Astro frontmatter/scripts, imported template components and expressions, and `src/pages` routes; native ArkTS grammar; bounded ArkUI component/state/event/router/style-helper/emitter, component-owned popup `@Builder`, project-aware exact local/imported, inline-arrow/function, and trailing-child `@BuilderParam` registration plus consumer dispatch, and ohpm package flows; adversarial, incremental, live differential, and pinned real-repo gates | Objective-C, Liquid, Delphi, Luau, Astro alias/workspace component imports and renamed default-helper exports, cross-file-member/default/deferred ArkUI builder flows, and remaining CodeGraph dialects |
-| Daemon and shared live index | Compatible (core) | spawned-process start/status/catch-up/stop test; exclusive project lock; failure release/restart; MCP daemon/foreground fallback metadata; durable same-directory atomic state replacement; state-publication failures stop the watcher and propagate | cross-platform CI evidence and sustained fault-injection soak |
-| Installers and agent integrations | Compatible (core) | idempotent project-scoped Codex, Claude Code and Cursor install/status/uninstall tests preserve unrelated TOML/JSON; durable cross-platform atomic config replacement | executable client discovery smoke tests on release artifacts |
+## What matches
 
-The live agent-seam differential gate is `scripts/differential_mcp.py`; the
-representative repository gate is `scripts/acceptance_repositories.py`.
-Checked-in results remain evidence for their exact pinned revisions, not a
-claim that every framework pattern is supported.
+The pinned differential suite passes all 25 shared predicates:
 
-Graph model v67 supersedes the callbacks-row gap text for
-“macro/conditional table construction.” Structurely now resolves bounded,
-source-ordered object and non-variadic function macros in C/C++ callback
-tables, including nested substitution, designated/positional whole tables,
-pointer and struct arrays, include-context reevaluation, correlated
-`#if`/`#ifdef`/`#undef` state, constant boolean conditions, incremental
-cleanup, and fail-closed limits. The pinned
-[`c-macros-2026-07-29`](../benchmarks/c-macros-2026-07-29/README.md) gate
-resolves 14/14 intended targets versus 1/14 for CodeGraph 1.5.0. Compiler
-`-D`/`-U`, response files, variadics, stringification/token pasting, and
-external or generated non-indexed headers remain intentionally unsupported.
+- MCP initialization, tool discovery, resources, templates, and prompts;
+- search with exact and ambiguous names;
+- callers, callees, impact, node windows, and explore flows;
+- status and indexed-file resources;
+- React rendering, JSX children, interface dispatch, ArkUI state and events,
+  OpenHarmony packages and routes;
+- missing arguments, invalid limits, and missing symbols.
 
-## Delivery order
+Both implementations score 1.0 for required-fact recall, relevant-file recall,
+file precision, flow continuity, line-numbered source, and output budget. See
+the [accepted launch comparison](../benchmarks/release-hardening-2026-07-29/README.md).
 
-1. Deep project inventory and project-resolution context.
-2. TypeScript aliases, workspace packages, and canonical import targets.
-3. Budgeted and freshness-honest Explore/Node output.
-4. Function references, callbacks, and dynamic dispatch. (named callbacks and
-   literal events delivered; broader value-flow remains)
-5. Express/React Router and Django/FastAPI resolver adapters. (core adapters
-   delivered; broader framework-specific dispatch remains)
-6. Remaining framework and language adapters prioritized by real repositories.
-7. Shared daemon, project discovery, installers, and operational hardening.
-   (core daemon and three project-scoped integrations delivered)
+## What Structurely adds
 
-The matrix remains intentionally conservative. A capability moves to
-“compatible” only when a fixture exercises the behavior and a pinned
-differential or independently specified acceptance check passes.
+Every inferred relationship can include confidence, provenance, source
+location, and a plain-language explanation. Structurely also provides atomic
+graph epochs, deterministic snapshots, explicit freshness metadata, bounded
+public queries, fail-closed configuration, and corruption recovery that
+quarantines unsafe storage.
+
+The test suite includes deeper framework and language behavior for React,
+Express, React Router, FastAPI, Django, Django REST Framework, NestJS, Vue,
+Svelte, Astro, ArkUI, OpenHarmony, and C/C++ callback patterns. These additions
+do not change the compatible MCP fields.
+
+## Understand intentional limits
+
+Structurely does not claim database compatibility or complete static analysis
+of every runtime behavior. It fails closed when evidence is ambiguous or work
+would exceed a safety budget.
+
+Known limits include:
+
+- Objective-C, Liquid, Delphi, and Luau source;
+- arbitrary reflection, runtime code generation, and string-built dispatch;
+- unbounded heap-alias and cross-process callback flow;
+- external or generated headers that are not part of the indexed project;
+- every framework plugin or language dialect supported by future CodeGraph
+  releases.
+
+Treat relationships with lower confidence as candidates for inspection, not
+proof of runtime behavior. File a focused fixture when a missing relationship
+matters to your project.
