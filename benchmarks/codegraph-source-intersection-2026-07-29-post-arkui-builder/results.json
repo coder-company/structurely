@@ -1,0 +1,109 @@
+{
+  "protocol": {
+    "trials": 5,
+    "query_processes": 20,
+    "query": "CodeGraph",
+    "corpus_files": 441
+  },
+  "structurely": {
+    "fresh_index_wall_samples_ms": [
+      2615.385059,
+      2530.370503,
+      2769.666082,
+      2333.163093,
+      2934.77663
+    ],
+    "fresh_index_wall_p50_ms": 2615.385059,
+    "reported_engine_samples_ms": [
+      2574,
+      2217,
+      2746,
+      2301,
+      2898
+    ],
+    "reported_engine_p50_ms": 2574,
+    "query_samples_us": [
+      37329,
+      44149,
+      38317,
+      42524,
+      33646,
+      34559,
+      32651,
+      45379,
+      34277,
+      35320,
+      44047,
+      48148,
+      38168,
+      33268,
+      43754,
+      34364,
+      34292,
+      35468,
+      36922,
+      34613
+    ],
+    "query_p50_us": 36195.0,
+    "query_p95_us": 48148,
+    "database_bytes": 36851712,
+    "indexed_files": 441,
+    "symbols": 5177,
+    "relationships": 36788,
+    "max_rss_kb": 114700
+  },
+  "codegraph": {
+    "fresh_index_wall_samples_ms": [
+      7441.681265,
+      9211.955498,
+      10074.298802,
+      10635.081381,
+      10196.705564
+    ],
+    "fresh_index_wall_p50_ms": 10074.298802,
+    "reported_engine_samples_ms": [
+      3600,
+      4300,
+      4700,
+      6100,
+      5000
+    ],
+    "reported_engine_p50_ms": 4700,
+    "query_samples_us": [
+      472199,
+      348438,
+      380573,
+      334582,
+      359334,
+      326068,
+      320719,
+      363719,
+      355695,
+      306354,
+      319031,
+      361690,
+      332538,
+      319826,
+      370229,
+      373075,
+      380308,
+      326543,
+      314566,
+      312091
+    ],
+    "query_p50_us": 341510.0,
+    "query_p95_us": 472199,
+    "database_bytes": 44453888,
+    "indexed_files": 441,
+    "nodes": 8957,
+    "edges": 35801,
+    "max_rss_kb": 1013764
+  },
+  "acceptance": {
+    "index_speedup": 3.851937123878782,
+    "query_speedup": 9.435281116176267,
+    "minimum_index_speedup": 2.0,
+    "minimum_query_speedup": 2.0,
+    "passed": true
+  }
+}

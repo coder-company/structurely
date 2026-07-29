@@ -74,6 +74,10 @@ The `benchmarks/openharmony-imported-emitter-2026-07-28/` gate adds a real
 cross-file immutable event descriptor from KeyManager and passes 8/8
 correlated assertions. Matching differential and performance artifacts pin the
 same clean Structurely commit.
+The `benchmarks/openharmony-arkui-builder-2026-07-29/` gate adds a real
+children-bearing `bindPopup` registration and passes 9/9 correlated assertions.
+Matching differential and performance artifacts pin the same clean Structurely
+commit and binary.
 
 The authoritative capability inventory is
 [`codegraph-parity.md`](codegraph-parity.md). A matching command name or schema

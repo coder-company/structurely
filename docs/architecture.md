@@ -96,8 +96,16 @@ canonical value. Numeric and string channel identities remain distinct;
 dynamic IDs, mutable exports, reassignment, lexical shadows, ambiguous
 registrations or exports, and cross-application matches fail closed. Named and
 inline callbacks are supported. Constructor-built descriptors,
-callback-argument propagation, and advanced decorated `@Builder` flows are
-intentionally not yet resolved.
+callback-argument propagation, and `@BuilderParam` value flow are intentionally
+not yet resolved.
+
+Decorated component-owned `@Builder` methods passed through `bindPopup`
+options resolve only when the target is an exact `this.member` on the same
+component. The ArkTS resolver adapter handles both native modifier chains and
+the grammar's recovered sibling form for children-bearing components. Recovered
+chains must begin at an ArkUI component expression and contain contiguous
+leading-dot/parenthesized-argument pairs; orphan, interrupted, undecorated, and
+cross-component candidates fail closed.
 
 Direct calls and registrations carry their own provenance, confidence, and
 explanation through one resolution path. Literal event dispatch joins only

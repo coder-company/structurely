@@ -181,3 +181,14 @@ less peak memory. The
 [`real OpenHarmony gate`](../benchmarks/openharmony-imported-emitter-2026-07-28/README.md)
 passes 8/8 assertions and adds the cross-file imported KeyManager event
 descriptor flow.
+
+After recovered children-bearing ArkUI Builder modifier chains, the
+[`post-Builder differential`](../benchmarks/differential-mcp-2026-07-29-post-arkui-builder/README.md)
+keeps both engines at 22/22 shared compatibility and 1.0000 usefulness. The
+enforced
+[`performance run`](../benchmarks/codegraph-source-intersection-2026-07-29-post-arkui-builder/README.md)
+is 3.852× faster to index, 9.435× faster at query p50, and 9.807× faster at
+query p95 while using 88.69% less peak memory. The
+[`real OpenHarmony gate`](../benchmarks/openharmony-arkui-builder-2026-07-29/README.md)
+passes 9/9 assertions and adds the exact
+`ActionBarButton.build → ActionBarButton.PopupBuilder` registration.
