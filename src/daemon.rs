@@ -245,6 +245,10 @@ pub fn run(project: impl AsRef<Path>, debounce: Duration) -> Result<()> {
         Err(error) => DaemonState::stopped(&project, final_epoch, Some(error.to_string())),
     };
     write_state(&paths.state, &final_state)?;
+    // Release database and recovery handles before the daemon lock. Once
+    // status reports `running: false`, callers may safely remove or reopen the
+    // project on platforms with mandatory file locking.
+    drop(engine);
     FileExt::unlock(&lock)?;
     watch_result
 }
