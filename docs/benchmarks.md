@@ -343,3 +343,10 @@ materializes all 53 production endpoints across pinned LightRAG and Graphiti:
 42 and 11 respectively. It additionally requires zero public routes from
 unmounted router-only corpora and proves that a changed factory mount prefix
 propagates to every descendant.
+
+The
+[`FastAPI dependency gate`](../benchmarks/fastapi-dependencies-2026-07-29/README.md)
+resolves exactly 49 production dependency sites across the same pinned
+repositories: 36 in LightRAG and 13 in Graphiti. Graphiti's direct edges form
+exactly ten endpoint → `get_graphiti` → `get_settings` paths. Every edge has
+exact target-file provenance and a distinct nonzero evidence-site identity.

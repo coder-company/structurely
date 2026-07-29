@@ -155,6 +155,12 @@ model to v58 and materializes all 53 deployed production FastAPI endpoints from
 pinned LightRAG and Graphiti with exact route-to-handler/file provenance. Its
 metamorphic checks prove that unmounted router modules publish zero endpoints
 and that a changed factory mount prefix propagates to every descendant route.
+The `benchmarks/fastapi-dependencies-2026-07-29/` gate advances the graph model
+to v59 and the relationship schema to v2. It resolves exactly 36 LightRAG and
+13 Graphiti dependency sites, including ten exact Graphiti endpoint →
+`get_graphiti` → `get_settings` paths, with distinct evidence-site identity,
+exact callable/file provenance, and bounded fail-closed alias and factory
+resolution.
 
 The authoritative capability inventory is
 [`codegraph-parity.md`](codegraph-parity.md). A matching command name or schema
