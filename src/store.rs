@@ -1,12 +1,14 @@
 use crate::model::{
-    ArkuiBuilderFlowFacts, CFunctionPointerFacts, EventChannel, Evidence, FastApiFacts,
-    FastApiRouterRef, FileFacts, Language, Relationship, RelationshipKind, SourceSpan, Symbol,
-    SymbolKind, GRAPH_MODEL_VERSION,
+    ArkuiBuilderFlowFacts, CFunctionPointerBindingFact, CFunctionPointerFacts,
+    CMacroInitializerRole, CPreprocessorEventFact, CPreprocessorEventKind, CPreprocessorGuardFact,
+    CPreprocessorGuardKind, EventChannel, Evidence, FastApiFacts, FastApiRouterRef, FileFacts,
+    Language, Relationship, RelationshipKind, SourceSpan, Symbol, SymbolKind, GRAPH_MODEL_VERSION,
 };
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::Serialize;
 use std::{
+    cell::Cell,
     collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     time::Instant,
@@ -1034,6 +1036,9 @@ impl Store {
             || !file.c_function_pointers.returns.is_empty()
             || !file.c_function_pointers.factory_dispatches.is_empty()
             || !file.c_function_pointers.includes.is_empty()
+            || !file.c_function_pointers.preprocessor_guards.is_empty()
+            || !file.c_function_pointers.preprocessor_events.is_empty()
+            || !file.c_function_pointers.macro_initializers.is_empty()
         {
             let payload = serde_json::to_string(&file.c_function_pointers)?;
             tx.prepare_cached(
@@ -2080,6 +2085,69 @@ impl Store {
             candidates.sort();
             candidates.dedup();
         }
+        let macro_resolver = CMacroResolver::new(&files, &all_paths);
+        let mut macro_bindings = HashMap::<String, Vec<CFunctionPointerBindingFact>>::new();
+        let mut macro_array_target_names = HashMap::<(String, String), Vec<String>>::new();
+        for (path, facts) in &files {
+            let catalog = c_guard_catalog(facts);
+            for use_fact in &facts.macro_initializers {
+                let states = macro_resolver.states_at(path, use_fact.site_start_byte);
+                for state in states {
+                    if c_guard_truth(&use_fact.guard_path, &catalog, &state)
+                        == CPreprocessorTruth::False
+                    {
+                        continue;
+                    }
+                    let Some(expanded) = expand_c_macro_use(use_fact, &state) else {
+                        continue;
+                    };
+                    for initializer in parse_c_expanded_initializers(
+                        &expanded,
+                        use_fact.field_name.as_deref(),
+                        use_fact.field_index,
+                    ) {
+                        if use_fact.role == CMacroInitializerRole::PointerArrayElement {
+                            macro_array_target_names
+                                .entry((
+                                    path.clone(),
+                                    use_fact.receiver_path.first().cloned().unwrap_or_default(),
+                                ))
+                                .or_default()
+                                .push(initializer.target_name);
+                        } else {
+                            macro_bindings.entry(path.clone()).or_default().push(
+                                CFunctionPointerBindingFact {
+                                    owner_id: use_fact.owner_id.clone(),
+                                    receiver_type: use_fact.receiver_type.clone(),
+                                    receiver_path: use_fact.receiver_path.clone(),
+                                    field_name: initializer.field_name,
+                                    field_index: initializer.field_index,
+                                    target_name: initializer.target_name,
+                                    guard_path: Vec::new(),
+                                    line: use_fact.line,
+                                    site_start_byte: use_fact.site_start_byte,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        for bindings in macro_bindings.values_mut() {
+            bindings.sort_by(|left, right| {
+                left.site_start_byte
+                    .cmp(&right.site_start_byte)
+                    .then_with(|| left.field_name.cmp(&right.field_name))
+                    .then_with(|| left.field_index.cmp(&right.field_index))
+                    .then_with(|| left.target_name.cmp(&right.target_name))
+            });
+            bindings.dedup_by(|left, right| {
+                left.site_start_byte == right.site_start_byte
+                    && left.field_name == right.field_name
+                    && left.field_index == right.field_index
+                    && left.target_name == right.target_name
+            });
+        }
         let mut returned_pointer_targets = HashMap::<String, HashSet<String>>::new();
         for (path, facts) in &files {
             for returned in &facts.returns {
@@ -2131,6 +2199,28 @@ impl Store {
                 }
             }
         }
+        for (key, target_names) in macro_array_target_names {
+            let mut targets = target_names
+                .into_iter()
+                .flat_map(|target_name| {
+                    symbols_by_file_name
+                        .get(&(key.0.clone(), target_name))
+                        .filter(|candidates| candidates.len() == 1)
+                        .into_iter()
+                        .flatten()
+                        .cloned()
+                })
+                .collect::<Vec<_>>();
+            targets.sort();
+            targets.dedup();
+            if !targets.is_empty() && targets.len() <= TARGET_FANOUT_CAP {
+                array_targets.entry(key).or_default().extend(targets);
+            }
+        }
+        for targets in array_targets.values_mut() {
+            targets.sort();
+            targets.dedup();
+        }
 
         let mut registered = HashMap::<FieldKey, HashSet<String>>::new();
         let mut work = 0usize;
@@ -2138,11 +2228,24 @@ impl Store {
         paths.sort();
         for path in &paths {
             let facts = &files[path];
-            for binding in &facts.bindings {
+            for binding in facts
+                .bindings
+                .iter()
+                .chain(macro_bindings.get(path).into_iter().flatten())
+            {
                 if work >= WORK_CAP {
                     break;
                 }
                 work += 1;
+                if !binding.guard_path.is_empty()
+                    && macro_resolver.guard_truth(
+                        path,
+                        binding.site_start_byte,
+                        &binding.guard_path,
+                    ) == CPreprocessorTruth::False
+                {
+                    continue;
+                }
                 let Some(receiver_type) = binding.receiver_type.as_deref() else {
                     continue;
                 };
@@ -4728,6 +4831,778 @@ impl Store {
     }
 }
 
+const C_MACRO_EXPANSION_DEPTH_CAP: usize = 6;
+const C_MACRO_ENVIRONMENT_CAP: usize = 32;
+const C_MACRO_ARGUMENT_CAP: usize = 64;
+const C_MACRO_OUTPUT_BYTES_CAP: usize = 64 * 1024;
+const C_MACRO_TOKEN_WORK_CAP: usize = 4_096;
+const C_MACRO_REPLAY_WORK_CAP: usize = 100_000;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CPreprocessorTruth {
+    True,
+    False,
+    Unknown,
+}
+
+#[derive(Clone, Default)]
+struct CMacroState {
+    macros: HashMap<String, CPreprocessorEventFact>,
+    undefined: HashSet<String>,
+    branches: HashMap<usize, usize>,
+}
+type CGuardCatalog = HashMap<usize, Vec<CPreprocessorGuardFact>>;
+
+struct CMacroResolver<'a> {
+    files: &'a HashMap<String, CFunctionPointerFacts>,
+    all_paths: &'a HashSet<String>,
+    replay_work: Cell<usize>,
+}
+
+impl<'a> CMacroResolver<'a> {
+    fn new(
+        files: &'a HashMap<String, CFunctionPointerFacts>,
+        all_paths: &'a HashSet<String>,
+    ) -> Self {
+        Self {
+            files,
+            all_paths,
+            replay_work: Cell::new(0),
+        }
+    }
+
+    fn states_at(&self, file: &str, site: usize) -> Vec<CMacroState> {
+        if self.replay_work.get() >= C_MACRO_REPLAY_WORK_CAP {
+            return Vec::new();
+        }
+        let mut states = vec![CMacroState::default()];
+        let mut visiting = HashSet::new();
+        let mut work = 0usize;
+        if !self.replay_file(file, site, 0, &mut visiting, &mut states, &mut work) {
+            self.replay_work
+                .set(self.replay_work.get().saturating_add(work));
+            return Vec::new();
+        }
+        self.replay_work
+            .set(self.replay_work.get().saturating_add(work));
+        dedup_c_macro_states(&mut states);
+        states
+    }
+
+    fn replay_file(
+        &self,
+        file: &str,
+        before: usize,
+        depth: usize,
+        visiting: &mut HashSet<String>,
+        states: &mut Vec<CMacroState>,
+        work: &mut usize,
+    ) -> bool {
+        const INCLUDE_DEPTH_CAP: usize = 16;
+        if depth > INCLUDE_DEPTH_CAP
+            || self.replay_work.get().saturating_add(*work) >= C_MACRO_REPLAY_WORK_CAP
+            || !visiting.insert(file.to_owned())
+        {
+            return depth <= INCLUDE_DEPTH_CAP;
+        }
+        let Some(facts) = self.files.get(file) else {
+            visiting.remove(file);
+            return true;
+        };
+        enum Item<'b> {
+            Include(&'b crate::model::CIncludeFact),
+            Event(&'b CPreprocessorEventFact),
+        }
+        let mut items = facts
+            .includes
+            .iter()
+            .map(|include| (include.site_start_byte, Item::Include(include)))
+            .chain(
+                facts
+                    .preprocessor_events
+                    .iter()
+                    .map(|event| (event.site_start_byte, Item::Event(event))),
+            )
+            .filter(|(position, _)| *position < before)
+            .collect::<Vec<_>>();
+        items.sort_by_key(|(position, _)| *position);
+        let catalog = c_guard_catalog(facts);
+        for (_, item) in items {
+            *work = work.saturating_add(states.len().max(1));
+            if self.replay_work.get().saturating_add(*work) > C_MACRO_REPLAY_WORK_CAP {
+                visiting.remove(file);
+                return false;
+            }
+            match item {
+                Item::Include(include) => {
+                    let mut next = Vec::new();
+                    for state in states.iter() {
+                        for (variant, selected) in
+                            split_c_macro_state_for_guards(state, &include.guard_path, &catalog)
+                        {
+                            if selected {
+                                if let Some(target) =
+                                    resolve_c_include(file, include, self.all_paths)
+                                {
+                                    let mut included = vec![variant];
+                                    if !self.replay_file(
+                                        &target,
+                                        usize::MAX,
+                                        depth + 1,
+                                        visiting,
+                                        &mut included,
+                                        work,
+                                    ) {
+                                        visiting.remove(file);
+                                        return false;
+                                    }
+                                    next.extend(included);
+                                } else {
+                                    next.push(variant);
+                                }
+                            } else {
+                                next.push(variant);
+                            }
+                        }
+                    }
+                    dedup_c_macro_states(&mut next);
+                    if next.len() > C_MACRO_ENVIRONMENT_CAP {
+                        visiting.remove(file);
+                        return false;
+                    }
+                    *states = next;
+                }
+                Item::Event(event) => {
+                    let mut next = Vec::new();
+                    for state in states.iter() {
+                        for (mut variant, selected) in
+                            split_c_macro_state_for_guards(state, &event.guard_path, &catalog)
+                        {
+                            if selected {
+                                apply_c_preprocessor_event(&mut variant, event);
+                            }
+                            next.push(variant);
+                        }
+                    }
+                    dedup_c_macro_states(&mut next);
+                    if next.len() > C_MACRO_ENVIRONMENT_CAP {
+                        visiting.remove(file);
+                        return false;
+                    }
+                    *states = next;
+                }
+            }
+        }
+        visiting.remove(file);
+        true
+    }
+
+    fn guard_truth(
+        &self,
+        file: &str,
+        site: usize,
+        guards: &[CPreprocessorGuardFact],
+    ) -> CPreprocessorTruth {
+        let Some(facts) = self.files.get(file) else {
+            return CPreprocessorTruth::False;
+        };
+        let states = self.states_at(file, site);
+        if states.is_empty() {
+            return CPreprocessorTruth::False;
+        }
+        let catalog = c_guard_catalog(facts);
+        let mut saw_true = false;
+        let mut saw_false = false;
+        let mut saw_unknown = false;
+        for state in &states {
+            match c_guard_truth(guards, &catalog, state) {
+                CPreprocessorTruth::True => saw_true = true,
+                CPreprocessorTruth::False => saw_false = true,
+                CPreprocessorTruth::Unknown => saw_unknown = true,
+            }
+        }
+        if saw_unknown || (saw_true && saw_false) {
+            CPreprocessorTruth::Unknown
+        } else if saw_true {
+            CPreprocessorTruth::True
+        } else {
+            CPreprocessorTruth::False
+        }
+    }
+}
+
+fn c_guard_catalog(facts: &CFunctionPointerFacts) -> CGuardCatalog {
+    let mut catalog = CGuardCatalog::new();
+    let guards = facts.preprocessor_guards.iter();
+    for guard in guards {
+        let branches = catalog.entry(guard.group_start_byte).or_default();
+        if !branches
+            .iter()
+            .any(|candidate| candidate.branch_index == guard.branch_index)
+        {
+            branches.push(guard.clone());
+        }
+    }
+    for branches in catalog.values_mut() {
+        branches.sort_by_key(|guard| guard.branch_index);
+    }
+    catalog
+}
+
+fn c_guard_truth(
+    guards: &[CPreprocessorGuardFact],
+    catalog: &CGuardCatalog,
+    state: &CMacroState,
+) -> CPreprocessorTruth {
+    let variants = split_c_macro_state_for_guards(state, guards, catalog);
+    let selected = variants.iter().filter(|(_, selected)| *selected).count();
+    if selected == 0 {
+        CPreprocessorTruth::False
+    } else if selected == variants.len() {
+        CPreprocessorTruth::True
+    } else {
+        CPreprocessorTruth::Unknown
+    }
+}
+
+fn split_c_macro_state_for_guards(
+    state: &CMacroState,
+    guards: &[CPreprocessorGuardFact],
+    catalog: &CGuardCatalog,
+) -> Vec<(CMacroState, bool)> {
+    let mut variants = vec![state.clone()];
+    let mut groups = guards
+        .iter()
+        .map(|guard| guard.group_start_byte)
+        .collect::<Vec<_>>();
+    groups.sort();
+    groups.dedup();
+    for group in groups {
+        let mut next = Vec::new();
+        for variant in variants {
+            if variant.branches.contains_key(&group) {
+                next.push(variant);
+                continue;
+            }
+            let Some(branches) = catalog.get(&group) else {
+                next.push(variant);
+                continue;
+            };
+            for selected in c_feasible_preprocessor_branches(branches, &variant) {
+                let mut branch_variant = variant.clone();
+                branch_variant.branches.insert(group, selected);
+                next.push(branch_variant);
+            }
+        }
+        dedup_c_macro_states(&mut next);
+        if next.len() > C_MACRO_ENVIRONMENT_CAP {
+            return Vec::new();
+        }
+        variants = next;
+    }
+    variants
+        .into_iter()
+        .map(|variant| {
+            let selected = guards.iter().all(|guard| {
+                variant
+                    .branches
+                    .get(&guard.group_start_byte)
+                    .is_some_and(|branch| *branch == guard.branch_index)
+            });
+            (variant, selected)
+        })
+        .collect()
+}
+
+fn c_feasible_preprocessor_branches(
+    branches: &[CPreprocessorGuardFact],
+    state: &CMacroState,
+) -> Vec<usize> {
+    const NO_BRANCH: usize = usize::MAX;
+    let mut feasible = Vec::new();
+    let mut can_fall_through = true;
+    for branch in branches {
+        if !can_fall_through {
+            break;
+        }
+        if branch.kind == CPreprocessorGuardKind::Else {
+            feasible.push(branch.branch_index);
+            can_fall_through = false;
+            break;
+        }
+        match c_condition_truth(branch, state) {
+            CPreprocessorTruth::True => {
+                feasible.push(branch.branch_index);
+                can_fall_through = false;
+            }
+            CPreprocessorTruth::False => {}
+            CPreprocessorTruth::Unknown => {
+                feasible.push(branch.branch_index);
+            }
+        }
+    }
+    if can_fall_through {
+        feasible.push(NO_BRANCH);
+    }
+    feasible.sort();
+    feasible.dedup();
+    feasible
+}
+
+fn c_condition_truth(guard: &CPreprocessorGuardFact, state: &CMacroState) -> CPreprocessorTruth {
+    match guard.kind {
+        CPreprocessorGuardKind::Ifdef | CPreprocessorGuardKind::Elifdef => {
+            if state.macros.contains_key(guard.condition.trim()) {
+                CPreprocessorTruth::True
+            } else if state.undefined.contains(guard.condition.trim()) {
+                CPreprocessorTruth::False
+            } else {
+                CPreprocessorTruth::Unknown
+            }
+        }
+        CPreprocessorGuardKind::Ifndef | CPreprocessorGuardKind::Elifndef => {
+            if state.macros.contains_key(guard.condition.trim()) {
+                CPreprocessorTruth::False
+            } else if state.undefined.contains(guard.condition.trim()) {
+                CPreprocessorTruth::True
+            } else {
+                CPreprocessorTruth::Unknown
+            }
+        }
+        CPreprocessorGuardKind::Else => CPreprocessorTruth::True,
+        CPreprocessorGuardKind::If | CPreprocessorGuardKind::Elif => {
+            c_if_expression_truth(guard.condition.trim(), state)
+        }
+    }
+}
+
+fn c_if_expression_truth(expression: &str, state: &CMacroState) -> CPreprocessorTruth {
+    let expression = expression.trim();
+    if expression == "0" {
+        return CPreprocessorTruth::False;
+    }
+    if expression == "1" {
+        return CPreprocessorTruth::True;
+    }
+    let (negated, expression) = expression
+        .strip_prefix('!')
+        .map_or((false, expression), |rest| (true, rest.trim()));
+    let defined_name = expression
+        .strip_prefix("defined")
+        .map(str::trim)
+        .map(|name| name.trim_start_matches('(').trim_end_matches(')').trim())
+        .filter(|name| is_c_macro_identifier(name));
+    if let Some(name) = defined_name {
+        let truth = if state.macros.contains_key(name) {
+            CPreprocessorTruth::True
+        } else if state.undefined.contains(name) {
+            CPreprocessorTruth::False
+        } else {
+            CPreprocessorTruth::Unknown
+        };
+        return if negated {
+            match truth {
+                CPreprocessorTruth::True => CPreprocessorTruth::False,
+                CPreprocessorTruth::False => CPreprocessorTruth::True,
+                CPreprocessorTruth::Unknown => CPreprocessorTruth::Unknown,
+            }
+        } else {
+            truth
+        };
+    }
+    if is_c_macro_identifier(expression) {
+        if let Some(definition) = state.macros.get(expression) {
+            return match definition.replacement.trim() {
+                "" | "1" => CPreprocessorTruth::True,
+                "0" => CPreprocessorTruth::False,
+                _ => CPreprocessorTruth::Unknown,
+            };
+        }
+    }
+    CPreprocessorTruth::Unknown
+}
+
+fn apply_c_preprocessor_event(state: &mut CMacroState, event: &CPreprocessorEventFact) {
+    match event.kind {
+        CPreprocessorEventKind::Undef => {
+            state.macros.remove(&event.name);
+            state.undefined.insert(event.name.clone());
+        }
+        CPreprocessorEventKind::DefineObject | CPreprocessorEventKind::DefineFunction => {
+            state.undefined.remove(&event.name);
+            state.macros.insert(event.name.clone(), event.clone());
+        }
+    }
+}
+
+fn dedup_c_macro_states(states: &mut Vec<CMacroState>) {
+    let mut seen = HashSet::new();
+    states.retain(|state| {
+        let mut entries = state
+            .macros
+            .iter()
+            .map(|(name, event)| {
+                (
+                    name,
+                    event.kind,
+                    &event.parameters,
+                    &event.replacement,
+                    event.variadic,
+                    event.uses_stringification,
+                    event.uses_token_pasting,
+                )
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.0.cmp(right.0));
+        let mut undefined = state.undefined.iter().collect::<Vec<_>>();
+        undefined.sort();
+        let mut branches = state.branches.iter().collect::<Vec<_>>();
+        branches.sort();
+        seen.insert(format!("{entries:?}:{undefined:?}:{branches:?}"))
+    });
+}
+
+fn is_c_macro_identifier(value: &str) -> bool {
+    let mut characters = value.chars();
+    characters
+        .next()
+        .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+        && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
+}
+
+fn expand_c_macro_use(
+    use_fact: &crate::model::CMacroInitializerFact,
+    state: &CMacroState,
+) -> Option<String> {
+    let mut active = HashSet::new();
+    let mut work = 0usize;
+    expand_c_macro_text(&use_fact.expression, state, 0, &mut active, &mut work)
+}
+
+fn expand_c_macro_text(
+    text: &str,
+    state: &CMacroState,
+    depth: usize,
+    active: &mut HashSet<String>,
+    work: &mut usize,
+) -> Option<String> {
+    if depth > C_MACRO_EXPANSION_DEPTH_CAP || text.len() > C_MACRO_OUTPUT_BYTES_CAP {
+        return None;
+    }
+    let bytes = text.as_bytes();
+    let mut output = String::new();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        *work += 1;
+        if *work > C_MACRO_TOKEN_WORK_CAP || output.len() > C_MACRO_OUTPUT_BYTES_CAP {
+            return None;
+        }
+        if bytes[index] == b'_' || bytes[index].is_ascii_alphabetic() {
+            let start = index;
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index] == b'_' || bytes[index].is_ascii_alphanumeric())
+            {
+                index += 1;
+            }
+            let name = &text[start..index];
+            let Some(definition) = state.macros.get(name) else {
+                output.push_str(name);
+                continue;
+            };
+            if definition.variadic
+                || definition.uses_stringification
+                || definition.uses_token_pasting
+                || !active.insert(name.to_owned())
+            {
+                return None;
+            }
+            let replacement = match definition.kind {
+                CPreprocessorEventKind::Undef => None,
+                CPreprocessorEventKind::DefineObject => {
+                    expand_c_macro_text(&definition.replacement, state, depth + 1, active, work)
+                }
+                CPreprocessorEventKind::DefineFunction => {
+                    let mut open = index;
+                    while open < bytes.len() && bytes[open].is_ascii_whitespace() {
+                        open += 1;
+                    }
+                    if bytes.get(open) != Some(&b'(') {
+                        active.remove(name);
+                        output.push_str(name);
+                        continue;
+                    }
+                    let (arguments, end) = split_c_macro_arguments(text, open)?;
+                    if arguments.len() != definition.parameters.len()
+                        || arguments.len() > C_MACRO_ARGUMENT_CAP
+                    {
+                        return None;
+                    }
+                    index = end;
+                    let substituted = substitute_c_macro_parameters(
+                        &definition.replacement,
+                        &definition.parameters,
+                        &arguments,
+                    )?;
+                    expand_c_macro_text(&substituted, state, depth + 1, active, work)
+                }
+            };
+            active.remove(name);
+            output.push_str(&replacement?);
+            continue;
+        }
+        output.push(bytes[index] as char);
+        index += 1;
+    }
+    (output.len() <= C_MACRO_OUTPUT_BYTES_CAP).then_some(output)
+}
+
+fn split_c_macro_arguments(text: &str, open: usize) -> Option<(Vec<String>, usize)> {
+    let bytes = text.as_bytes();
+    let mut arguments = Vec::new();
+    let mut start = open + 1;
+    let mut index = start;
+    let mut depth = 1usize;
+    let mut quote = None;
+    let mut escaped = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == delimiter {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(byte, b'\'' | b'"') {
+            quote = Some(byte);
+        } else if matches!(byte, b'(' | b'{' | b'[') {
+            depth += 1;
+        } else if matches!(byte, b')' | b'}' | b']') {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                let argument = text[start..index].trim();
+                if !argument.is_empty() || !arguments.is_empty() {
+                    arguments.push(argument.to_owned());
+                }
+                return Some((arguments, index + 1));
+            }
+        } else if byte == b',' && depth == 1 {
+            arguments.push(text[start..index].trim().to_owned());
+            start = index + 1;
+        }
+        index += 1;
+    }
+    None
+}
+
+fn substitute_c_macro_parameters(
+    replacement: &str,
+    parameters: &[String],
+    arguments: &[String],
+) -> Option<String> {
+    let replacements = parameters
+        .iter()
+        .zip(arguments)
+        .map(|(parameter, argument)| (parameter.as_str(), argument.as_str()))
+        .collect::<HashMap<_, _>>();
+    let bytes = replacement.as_bytes();
+    let mut output = String::new();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == b'_' || bytes[index].is_ascii_alphabetic() {
+            let start = index;
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index] == b'_' || bytes[index].is_ascii_alphanumeric())
+            {
+                index += 1;
+            }
+            let token = &replacement[start..index];
+            if let Some(argument) = replacements.get(token) {
+                output.push_str(argument);
+            } else {
+                output.push_str(token);
+            }
+        } else {
+            output.push(bytes[index] as char);
+            index += 1;
+        }
+        if output.len() > C_MACRO_OUTPUT_BYTES_CAP {
+            return None;
+        }
+    }
+    Some(output)
+}
+
+#[derive(Debug)]
+struct CExpandedInitializer {
+    field_name: Option<String>,
+    field_index: Option<usize>,
+    target_name: String,
+}
+
+fn parse_c_expanded_initializers(
+    expanded: &str,
+    base_field_name: Option<&str>,
+    base_field_index: Option<usize>,
+) -> Vec<CExpandedInitializer> {
+    parse_c_expanded_initializers_at(expanded, base_field_name, base_field_index, 0)
+}
+
+fn parse_c_expanded_initializers_at(
+    expanded: &str,
+    base_field_name: Option<&str>,
+    base_field_index: Option<usize>,
+    depth: usize,
+) -> Vec<CExpandedInitializer> {
+    const NESTED_INITIALIZER_DEPTH_CAP: usize = 8;
+    if depth > NESTED_INITIALIZER_DEPTH_CAP {
+        return Vec::new();
+    }
+    let mut text = expanded.trim();
+    while text.starts_with('{') && text.ends_with('}') && c_outer_delimiters_wrap(text, b'{', b'}')
+    {
+        text = text[1..text.len() - 1].trim();
+    }
+    let entries = split_c_top_level(text, b',');
+    let mut output = Vec::new();
+    for (offset, entry) in entries.into_iter().enumerate() {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let (field_name, value) = if let Some(rest) = entry.strip_prefix('.') {
+            let Some((field, value)) = rest.split_once('=') else {
+                continue;
+            };
+            let field = field.trim();
+            if !is_c_macro_identifier(field) {
+                continue;
+            }
+            (Some(field.to_owned()), value.trim())
+        } else {
+            (base_field_name.map(str::to_owned), entry)
+        };
+        if value.starts_with('{')
+            && value.ends_with('}')
+            && c_outer_delimiters_wrap(value, b'{', b'}')
+        {
+            output.extend(parse_c_expanded_initializers_at(
+                value,
+                field_name.as_deref(),
+                base_field_index,
+                depth + 1,
+            ));
+            continue;
+        }
+        let Some(target_name) = c_expanded_callable_name(value) else {
+            continue;
+        };
+        output.push(CExpandedInitializer {
+            field_name,
+            field_index: base_field_name
+                .is_none()
+                .then(|| base_field_index.unwrap_or(0).saturating_add(offset)),
+            target_name,
+        });
+    }
+    output
+}
+
+fn c_outer_delimiters_wrap(text: &str, open: u8, close: u8) -> bool {
+    let bytes = text.as_bytes();
+    let mut depth = 0usize;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if byte == open {
+            depth += 1;
+        } else if byte == close {
+            let Some(next) = depth.checked_sub(1) else {
+                return false;
+            };
+            depth = next;
+            if depth == 0 && index + 1 != bytes.len() {
+                return false;
+            }
+        }
+    }
+    depth == 0
+}
+
+fn split_c_top_level(text: &str, delimiter: u8) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut output = Vec::new();
+    let mut start = 0usize;
+    let mut depths = [0usize; 3];
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if let Some(end) = quote {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == end {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(byte, b'\'' | b'"') {
+            quote = Some(byte);
+            continue;
+        }
+        match byte {
+            b'(' => depths[0] += 1,
+            b')' => depths[0] = depths[0].saturating_sub(1),
+            b'{' => depths[1] += 1,
+            b'}' => depths[1] = depths[1].saturating_sub(1),
+            b'[' => depths[2] += 1,
+            b']' => depths[2] = depths[2].saturating_sub(1),
+            _ if byte == delimiter && depths == [0, 0, 0] => {
+                output.push(&text[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    output.push(&text[start..]);
+    output
+}
+
+fn c_expanded_callable_name(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.bytes().any(|byte| {
+        !(byte == b'_'
+            || byte.is_ascii_alphanumeric()
+            || byte.is_ascii_whitespace()
+            || matches!(byte, b'&' | b'*' | b'(' | b')'))
+    }) {
+        return None;
+    }
+    let mut identifiers = Vec::new();
+    let bytes = value.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == b'_' || bytes[index].is_ascii_alphabetic() {
+            let start = index;
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index] == b'_' || bytes[index].is_ascii_alphanumeric())
+            {
+                index += 1;
+            }
+            identifiers.push(value[start..index].to_owned());
+        } else {
+            index += 1;
+        }
+    }
+    (identifiers.len() == 1).then(|| identifiers.remove(0))
+}
+
 fn normalize_c_type_name(type_name: &str) -> String {
     type_name
         .split_whitespace()
@@ -5461,6 +6336,41 @@ fn call_result_resolution_enabled(dependent_calls: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn c_macro_expansion_substitutes_nested_designated_initializers() {
+        let header = crate::parser::parse_file(
+            "defs.h",
+            "#define PASS(x) x\n#define SLOT(x) .slot_run = PASS(x)\n",
+        )
+        .unwrap();
+        let source = crate::parser::parse_file(
+            "main.c",
+            "typedef struct SlotOps { int (*slot_run)(int); } SlotOps;\n\
+             static int slot_target(int v) { return v; }\n\
+             static SlotOps table = { SLOT(slot_target) };\n",
+        )
+        .unwrap();
+        let mut state = CMacroState::default();
+        for event in header.c_function_pointers.preprocessor_events {
+            apply_c_preprocessor_event(&mut state, &event);
+        }
+        let use_fact = source
+            .c_function_pointers
+            .macro_initializers
+            .first()
+            .unwrap();
+        let expanded = expand_c_macro_use(use_fact, &state).unwrap();
+        assert_eq!(expanded.trim(), ".slot_run = slot_target");
+        let parsed = parse_c_expanded_initializers(
+            &expanded,
+            use_fact.field_name.as_deref(),
+            use_fact.field_index,
+        );
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].field_name.as_deref(), Some("slot_run"));
+        assert_eq!(parsed[0].target_name, "slot_target");
+    }
 
     #[test]
     fn astro_language_and_module_keys_round_trip_through_storage_helpers() {

@@ -8671,6 +8671,239 @@ def outer():
     }
 
     #[test]
+    fn c_macro_tables_and_preprocessor_guards_are_bounded_exact_and_incremental() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("defs.h"),
+            "#define INCLUDED included_target\n\
+             #define PASS(x) x\n\
+             #define SLOT(x) .slot_run = PASS(x)\n\
+             #define MAKE(x) { .whole_run = PASS(x) }\n",
+        )
+        .unwrap();
+        let source = |object_target: &str| {
+            format!(
+                "#include \"defs.h\"\n\
+                 typedef struct ObjectOps {{ int (*object_run)(int); }} ObjectOps;\n\
+                 typedef struct SlotOps {{ int (*slot_run)(int); }} SlotOps;\n\
+                 typedef struct WholeOps {{ int (*whole_run)(int); }} WholeOps;\n\
+                 typedef struct IncludedOps {{ int (*included_run)(int); }} IncludedOps;\n\
+                 typedef struct ConditionalOps {{ int (*conditional_run)(int); }} ConditionalOps;\n\
+                 typedef struct KnownOps {{ int (*known_run)(int); }} KnownOps;\n\
+                 typedef struct UnknownOps {{ int (*unknown_run)(int); }} UnknownOps;\n\
+                 typedef struct UndefOps {{ int (*undef_run)(int); }} UndefOps;\n\
+                 typedef struct RejectedOps {{ int (*rejected_run)(int); }} RejectedOps;\n\
+                 static int object_first(int v) {{ return v + 1; }}\n\
+                 static int object_second(int v) {{ return v + 2; }}\n\
+                 static int slot_target(int v) {{ return v + 3; }}\n\
+                 static int whole_target(int v) {{ return v + 4; }}\n\
+                 static int included_target(int v) {{ return v + 5; }}\n\
+                 static int included_second(int v) {{ return v + 6; }}\n\
+                 static int inactive_target(int v) {{ return v + 7; }}\n\
+                 static int active_target(int v) {{ return v + 8; }}\n\
+                 static int known_target(int v) {{ return v + 9; }}\n\
+                 static int known_decoy(int v) {{ return v - 9; }}\n\
+                 static int unknown_yes(int v) {{ return v + 10; }}\n\
+                 static int unknown_no(int v) {{ return v + 11; }}\n\
+                 static int undef_first(int v) {{ return v + 10; }}\n\
+                 static int undef_second(int v) {{ return v + 11; }}\n\
+                 static int rejected_target(int v) {{ return v + 12; }}\n\
+                 #define OBJECT {object_target}\n\
+                 static ObjectOps object_table = {{ OBJECT }};\n\
+                 static SlotOps slot_table = {{ SLOT(slot_target) }};\n\
+                 static WholeOps whole_table = MAKE(whole_target);\n\
+                 static IncludedOps included_table = {{ .included_run = INCLUDED }};\n\
+                 #if 0\n\
+                 static ConditionalOps inactive_table = {{ inactive_target }};\n\
+                 #else\n\
+                 static ConditionalOps active_table = {{ active_target }};\n\
+                 #endif\n\
+                 #define KNOWN 1\n\
+                 #ifdef KNOWN\n\
+                 static KnownOps known_table = {{ known_target }};\n\
+                 #else\n\
+                 static KnownOps known_bad = {{ known_decoy }};\n\
+                 #endif\n\
+                 #if EXTERNAL_FEATURE\n\
+                 static UnknownOps unknown_a = {{ unknown_yes }};\n\
+                 #else\n\
+                 static UnknownOps unknown_b = {{ unknown_no }};\n\
+                 #endif\n\
+                 #define PICK undef_first\n\
+                 #undef PICK\n\
+                 #define PICK undef_second\n\
+                 static UndefOps undef_table = {{ PICK }};\n\
+                 #define WRONG(x,y) x\n\
+                 #define PASTE(x) x ## _target\n\
+                 #define RECURSE RECURSE\n\
+                 static RejectedOps wrong = {{ WRONG(rejected_target) }};\n\
+                 static RejectedOps pasted = {{ PASTE(rejected) }};\n\
+                 static RejectedOps recursive = {{ RECURSE }};\n\
+                 int dispatch_object(ObjectOps *ops) {{ return ops->object_run(1); }}\n\
+                 int dispatch_slot(SlotOps *ops) {{ return ops->slot_run(1); }}\n\
+                 int dispatch_whole(WholeOps *ops) {{ return ops->whole_run(1); }}\n\
+                 int dispatch_included(IncludedOps *ops) {{ return ops->included_run(1); }}\n\
+                 int dispatch_conditional(ConditionalOps *ops) {{ return ops->conditional_run(1); }}\n\
+                 int dispatch_known(KnownOps *ops) {{ return ops->known_run(1); }}\n\
+                 int dispatch_unknown(UnknownOps *ops) {{ return ops->unknown_run(1); }}\n\
+                 int dispatch_undef(UndefOps *ops) {{ return ops->undef_run(1); }}\n\
+                 int dispatch_rejected(RejectedOps *ops) {{ return ops->rejected_run(1); }}\n"
+            )
+        };
+        fs::write(temp.path().join("main.c"), source("object_first")).unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let targets = |engine: &Engine, caller: &str| {
+            let symbol = engine
+                .search(caller, 20)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.name == caller)
+                .unwrap()
+                .symbol;
+            engine
+                .callees(&symbol.id)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, evidence)| {
+                    evidence.provenance == "dynamic/c-function-pointer-dispatch"
+                })
+                .map(|(target, _)| target.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(targets(&engine, "dispatch_object"), ["object_first"]);
+        assert_eq!(targets(&engine, "dispatch_slot"), ["slot_target"]);
+        assert_eq!(targets(&engine, "dispatch_whole"), ["whole_target"]);
+        assert_eq!(targets(&engine, "dispatch_included"), ["included_target"]);
+        assert_eq!(targets(&engine, "dispatch_conditional"), ["active_target"]);
+        assert_eq!(targets(&engine, "dispatch_known"), ["known_target"]);
+        assert_eq!(
+            targets(&engine, "dispatch_unknown"),
+            ["unknown_no", "unknown_yes"]
+        );
+        assert_eq!(targets(&engine, "dispatch_undef"), ["undef_second"]);
+        assert!(targets(&engine, "dispatch_rejected").is_empty());
+
+        fs::write(temp.path().join("main.c"), source("object_second")).unwrap();
+        engine.sync().unwrap();
+        assert_eq!(targets(&engine, "dispatch_object"), ["object_second"]);
+        fs::write(
+            temp.path().join("defs.h"),
+            "#define INCLUDED included_second\n\
+             #define PASS(x) x\n\
+             #define SLOT(x) .slot_run = PASS(x)\n\
+             #define MAKE(x) { .whole_run = PASS(x) }\n",
+        )
+        .unwrap();
+        engine.sync().unwrap();
+        assert_eq!(targets(&engine, "dispatch_included"), ["included_second"]);
+        assert_eq!(engine.sync().unwrap().files_changed, 0);
+    }
+
+    #[test]
+    fn c_macro_branch_correlation_rejects_impossible_tables_and_includes() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("inactive.h"),
+            "#define INACTIVE_HEADER inactive_header_target\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("main.c"),
+            r#"
+typedef int (*Callback)(int);
+typedef struct InactiveOps { int (*run)(int); } InactiveOps;
+typedef struct ImpossibleOps { int (*run)(int); } ImpossibleOps;
+typedef struct UndefOps { int (*run)(int); } UndefOps;
+typedef struct EmptyOps { int (*run)(int); } EmptyOps;
+typedef struct RowOps { int (*run)(int); } RowOps;
+
+static int good_target(int v) { return v + 1; }
+static int impossible_target(int v) { return v + 2; }
+static int inactive_header_target(int v) { return v + 3; }
+static int array_first(int v) { return v + 4; }
+static int array_second(int v) { return v + 5; }
+static int row_first(int v) { return v + 6; }
+static int row_second(int v) { return v + 7; }
+
+#if 0
+#include "inactive.h"
+#endif
+static InactiveOps inactive_include = { INACTIVE_HEADER };
+
+#if EXTERNAL_FEATURE
+#define ONLY_A impossible_target
+#else
+#define ONLY_B ONLY_A
+#endif
+static ImpossibleOps impossible_branch = { ONLY_B };
+
+#define FLAG 1
+#undef FLAG
+#ifdef FLAG
+static UndefOps explicit_undef_bad = { impossible_target };
+#else
+static UndefOps explicit_undef_good = { good_target };
+#endif
+
+#if 1
+static int ordinary_scalar;
+#else
+#define EMPTY_PRIMARY_BAD impossible_target
+#endif
+static EmptyOps empty_primary = { EMPTY_PRIMARY_BAD };
+
+#define CALLBACKS { array_first, array_second }
+static Callback callbacks[] = CALLBACKS;
+
+#define ROWS { { row_first }, { row_second } }
+static RowOps rows[] = ROWS;
+
+int dispatch_inactive(InactiveOps *ops) { return ops->run(1); }
+int dispatch_impossible(ImpossibleOps *ops) { return ops->run(1); }
+int dispatch_undef(UndefOps *ops) { return ops->run(1); }
+int dispatch_empty(EmptyOps *ops) { return ops->run(1); }
+int dispatch_array(unsigned i) { return callbacks[i](1); }
+int dispatch_rows(RowOps *ops) { return ops->run(1); }
+"#,
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let targets = |caller: &str| {
+            let symbol = engine
+                .search(caller, 20)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.name == caller)
+                .unwrap()
+                .symbol;
+            engine
+                .callees(&symbol.id)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, evidence)| {
+                    evidence.provenance == "dynamic/c-function-pointer-dispatch"
+                })
+                .map(|(target, _)| target.name)
+                .collect::<Vec<_>>()
+        };
+
+        let inactive = targets("dispatch_inactive");
+        assert!(
+            inactive.is_empty(),
+            "unexpected inactive targets: {inactive:?}"
+        );
+        let impossible = targets("dispatch_impossible");
+        assert!(
+            impossible.is_empty(),
+            "unexpected impossible targets: {impossible:?}"
+        );
+        assert_eq!(targets("dispatch_undef"), ["good_target"]);
+        assert!(targets("dispatch_empty").is_empty());
+        assert_eq!(targets("dispatch_array"), ["array_first", "array_second"]);
+        assert_eq!(targets("dispatch_rows"), ["row_first", "row_second"]);
+    }
+
+    #[test]
     fn watcher_makes_saved_symbols_query_visible() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("main.ts"), "function before() {}\n").unwrap();

@@ -4,10 +4,12 @@ use crate::model::{
     CFunctionPointerFactoryDispatchFact, CFunctionPointerFacts, CFunctionPointerFormalStorageFact,
     CFunctionPointerPropagationFact, CFunctionPointerReturnFact, CFunctionPointerTypedefFact,
     CIncludeFact, CLocalFunctionPointerBindingFact, CLocalFunctionPointerDispatchFact,
-    CStructFieldFact, CStructLayoutFact, CallableReturnFact, CallbackArgumentFact,
-    CallbackParameterDelegationFact, CallbackParameterInvocation, Evidence, FileFacts, Language,
-    PythonCallbackFormalFact, Relationship, RelationshipKind, SourceSpan, Symbol, SymbolKind,
-    UnresolvedCall, UnresolvedReference,
+    CMacroInitializerFact, CMacroInitializerRole, CPreprocessorEventFact, CPreprocessorEventKind,
+    CPreprocessorGuardFact, CPreprocessorGuardKind, CStructFieldFact, CStructLayoutFact,
+    CallableReturnFact, CallbackArgumentFact, CallbackParameterDelegationFact,
+    CallbackParameterInvocation, Evidence, FileFacts, Language, PythonCallbackFormalFact,
+    Relationship, RelationshipKind, SourceSpan, Symbol, SymbolKind, UnresolvedCall,
+    UnresolvedReference,
 };
 use crate::semantic::{enrich_file_facts, is_arkui_intrinsic_name};
 use anyhow::{anyhow, Context, Result};
@@ -1257,6 +1259,17 @@ fn collect_c_function_pointer_facts(
         &function_types,
         &mut facts,
     );
+    facts
+        .preprocessor_events
+        .sort_by_key(|event| event.site_start_byte);
+    facts.preprocessor_guards.sort_by_key(|guard| {
+        (
+            guard.group_start_byte,
+            guard.branch_index,
+            guard.branch_start_byte,
+        )
+    });
+    facts.preprocessor_guards.dedup();
     if facts.typedefs.len() > MAX_C_FUNCTION_POINTER_FACTS_PER_FILE {
         facts.typedefs.clear();
     }
@@ -1298,6 +1311,15 @@ fn collect_c_function_pointer_facts(
     }
     if facts.includes.len() > MAX_C_FUNCTION_POINTER_FACTS_PER_FILE {
         facts.includes.clear();
+    }
+    if facts.preprocessor_events.len() > MAX_C_FUNCTION_POINTER_FACTS_PER_FILE {
+        facts.preprocessor_events.clear();
+    }
+    if facts.preprocessor_guards.len() > MAX_C_FUNCTION_POINTER_FACTS_PER_FILE {
+        facts.preprocessor_guards.clear();
+    }
+    if facts.macro_initializers.len() > MAX_C_FUNCTION_POINTER_FACTS_PER_FILE {
+        facts.macro_initializers.clear();
     }
     facts
 }
@@ -1401,6 +1423,275 @@ fn collect_c_struct_layouts(
     }
 }
 
+const MAX_C_MACRO_NAME_BYTES: usize = 256;
+const MAX_C_MACRO_PARAMETERS: usize = 64;
+const MAX_C_MACRO_REPLACEMENT_BYTES: usize = 8 * 1024;
+const MAX_C_MACRO_INITIALIZER_BYTES: usize = 8 * 1024;
+
+fn collect_c_macro_definition(
+    node: Node<'_>,
+    source: &[u8],
+    output: &mut Vec<CPreprocessorEventFact>,
+) {
+    let Some(name_node) = node.child_by_field_name("name") else {
+        return;
+    };
+    let name = node_text(name_node, source);
+    if name.len() > MAX_C_MACRO_NAME_BYTES {
+        return;
+    }
+    let replacement = node
+        .child_by_field_name("value")
+        .map(|value| node_text(value, source))
+        .unwrap_or_default();
+    if replacement.len() > MAX_C_MACRO_REPLACEMENT_BYTES {
+        return;
+    }
+    let parameters_node = node.child_by_field_name("parameters");
+    let parameters = parameters_node
+        .map(|parameters| {
+            let mut cursor = parameters.walk();
+            parameters
+                .named_children(&mut cursor)
+                .filter(|parameter| parameter.kind() == "identifier")
+                .map(|parameter| node_text(parameter, source))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if parameters.len() > MAX_C_MACRO_PARAMETERS {
+        return;
+    }
+    let variadic = parameters_node
+        .map(|parameters| node_text(parameters, source).contains("..."))
+        .unwrap_or(false);
+    let (uses_stringification, uses_token_pasting) = c_macro_unsupported_operators(&replacement);
+    output.push(CPreprocessorEventFact {
+        kind: if parameters_node.is_some() {
+            CPreprocessorEventKind::DefineFunction
+        } else {
+            CPreprocessorEventKind::DefineObject
+        },
+        name,
+        parameters,
+        replacement,
+        variadic,
+        uses_stringification,
+        uses_token_pasting,
+        guard_path: c_preprocessor_guard_path(node, source),
+        line: node.start_position().row + 1,
+        site_start_byte: node.start_byte(),
+        site_end_byte: node.end_byte(),
+    });
+}
+
+fn collect_c_macro_undef(node: Node<'_>, source: &[u8], output: &mut Vec<CPreprocessorEventFact>) {
+    let Some(directive) = node.child_by_field_name("directive") else {
+        return;
+    };
+    let directive = node_text(directive, source);
+    let normalized = directive
+        .strip_prefix('#')
+        .map(str::trim_start)
+        .unwrap_or_default();
+    if normalized != "undef" {
+        return;
+    }
+    let Some(argument) = node.child_by_field_name("argument") else {
+        return;
+    };
+    let name = node_text(argument, source).trim().to_owned();
+    if name.len() > MAX_C_MACRO_NAME_BYTES || !is_c_identifier(&name) {
+        return;
+    }
+    output.push(CPreprocessorEventFact {
+        kind: CPreprocessorEventKind::Undef,
+        name,
+        parameters: Vec::new(),
+        replacement: String::new(),
+        variadic: false,
+        uses_stringification: false,
+        uses_token_pasting: false,
+        guard_path: c_preprocessor_guard_path(node, source),
+        line: node.start_position().row + 1,
+        site_start_byte: node.start_byte(),
+        site_end_byte: node.end_byte(),
+    });
+}
+
+fn is_c_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars
+        .next()
+        .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
+}
+
+fn c_macro_unsupported_operators(replacement: &str) -> (bool, bool) {
+    let bytes = replacement.as_bytes();
+    let mut index = 0;
+    let mut quote = None;
+    let mut escaped = false;
+    let mut stringification = false;
+    let mut token_pasting = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == delimiter {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(byte, b'\'' | b'"') {
+            quote = Some(byte);
+            index += 1;
+            continue;
+        }
+        if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
+            break;
+        }
+        if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
+            index += 2;
+            while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/') {
+                index += 1;
+            }
+            index = (index + 2).min(bytes.len());
+            continue;
+        }
+        if byte == b'#' {
+            if bytes.get(index + 1) == Some(&b'#') {
+                token_pasting = true;
+                index += 2;
+            } else {
+                stringification = true;
+                index += 1;
+            }
+            continue;
+        }
+        index += 1;
+    }
+    (stringification, token_pasting)
+}
+
+fn c_preprocessor_guard_path(node: Node<'_>, source: &[u8]) -> Vec<CPreprocessorGuardFact> {
+    let mut output = Vec::new();
+    let mut ancestor = node.parent();
+    while let Some(current) = ancestor {
+        match current.kind() {
+            "preproc_if" | "preproc_ifdef" => {
+                let in_alternative = current
+                    .child_by_field_name("alternative")
+                    .is_some_and(|alternative| c_node_contains(alternative, node));
+                if !in_alternative {
+                    output.push(c_preprocessor_primary_guard(current, source));
+                }
+            }
+            "preproc_elif" | "preproc_elifdef" | "preproc_else" => {
+                let in_later_alternative = current
+                    .child_by_field_name("alternative")
+                    .is_some_and(|alternative| c_node_contains(alternative, node));
+                if !in_later_alternative {
+                    output.push(c_preprocessor_alternative_guard(current, source));
+                }
+            }
+            _ => {}
+        }
+        ancestor = current.parent();
+    }
+    output.sort_by_key(|guard| (guard.group_start_byte, guard.branch_index));
+    output.dedup_by_key(|guard| guard.group_start_byte);
+    output
+}
+
+fn c_node_contains(parent: Node<'_>, child: Node<'_>) -> bool {
+    parent.start_byte() <= child.start_byte() && child.end_byte() <= parent.end_byte()
+}
+
+fn c_preprocessor_primary_guard(node: Node<'_>, source: &[u8]) -> CPreprocessorGuardFact {
+    let raw = node_text(node, source);
+    let (kind, condition) = if node.kind() == "preproc_if" {
+        (
+            CPreprocessorGuardKind::If,
+            node.child_by_field_name("condition")
+                .map(|condition| node_text(condition, source))
+                .unwrap_or_default(),
+        )
+    } else {
+        let kind = if raw.trim_start().starts_with("#ifndef") {
+            CPreprocessorGuardKind::Ifndef
+        } else {
+            CPreprocessorGuardKind::Ifdef
+        };
+        (
+            kind,
+            node.child_by_field_name("name")
+                .map(|name| node_text(name, source))
+                .unwrap_or_default(),
+        )
+    };
+    CPreprocessorGuardFact {
+        group_start_byte: node.start_byte(),
+        branch_start_byte: node.start_byte(),
+        branch_index: 0,
+        kind,
+        condition,
+    }
+}
+
+fn c_preprocessor_alternative_guard(branch: Node<'_>, source: &[u8]) -> CPreprocessorGuardFact {
+    let mut group = branch;
+    let mut branch_index = 0;
+    while let Some(parent) = group.parent() {
+        if !matches!(
+            parent.kind(),
+            "preproc_if" | "preproc_ifdef" | "preproc_elif" | "preproc_elifdef"
+        ) || parent
+            .child_by_field_name("alternative")
+            .is_none_or(|alternative| alternative.id() != group.id())
+        {
+            break;
+        }
+        branch_index += 1;
+        group = parent;
+    }
+    let raw = node_text(branch, source);
+    let (kind, condition) = match branch.kind() {
+        "preproc_else" => (CPreprocessorGuardKind::Else, String::new()),
+        "preproc_elifdef" => {
+            let kind = if raw.trim_start().starts_with("#elifndef") {
+                CPreprocessorGuardKind::Elifndef
+            } else {
+                CPreprocessorGuardKind::Elifdef
+            };
+            (
+                kind,
+                branch
+                    .child_by_field_name("name")
+                    .map(|name| node_text(name, source))
+                    .unwrap_or_default(),
+            )
+        }
+        _ => (
+            CPreprocessorGuardKind::Elif,
+            branch
+                .child_by_field_name("condition")
+                .map(|condition| node_text(condition, source))
+                .unwrap_or_default(),
+        ),
+    };
+    CPreprocessorGuardFact {
+        group_start_byte: group.start_byte(),
+        branch_start_byte: branch.start_byte(),
+        branch_index,
+        kind,
+        condition,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn collect_c_function_pointer_observations(
     node: Node<'_>,
@@ -1413,7 +1704,23 @@ fn collect_c_function_pointer_observations(
     function_types: &HashMap<String, bool>,
     facts: &mut CFunctionPointerFacts,
 ) {
-    if node.kind() == "preproc_include" {
+    if matches!(node.kind(), "preproc_if" | "preproc_ifdef") {
+        facts
+            .preprocessor_guards
+            .push(c_preprocessor_primary_guard(node, source));
+    } else if matches!(
+        node.kind(),
+        "preproc_elif" | "preproc_elifdef" | "preproc_else"
+    ) {
+        facts
+            .preprocessor_guards
+            .push(c_preprocessor_alternative_guard(node, source));
+    }
+    if matches!(node.kind(), "preproc_def" | "preproc_function_def") {
+        collect_c_macro_definition(node, source, &mut facts.preprocessor_events);
+    } else if node.kind() == "preproc_call" {
+        collect_c_macro_undef(node, source, &mut facts.preprocessor_events);
+    } else if node.kind() == "preproc_include" {
         if let Some(path) = node
             .child_by_field_name("path")
             .filter(|path| matches!(path.kind(), "string_literal" | "system_lib_string"))
@@ -1429,6 +1736,7 @@ fn collect_c_function_pointer_observations(
                     path,
                     angled,
                     resolution: crate::model::CIncludeResolution::Unmanaged,
+                    guard_path: c_preprocessor_guard_path(node, source),
                     line: node.start_position().row + 1,
                     site_start_byte: node.start_byte(),
                 });
@@ -1536,6 +1844,7 @@ fn collect_c_function_pointer_observations(
                         field_name: Some(field_name),
                         field_index: None,
                         target_name,
+                        guard_path: c_preprocessor_guard_path(node, source),
                         line: node.start_position().row + 1,
                         site_start_byte: node.start_byte(),
                     });
@@ -1588,6 +1897,15 @@ fn collect_c_function_pointer_observations(
             file_symbol_id,
             callable_names,
             &mut facts.bindings,
+        );
+        collect_c_macro_initializers(
+            node,
+            source,
+            owners,
+            file_symbol_id,
+            callable_names,
+            function_types,
+            &mut facts.macro_initializers,
         );
     } else if node.kind() == "call_expression" {
         if let Some(function) = node.child_by_field_name("function") {
@@ -1807,6 +2125,248 @@ fn collect_c_initializer_bindings(
             );
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_c_macro_initializers(
+    declaration: Node<'_>,
+    source: &[u8],
+    owners: &HashMap<(usize, usize), String>,
+    file_symbol_id: &str,
+    callable_names: &std::collections::HashSet<String>,
+    function_types: &HashMap<String, bool>,
+    output: &mut Vec<CMacroInitializerFact>,
+) {
+    let receiver_type = declaration
+        .child_by_field_name("type")
+        .and_then(|node| c_type_name(node, source));
+    let mut cursor = declaration.walk();
+    for initializer in declaration
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() == "init_declarator")
+    {
+        let (Some(declarator), Some(value)) = (
+            initializer.child_by_field_name("declarator"),
+            initializer.child_by_field_name("value"),
+        ) else {
+            continue;
+        };
+        let Some(binding_name) = declarator_name(declarator).map(|name| node_text(name, source))
+        else {
+            continue;
+        };
+        let owner_id = owning_symbol_id(initializer, owners)
+            .cloned()
+            .unwrap_or_else(|| file_symbol_id.to_owned());
+        let array = first_descendant_or_self(declarator, "array_declarator").is_some();
+        let pointer_array = array
+            && (first_descendant_or_self(declarator, "pointer_declarator").is_some()
+                || receiver_type
+                    .as_ref()
+                    .and_then(|name| function_types.get(name))
+                    .copied()
+                    .unwrap_or(false));
+        if value.kind() != "initializer_list" {
+            collect_c_macro_initializer_use(
+                value,
+                &owner_id,
+                receiver_type.as_deref(),
+                &binding_name,
+                if pointer_array {
+                    CMacroInitializerRole::PointerArrayElement
+                } else if array {
+                    CMacroInitializerRole::AggregateElement
+                } else {
+                    CMacroInitializerRole::FieldValue
+                },
+                None,
+                None,
+                Some(0),
+                source,
+                callable_names,
+                output,
+            );
+            continue;
+        }
+        let mut value_cursor = value.walk();
+        for (element_index, element) in value
+            .named_children(&mut value_cursor)
+            .filter(|child| !child.is_extra())
+            .enumerate()
+        {
+            if array && element.kind() == "initializer_list" {
+                collect_c_macro_initializer_fields(
+                    element,
+                    &owner_id,
+                    receiver_type.as_deref(),
+                    &binding_name,
+                    Some(element_index),
+                    source,
+                    callable_names,
+                    output,
+                );
+                continue;
+            }
+            if array {
+                let expression = if element.kind() == "initializer_pair" {
+                    element.child_by_field_name("value")
+                } else {
+                    Some(element)
+                };
+                if let Some(expression) = expression {
+                    collect_c_macro_initializer_use(
+                        expression,
+                        &owner_id,
+                        receiver_type.as_deref(),
+                        &binding_name,
+                        if pointer_array {
+                            CMacroInitializerRole::PointerArrayElement
+                        } else {
+                            CMacroInitializerRole::AggregateElement
+                        },
+                        Some(element_index),
+                        None,
+                        None,
+                        source,
+                        callable_names,
+                        output,
+                    );
+                }
+                continue;
+            }
+            collect_c_macro_initializer_fields(
+                value,
+                &owner_id,
+                receiver_type.as_deref(),
+                &binding_name,
+                None,
+                source,
+                callable_names,
+                output,
+            );
+            break;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_c_macro_initializer_fields(
+    list: Node<'_>,
+    owner_id: &str,
+    receiver_type: Option<&str>,
+    binding_name: &str,
+    element_index: Option<usize>,
+    source: &[u8],
+    callable_names: &std::collections::HashSet<String>,
+    output: &mut Vec<CMacroInitializerFact>,
+) {
+    let mut cursor = list.walk();
+    for (field_index, value) in list
+        .named_children(&mut cursor)
+        .filter(|child| !child.is_extra())
+        .enumerate()
+    {
+        let (field_name, expression) = if value.kind() == "initializer_pair" {
+            (
+                value
+                    .child_by_field_name("designator")
+                    .and_then(declarator_name)
+                    .map(|name| node_text(name, source)),
+                value.child_by_field_name("value"),
+            )
+        } else {
+            (None, Some(value))
+        };
+        if let Some(expression) = expression {
+            collect_c_macro_initializer_use(
+                expression,
+                owner_id,
+                receiver_type,
+                binding_name,
+                CMacroInitializerRole::FieldValue,
+                element_index,
+                field_name.clone(),
+                field_name.is_none().then_some(field_index),
+                source,
+                callable_names,
+                output,
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_c_macro_initializer_use(
+    expression: Node<'_>,
+    owner_id: &str,
+    receiver_type: Option<&str>,
+    binding_name: &str,
+    role: CMacroInitializerRole,
+    element_index: Option<usize>,
+    field_name: Option<String>,
+    field_index: Option<usize>,
+    source: &[u8],
+    callable_names: &std::collections::HashSet<String>,
+    output: &mut Vec<CMacroInitializerFact>,
+) {
+    let Some((macro_name, arguments)) =
+        c_macro_initializer_invocation(expression, source, callable_names)
+    else {
+        return;
+    };
+    let raw = node_text(expression, source);
+    if raw.len() > MAX_C_MACRO_INITIALIZER_BYTES
+        || arguments
+            .as_ref()
+            .is_some_and(|arguments| arguments.len() > MAX_C_MACRO_PARAMETERS)
+    {
+        return;
+    }
+    output.push(CMacroInitializerFact {
+        owner_id: owner_id.to_owned(),
+        receiver_type: receiver_type.map(str::to_owned),
+        receiver_path: vec![binding_name.to_owned()],
+        role,
+        element_index,
+        expression: raw,
+        macro_name,
+        arguments,
+        field_name,
+        field_index,
+        guard_path: c_preprocessor_guard_path(expression, source),
+        line: expression.start_position().row + 1,
+        site_start_byte: expression.start_byte(),
+    });
+}
+
+fn c_macro_initializer_invocation(
+    mut expression: Node<'_>,
+    source: &[u8],
+    callable_names: &std::collections::HashSet<String>,
+) -> Option<(String, Option<Vec<String>>)> {
+    while matches!(
+        expression.kind(),
+        "pointer_expression" | "parenthesized_expression"
+    ) {
+        expression = expression.named_child(0)?;
+    }
+    if expression.kind() == "identifier" {
+        let name = node_text(expression, source);
+        return (!callable_names.contains(&name)).then_some((name, None));
+    }
+    if expression.kind() != "call_expression" {
+        return None;
+    }
+    let function = expression
+        .child_by_field_name("function")
+        .filter(|function| function.kind() == "identifier")?;
+    let arguments_node = expression.child_by_field_name("arguments")?;
+    let mut cursor = arguments_node.walk();
+    let arguments = arguments_node
+        .named_children(&mut cursor)
+        .map(|argument| node_text(argument, source))
+        .collect();
+    Some((node_text(function, source), Some(arguments)))
 }
 
 fn collect_c_function_pointer_arrays(
@@ -2098,6 +2658,7 @@ fn collect_c_initializer_element(
             field_name: field_name.clone(),
             field_index: field_name.is_none().then_some(index),
             target_name,
+            guard_path: c_preprocessor_guard_path(value, source),
             line: value.start_position().row + 1,
             site_start_byte: value.start_byte(),
         });
@@ -5656,5 +6217,167 @@ int array_dispatch(int slot, int x) { return callbacks[slot](x); }
                 .iter()
                 .any(|call| call.start_byte == dispatch.site_start_byte && !call.resolvable)
         }));
+    }
+
+    #[test]
+    fn persists_bounded_c_macro_events_guards_and_initializer_uses() {
+        let source = r#"
+typedef struct Ops { int (*run)(int); } Ops;
+static int alpha(int x) { return x; }
+static int beta(int x) { return x; }
+#define DIRECT alpha
+#define ROW(callback) { .run = callback }
+#define VARIADIC(first, ...) first
+#define STRINGIFY(value) #value
+#define PASTE(left, right) left ## right
+#ifdef FAST
+#define SELECT alpha
+static Ops guarded = { .run = alpha };
+#elif defined(SLOW)
+#define SELECT beta
+static Ops guarded = { .run = beta };
+#else
+#undef SELECT
+#define SELECT DIRECT
+static Ops guarded = { .run = alpha };
+#endif
+static Ops direct = { .run = DIRECT };
+static Ops table[] = {
+  ROW(alpha),
+  ROW(SELECT),
+};
+"#;
+        let facts = parse_file("macros.c", source).unwrap();
+        let pointers = &facts.c_function_pointers;
+
+        assert_eq!(
+            pointers
+                .preprocessor_events
+                .iter()
+                .map(|event| (event.kind, event.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (CPreprocessorEventKind::DefineObject, "DIRECT"),
+                (CPreprocessorEventKind::DefineFunction, "ROW"),
+                (CPreprocessorEventKind::DefineFunction, "VARIADIC"),
+                (CPreprocessorEventKind::DefineFunction, "STRINGIFY"),
+                (CPreprocessorEventKind::DefineFunction, "PASTE"),
+                (CPreprocessorEventKind::DefineObject, "SELECT"),
+                (CPreprocessorEventKind::DefineObject, "SELECT"),
+                (CPreprocessorEventKind::Undef, "SELECT"),
+                (CPreprocessorEventKind::DefineObject, "SELECT"),
+            ]
+        );
+        assert!(pointers
+            .preprocessor_events
+            .windows(2)
+            .all(|events| events[0].site_start_byte < events[1].site_start_byte));
+        let row = pointers
+            .preprocessor_events
+            .iter()
+            .find(|event| event.name == "ROW")
+            .unwrap();
+        assert_eq!(row.parameters, ["callback"]);
+        assert_eq!(row.replacement, "{ .run = callback }");
+        assert!(row.site_start_byte < row.site_end_byte);
+        assert!(!row.variadic);
+        assert!(!row.uses_stringification);
+        assert!(!row.uses_token_pasting);
+        assert!(
+            pointers
+                .preprocessor_events
+                .iter()
+                .find(|event| event.name == "VARIADIC")
+                .unwrap()
+                .variadic
+        );
+        assert!(
+            pointers
+                .preprocessor_events
+                .iter()
+                .find(|event| event.name == "STRINGIFY")
+                .unwrap()
+                .uses_stringification
+        );
+        assert!(
+            pointers
+                .preprocessor_events
+                .iter()
+                .find(|event| event.name == "PASTE")
+                .unwrap()
+                .uses_token_pasting
+        );
+
+        let guarded_events = pointers
+            .preprocessor_events
+            .iter()
+            .filter(|event| event.name == "SELECT")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            guarded_events[0].guard_path[0].kind,
+            CPreprocessorGuardKind::Ifdef
+        );
+        assert_eq!(guarded_events[0].guard_path[0].condition, "FAST");
+        assert_eq!(guarded_events[0].guard_path[0].branch_index, 0);
+        assert_eq!(
+            guarded_events[1].guard_path[0].kind,
+            CPreprocessorGuardKind::Elif
+        );
+        assert_eq!(guarded_events[1].guard_path[0].condition, "defined(SLOW)");
+        assert_eq!(guarded_events[1].guard_path[0].branch_index, 1);
+        assert_eq!(
+            guarded_events[2].guard_path[0].kind,
+            CPreprocessorGuardKind::Else
+        );
+        assert_eq!(guarded_events[2].guard_path[0].branch_index, 2);
+
+        let direct = pointers
+            .macro_initializers
+            .iter()
+            .find(|fact| fact.receiver_path == ["direct"])
+            .unwrap();
+        assert_eq!(direct.role, CMacroInitializerRole::FieldValue);
+        assert_eq!(direct.macro_name, "DIRECT");
+        assert_eq!(direct.arguments, None);
+        assert_eq!(direct.field_name.as_deref(), Some("run"));
+        assert!(direct.guard_path.is_empty());
+
+        let rows = pointers
+            .macro_initializers
+            .iter()
+            .filter(|fact| fact.receiver_path == ["table"])
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 2);
+        assert!(rows
+            .iter()
+            .all(|fact| fact.role == CMacroInitializerRole::AggregateElement));
+        assert_eq!(rows[0].element_index, Some(0));
+        assert_eq!(rows[0].macro_name, "ROW");
+        assert_eq!(
+            rows[0].arguments.as_deref(),
+            Some(&["alpha".to_owned()][..])
+        );
+        assert_eq!(
+            rows[1].arguments.as_deref(),
+            Some(&["SELECT".to_owned()][..])
+        );
+
+        let guarded_bindings = pointers
+            .bindings
+            .iter()
+            .filter(|binding| binding.receiver_path == ["guarded"])
+            .collect::<Vec<_>>();
+        assert_eq!(guarded_bindings.len(), 3);
+        assert_eq!(
+            guarded_bindings
+                .iter()
+                .map(|binding| binding.guard_path[0].kind)
+                .collect::<Vec<_>>(),
+            vec![
+                CPreprocessorGuardKind::Ifdef,
+                CPreprocessorGuardKind::Elif,
+                CPreprocessorGuardKind::Else,
+            ]
+        );
     }
 }

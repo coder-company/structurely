@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path};
 
-pub const GRAPH_MODEL_VERSION: u32 = 66;
+pub const GRAPH_MODEL_VERSION: u32 = 67;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -440,6 +440,9 @@ pub(crate) struct CFunctionPointerFacts {
     pub returns: Vec<CFunctionPointerReturnFact>,
     pub factory_dispatches: Vec<CFunctionPointerFactoryDispatchFact>,
     pub includes: Vec<CIncludeFact>,
+    pub preprocessor_guards: Vec<CPreprocessorGuardFact>,
+    pub preprocessor_events: Vec<CPreprocessorEventFact>,
+    pub macro_initializers: Vec<CMacroInitializerFact>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -474,6 +477,7 @@ pub(crate) struct CFunctionPointerBindingFact {
     pub field_name: Option<String>,
     pub field_index: Option<usize>,
     pub target_name: String,
+    pub guard_path: Vec<CPreprocessorGuardFact>,
     pub line: usize,
     pub site_start_byte: usize,
 }
@@ -593,6 +597,8 @@ pub(crate) struct CIncludeFact {
     pub angled: bool,
     #[serde(default)]
     pub resolution: CIncludeResolution,
+    #[serde(default)]
+    pub guard_path: Vec<CPreprocessorGuardFact>,
     pub line: usize,
     pub site_start_byte: usize,
 }
@@ -604,6 +610,75 @@ pub(crate) enum CIncludeResolution {
     Unmanaged,
     Resolved,
     Rejected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CPreprocessorEventKind {
+    DefineObject,
+    DefineFunction,
+    Undef,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CPreprocessorEventFact {
+    pub kind: CPreprocessorEventKind,
+    pub name: String,
+    pub parameters: Vec<String>,
+    pub replacement: String,
+    pub variadic: bool,
+    pub uses_stringification: bool,
+    pub uses_token_pasting: bool,
+    pub guard_path: Vec<CPreprocessorGuardFact>,
+    pub line: usize,
+    pub site_start_byte: usize,
+    pub site_end_byte: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CPreprocessorGuardKind {
+    If,
+    Ifdef,
+    Ifndef,
+    Elif,
+    Elifdef,
+    Elifndef,
+    Else,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CPreprocessorGuardFact {
+    pub group_start_byte: usize,
+    pub branch_start_byte: usize,
+    pub branch_index: usize,
+    pub kind: CPreprocessorGuardKind,
+    pub condition: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CMacroInitializerRole {
+    FieldValue,
+    AggregateElement,
+    PointerArrayElement,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CMacroInitializerFact {
+    pub owner_id: String,
+    pub receiver_type: Option<String>,
+    pub receiver_path: Vec<String>,
+    pub role: CMacroInitializerRole,
+    pub element_index: Option<usize>,
+    pub expression: String,
+    pub macro_name: String,
+    pub arguments: Option<Vec<String>>,
+    pub field_name: Option<String>,
+    pub field_index: Option<usize>,
+    pub guard_path: Vec<CPreprocessorGuardFact>,
+    pub line: usize,
+    pub site_start_byte: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
