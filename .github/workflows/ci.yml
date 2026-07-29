@@ -33,6 +33,25 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo fmt --check
 
+      - name: Check Unix installer
+        if: runner.os == 'Linux'
+        run: sh -n scripts/install.sh
+
+      - name: Check Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path install.ps1),
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | Format-List | Out-String | Write-Error
+          }
+
       - name: Lint all targets
         run: cargo clippy --all-targets -- -D warnings
 
