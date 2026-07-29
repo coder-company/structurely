@@ -112,6 +112,14 @@ records 23 inherited relationships across 19 sources and 11 targets. Matching
 differential and performance artifacts pin clean commit `d28838f`, retain
 22/22 compatibility and 1.0000 usefulness, pass both enforced 2× thresholds,
 and audit zero removed callback relationships.
+The
+`benchmarks/generic-receiver-emitter-descriptor-2026-07-29/` gate advances the
+graph model to v51. It records 34 real `LRUCache` relationships upgraded to
+exact 0.995 receiver resolution on the 441-file intersection and eight
+constructor-built OrangeShopping emitter facts on the 6,995-file OpenHarmony
+pin. The gate explicitly distinguishes the two exact inline registration
+relationships from the still-unimplemented formal-callback dispatch
+composition.
 
 The authoritative capability inventory is
 [`codegraph-parity.md`](codegraph-parity.md). A matching command name or schema

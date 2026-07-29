@@ -289,3 +289,9 @@ less peak memory and a 12.76% smaller database. Its semantic audit finds zero
 [`OpenHarmony inherited-member gate`](../benchmarks/openharmony-inherited-member-2026-07-29/README.md)
 passes 17/17 across 6,995 files and records 23 exact inherited relationships
 without losing the VoiceCallDemo nullable-receiver callback flows.
+
+The
+[`generic receiver and constructor-descriptor gate`](../benchmarks/generic-receiver-emitter-descriptor-2026-07-29/README.md)
+then records 34 `LRUCache` confidence upgrades on the 441-file intersection
+and recovers all eight real OrangeShopping constructor-built emitter channel
+facts (four registrations and four dispatches) on the 6,995-file pin.
