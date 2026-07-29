@@ -111,8 +111,31 @@ pub(crate) fn parse_file_as(
         .values()
         .map(|symbol| symbol.id.clone())
         .collect::<std::collections::HashSet<_>>();
+    let mut factory_returns = FactoryReturnMap::new();
+    collect_local_factory_returns(tree.root_node(), source_bytes, &mut factory_returns);
+    for returns in factory_returns.values_mut() {
+        returns.sort_by_key(|binding| binding.position);
+    }
+    let mut collection_elements = CollectionElementMap::new();
+    let mut reassigned_collections = std::collections::HashSet::new();
+    collect_collection_element_bindings(
+        tree.root_node(),
+        source_bytes,
+        &mut collection_elements,
+        &mut reassigned_collections,
+    );
+    collection_elements.retain(|key, _| !reassigned_collections.contains(key));
+    for elements in collection_elements.values_mut() {
+        elements.sort_by_key(|binding| binding.position);
+    }
     let mut receiver_bindings = ReceiverBindingMap::new();
-    collect_receiver_bindings(tree.root_node(), source_bytes, &mut receiver_bindings);
+    collect_receiver_bindings(
+        tree.root_node(),
+        source_bytes,
+        &factory_returns,
+        &collection_elements,
+        &mut receiver_bindings,
+    );
     for bindings in receiver_bindings.values_mut() {
         bindings.sort_by_key(|binding| binding.position);
     }
@@ -884,6 +907,8 @@ struct ReceiverBinding {
 }
 
 type ReceiverBindingMap = HashMap<(String, usize, usize), Vec<ReceiverBinding>>;
+type FactoryReturnMap = HashMap<(String, usize, usize), Vec<ReceiverBinding>>;
+type CollectionElementMap = HashMap<(String, usize, usize), Vec<ReceiverBinding>>;
 
 struct InlineCallbackCollection<'a> {
     source: &'a [u8],
@@ -1559,7 +1584,37 @@ fn receiver_binding_at_call(
         })
 }
 
-fn collect_receiver_bindings(node: Node<'_>, source: &[u8], output: &mut ReceiverBindingMap) {
+fn collect_receiver_bindings(
+    node: Node<'_>,
+    source: &[u8],
+    factory_returns: &FactoryReturnMap,
+    collection_elements: &CollectionElementMap,
+    output: &mut ReceiverBindingMap,
+) {
+    if matches!(node.kind(), "for_in_statement" | "for_of_statement") && for_loop_uses_of(node) {
+        if let (Some(left), Some(right)) = (
+            node.child_by_field_name("left"),
+            node.child_by_field_name("right"),
+        ) {
+            let binding_names = bound_binding_names(left, source);
+            let collection = transparent_collection_member(right, source);
+            if binding_names.len() == 1 {
+                if let Some(receiver_type) = collection.and_then(|collection| {
+                    receiver_binding_at_call(&collection, node, collection_elements)
+                }) {
+                    let (scope_start, scope_end) = receiver_binding_scope(node, true);
+                    output
+                        .entry((binding_names[0].clone(), scope_start, scope_end))
+                        .or_default()
+                        .push(ReceiverBinding {
+                            position: node.start_byte(),
+                            requires_prior_declaration: true,
+                            receiver_type: Some(receiver_type),
+                        });
+                }
+            }
+        }
+    }
     if node.kind() == "public_field_definition" {
         if let Some(name) = node.child_by_field_name("name") {
             let receiver_type = node
@@ -1604,6 +1659,9 @@ fn collect_receiver_bindings(node: Node<'_>, source: &[u8], output: &mut Receive
         if let Some(name) = name {
             let receiver_type = value
                 .and_then(|value| constructor_type(value, source))
+                .or_else(|| {
+                    value.and_then(|value| local_factory_call_type(value, source, factory_returns))
+                })
                 .or_else(|| declared_variable_type(node, source));
             let declares_binding = matches!(
                 node.kind(),
@@ -1621,14 +1679,21 @@ fn collect_receiver_bindings(node: Node<'_>, source: &[u8], output: &mut Receive
                     } else {
                         receiver_assignment_scope(&variable, node, output)
                     };
-                    output
+                    let bindings = output
                         .entry((variable, scope_start, scope_end))
-                        .or_default()
-                        .push(ReceiverBinding {
-                            position: node.start_byte(),
-                            requires_prior_declaration: true,
-                            receiver_type: simple_binding.then(|| receiver_type.clone()).flatten(),
-                        });
+                        .or_default();
+                    if receiver_type.is_none()
+                        && bindings.iter().any(|binding| {
+                            binding.position == node.start_byte() && binding.receiver_type.is_some()
+                        })
+                    {
+                        continue;
+                    }
+                    bindings.push(ReceiverBinding {
+                        position: node.start_byte(),
+                        requires_prior_declaration: true,
+                        receiver_type: simple_binding.then(|| receiver_type.clone()).flatten(),
+                    });
                 }
             }
         }
@@ -1662,8 +1727,239 @@ fn collect_receiver_bindings(node: Node<'_>, source: &[u8], output: &mut Receive
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        collect_receiver_bindings(child, source, output);
+        collect_receiver_bindings(child, source, factory_returns, collection_elements, output);
     }
+}
+
+fn collect_collection_element_bindings(
+    node: Node<'_>,
+    source: &[u8],
+    output: &mut CollectionElementMap,
+    reassigned: &mut std::collections::HashSet<(String, usize, usize)>,
+) {
+    if node.kind() == "public_field_definition" {
+        if let Some(name) = node.child_by_field_name("name") {
+            let receiver_type = node
+                .child_by_field_name("type")
+                .and_then(|annotation| {
+                    collection_element_annotation(&node_text(annotation, source))
+                })
+                .or_else(|| {
+                    node.child_by_field_name("value")
+                        .filter(|value| {
+                            matches!(
+                                value.kind(),
+                                "new_expression" | "object_creation_expression"
+                            )
+                        })
+                        .and_then(|value| collection_element_initializer(&node_text(value, source)))
+                });
+            let (scope_start, scope_end) = receiver_binding_scope(node, false);
+            output
+                .entry((
+                    format!("this.{}", node_text(name, source)),
+                    scope_start,
+                    scope_end,
+                ))
+                .or_default()
+                .push(ReceiverBinding {
+                    position: node.start_byte(),
+                    requires_prior_declaration: false,
+                    receiver_type,
+                });
+        }
+    }
+    if matches!(
+        node.kind(),
+        "assignment" | "assignment_expression" | "augmented_assignment_expression"
+    ) {
+        if let Some(member) = node
+            .child_by_field_name("left")
+            .or_else(|| node.child_by_field_name("name"))
+            .and_then(|left| direct_this_member(left, source))
+        {
+            let (scope_start, scope_end) = receiver_binding_scope(node, false);
+            reassigned.insert((member, scope_start, scope_end));
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_collection_element_bindings(child, source, output, reassigned);
+    }
+}
+
+fn collection_element_annotation(raw: &str) -> Option<String> {
+    let compact = raw
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    let annotation = compact.strip_prefix(':').unwrap_or(&compact);
+    ["Set<", "Array<", "ReadonlySet<", "ReadonlyArray<"]
+        .into_iter()
+        .find_map(|prefix| {
+            let element = annotation.strip_prefix(prefix)?.strip_suffix('>')?;
+            simple_receiver_name(element).then(|| element.to_owned())
+        })
+}
+
+fn collection_element_initializer(raw: &str) -> Option<String> {
+    let compact = raw
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    ["newSet<", "newArray<"].into_iter().find_map(|prefix| {
+        let tail = compact.strip_prefix(prefix)?;
+        let (element, arguments) = tail.split_once('>')?;
+        (simple_receiver_name(element) && arguments.starts_with('(') && arguments.ends_with(')'))
+            .then(|| element.to_owned())
+    })
+}
+
+fn direct_this_member(node: Node<'_>, source: &[u8]) -> Option<String> {
+    if node.kind() != "member_expression"
+        || node
+            .child_by_field_name("object")
+            .is_none_or(|object| node_text(object, source) != "this")
+    {
+        return None;
+    }
+    node.child_by_field_name("property")
+        .map(|property| format!("this.{}", node_text(property, source)))
+}
+
+fn transparent_collection_member(node: Node<'_>, source: &[u8]) -> Option<String> {
+    if let Some(member) = direct_this_member(node, source) {
+        return Some(member);
+    }
+    if node.kind() == "parenthesized_expression" {
+        return (node.named_child_count() == 1)
+            .then(|| node.named_child(0))
+            .flatten()
+            .and_then(|child| transparent_collection_member(child, source));
+    }
+    if node.kind() != "array" || node.named_child_count() != 1 {
+        return None;
+    }
+    let spread = node.named_child(0)?;
+    if spread.kind() != "spread_element" || spread.named_child_count() != 1 {
+        return None;
+    }
+    spread
+        .named_child(0)
+        .and_then(|child| direct_this_member(child, source))
+}
+
+fn for_loop_uses_of(node: Node<'_>) -> bool {
+    let mut cursor = node.walk();
+    let uses_of = node.children(&mut cursor).any(|child| child.kind() == "of");
+    uses_of
+}
+
+fn collect_local_factory_returns(node: Node<'_>, source: &[u8], output: &mut FactoryReturnMap) {
+    if node.kind() == "variable_declarator" {
+        if let Some(name) = node
+            .child_by_field_name("name")
+            .filter(|name| matches!(name.kind(), "identifier" | "simple_identifier" | "name"))
+        {
+            let receiver_type = node
+                .child_by_field_name("value")
+                .filter(|value| {
+                    matches!(value.kind(), "arrow_function" | "function_expression")
+                        && enclosing_const_declaration(node, source)
+                })
+                .and_then(|value| direct_factory_return_type(value, source));
+            let (scope_start, scope_end) = receiver_binding_scope(node, true);
+            output
+                .entry((node_text(name, source), scope_start, scope_end))
+                .or_default()
+                .push(ReceiverBinding {
+                    position: node.start_byte(),
+                    requires_prior_declaration: true,
+                    receiver_type,
+                });
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_local_factory_returns(child, source, output);
+    }
+}
+
+fn enclosing_const_declaration(node: Node<'_>, source: &[u8]) -> bool {
+    let mut ancestor = node.parent();
+    while let Some(declaration) = ancestor {
+        if matches!(
+            declaration.kind(),
+            "lexical_declaration" | "variable_declaration"
+        ) {
+            return node_text(declaration, source)
+                .trim_start()
+                .starts_with("const ");
+        }
+        if receiver_scope_kind(declaration.kind()) {
+            break;
+        }
+        ancestor = declaration.parent();
+    }
+    false
+}
+
+fn direct_factory_return_type(callable: Node<'_>, source: &[u8]) -> Option<String> {
+    let declaration = node_text(callable, source);
+    let trimmed = declaration.trim_start();
+    let mut modifier_cursor = callable.walk();
+    let has_async_modifier = callable
+        .children(&mut modifier_cursor)
+        .any(|child| child.kind() == "async");
+    if callable.kind().contains("generator")
+        || has_async_modifier
+        || trimmed.starts_with("async ")
+        || trimmed.starts_with("async(")
+        || trimmed.starts_with("function*")
+        || trimmed.starts_with("function *")
+    {
+        return None;
+    }
+    if let Some(return_type) = callable
+        .child_by_field_name("return_type")
+        .and_then(|annotation| simple_nominal_return_type(annotation, source))
+    {
+        return Some(return_type);
+    }
+    let body = callable
+        .child_by_field_name("body")
+        .or_else(|| callable.named_child(callable.named_child_count().saturating_sub(1)))?;
+    if matches!(body.kind(), "new_expression" | "object_creation_expression") {
+        return constructor_type(body, source);
+    }
+    if !matches!(body.kind(), "statement_block" | "block") {
+        return None;
+    }
+    let mut cursor = body.walk();
+    let statements = body.named_children(&mut cursor).collect::<Vec<_>>();
+    if statements.len() != 1 || statements[0].kind() != "return_statement" {
+        return None;
+    }
+    statements[0]
+        .named_child(0)
+        .and_then(|returned| constructor_type(returned, source))
+}
+
+fn local_factory_call_type(
+    value: Node<'_>,
+    source: &[u8],
+    factory_returns: &FactoryReturnMap,
+) -> Option<String> {
+    if !matches!(value.kind(), "call" | "call_expression") {
+        return None;
+    }
+    let function = value
+        .child_by_field_name("function")
+        .or_else(|| value.named_child(0))?;
+    if !matches!(function.kind(), "identifier" | "simple_identifier" | "name") {
+        return None;
+    }
+    receiver_binding_at_call(&node_text(function, source), value, factory_returns)
 }
 
 fn bound_binding_names(node: Node<'_>, source: &[u8]) -> Vec<String> {
@@ -1875,17 +2171,28 @@ fn declared_variable_type(node: Node<'_>, source: &[u8]) -> Option<String> {
 
 fn simple_receiver_type(annotation: Node<'_>, source: &[u8]) -> Option<String> {
     let raw = node_text(annotation, source);
-    let name = raw.trim().strip_prefix(':').unwrap_or(raw.trim()).trim();
+    let annotation = raw.trim().strip_prefix(':').unwrap_or(raw.trim()).trim();
+    let mut nominal_members = annotation
+        .split('|')
+        .map(str::trim)
+        .filter(|member| !matches!(*member, "null" | "undefined" | "void"))
+        .collect::<Vec<_>>();
+    if nominal_members.len() != 1 {
+        return None;
+    }
+    let name = nominal_members.remove(0);
+    simple_receiver_name(name).then(|| name.to_owned())
+}
+
+fn simple_receiver_name(name: &str) -> bool {
     let mut characters = name.chars();
-    let first = characters.next()?;
+    let Some(first) = characters.next() else {
+        return false;
+    };
     (first == '_' || first == '$' || first.is_ascii_alphabetic())
-        .then_some(())
-        .filter(|_| {
-            characters.all(|character| {
-                character == '_' || character == '$' || character.is_ascii_alphanumeric()
-            })
-        })?;
-    Some(name.to_owned())
+        && characters.all(|character| {
+            character == '_' || character == '$' || character.is_ascii_alphanumeric()
+        })
 }
 
 fn call_target_node(node: Node<'_>) -> Option<Node<'_>> {
@@ -2589,7 +2896,13 @@ mod tests {
         }
         let tree = parse_tree(Language::TypeScript, &source).unwrap();
         let mut bindings = ReceiverBindingMap::new();
-        collect_receiver_bindings(tree.root_node(), source.as_bytes(), &mut bindings);
+        collect_receiver_bindings(
+            tree.root_node(),
+            source.as_bytes(),
+            &FactoryReturnMap::new(),
+            &CollectionElementMap::new(),
+            &mut bindings,
+        );
 
         let value_buckets = bindings
             .iter()

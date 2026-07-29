@@ -1102,7 +1102,7 @@ mod tests {
         let connection = rusqlite::Connection::open(database).unwrap();
         connection
             .execute(
-                "UPDATE metadata SET value='47' WHERE key='graph_model_version'",
+                "UPDATE metadata SET value='48' WHERE key='graph_model_version'",
                 [],
             )
             .unwrap();
@@ -1608,6 +1608,149 @@ mod tests {
         assert!(callees
             .iter()
             .all(|(target, _)| target.qualified_name != "First.firstOnly"));
+    }
+
+    #[test]
+    fn const_arrow_factories_infer_local_receiver_types_without_scope_leaks() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("factory.ts"),
+            "class FileWatcher { start() {} stop() {} }\n\
+             class Decoy { start() {} stop() {} }\n\
+             export function suite() {\n\
+               const newWatcher = () => new FileWatcher()\n\
+               const watcher = newWatcher()\n\
+               watcher.start()\n\
+               watcher.stop()\n\
+             }\n\
+             export function shadowed() {\n\
+               const newWatcher = unknownFactory\n\
+               const watcher = newWatcher()\n\
+               watcher.start()\n\
+             }\n\
+             export function unsafeFactories(flag: boolean) {\n\
+               const asyncFactory = async\t() => new FileWatcher()\n\
+               const commentedAsyncFactory = async /* promise */ () => new FileWatcher()\n\
+               const branchedFactory = () => {\n\
+                 if (flag) { return new Decoy() }\n\
+                 return new FileWatcher()\n\
+               }\n\
+               const asyncWatcher = asyncFactory()\n\
+               const commentedAsyncWatcher = commentedAsyncFactory()\n\
+               const branchedWatcher = branchedFactory()\n\
+               asyncWatcher.start()\n\
+               commentedAsyncWatcher.start()\n\
+               branchedWatcher.start()\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let suite = engine
+            .search("suite", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.name == "suite")
+            .unwrap()
+            .symbol;
+        let callees = engine.callees(&suite.id).unwrap();
+        assert!(["FileWatcher.start", "FileWatcher.stop"]
+            .iter()
+            .all(|qualified_name| callees.iter().any(|(target, evidence)| {
+                target.qualified_name == *qualified_name && evidence.confidence == 0.995
+            })));
+        assert!(callees
+            .iter()
+            .all(|(target, _)| !target.qualified_name.starts_with("Decoy.")));
+        let shadowed = engine
+            .search("shadowed", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.name == "shadowed")
+            .unwrap()
+            .symbol;
+        assert!(engine
+            .callees(&shadowed.id)
+            .unwrap()
+            .iter()
+            .all(|(_, evidence)| evidence.confidence < 0.995));
+        let unsafe_factories = engine
+            .search("unsafeFactories", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.name == "unsafeFactories")
+            .unwrap()
+            .symbol;
+        assert!(engine
+            .callees(&unsafe_factories.id)
+            .unwrap()
+            .iter()
+            .filter(|(target, _)| target.name == "start")
+            .all(|(_, evidence)| evidence.confidence < 0.995));
+    }
+
+    #[test]
+    fn exact_collection_elements_type_for_of_receiver_bindings() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("collection.ts"),
+            "class MCPSession { stop() {} }\n\
+             class Decoy { stop() {} }\n\
+             class Daemon {\n\
+               private clients = new Set<MCPSession>()\n\
+               private weak = new WeakSet<Decoy>()\n\
+               private promised: Promise<Array<MCPSession>>\n\
+               private mutable = new Set<MCPSession>()\n\
+               private compound = new Set<MCPSession>()\n\
+               private chained = new Set<MCPSession>().values()\n\
+               reap(): void {\n\
+                 for (const session of [...this.clients]) { session.stop() }\n\
+               }\n\
+               invalidate(): void {\n\
+                 this.mutable = new Set<Decoy>()\n\
+                 this.compound ??= new Set<Decoy>()\n\
+               }\n\
+               unsafe(): void {\n\
+                 for (const key in this.clients) { key.stop() }\n\
+                 for (const transformed of transform(this.clients)) { transformed.stop() }\n\
+                 for (const weak of [...this.weak]) { weak.stop() }\n\
+                 for (const promised of [...this.promised]) { promised.stop() }\n\
+                 for (const stale of [...this.mutable]) { stale.stop() }\n\
+                 for (const compound of [...this.compound]) { compound.stop() }\n\
+                 for (const chained of [...this.chained]) { chained.stop() }\n\
+               }\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let reap = engine
+            .search("Daemon.reap", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.qualified_name == "Daemon.reap")
+            .unwrap()
+            .symbol;
+        let callees = engine.callees(&reap.id).unwrap();
+        assert!(callees.iter().any(|(target, evidence)| {
+            target.qualified_name == "MCPSession.stop" && evidence.confidence == 0.995
+        }));
+        assert!(callees
+            .iter()
+            .all(|(target, _)| target.qualified_name != "Decoy.stop"));
+        let unsafe_method = engine
+            .search("Daemon.unsafe", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.qualified_name == "Daemon.unsafe")
+            .unwrap()
+            .symbol;
+        assert!(engine
+            .callees(&unsafe_method.id)
+            .unwrap()
+            .iter()
+            .filter(|(target, _)| target.name == "stop")
+            .all(|(_, evidence)| evidence.confidence < 0.995));
     }
 
     #[test]
@@ -2811,6 +2954,59 @@ mod tests {
             "DeleteDialog.iconLoadCallback"
         );
         assert_eq!(callbacks[0].1.line, 9);
+    }
+
+    #[test]
+    fn nullable_typed_fields_preserve_inline_callback_flows() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("main.ets"),
+            "class SocketImpl {\n\
+               setOnCloseListener(callback: () => void): void { callback() }\n\
+             }\n\
+             class Decoy {\n\
+               setOnCloseListener(callback: () => void): void { callback() }\n\
+             }\n\
+             class Model {\n\
+               private socket: SocketImpl | null = null\n\
+               run(): void {\n\
+                 if (this.socket == null) { return }\n\
+                 this.socket.setOnCloseListener(() => { console.info('closed') })\n\
+               }\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let run = engine
+            .search("Model.run", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.qualified_name == "Model.run")
+            .unwrap()
+            .symbol;
+        let callees = engine.callees(&run.id).unwrap();
+        assert!(callees.iter().any(|(target, evidence)| {
+            target.qualified_name == "SocketImpl.setOnCloseListener" && evidence.confidence == 0.995
+        }));
+        assert!(callees
+            .iter()
+            .all(|(target, _)| target.qualified_name != "Decoy.setOnCloseListener"));
+        let callback = engine
+            .search("<callback setOnCloseListener argument 1 #1>", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.name == "<callback setOnCloseListener argument 1 #1>")
+            .unwrap()
+            .symbol;
+        assert!(engine
+            .callees_named("SocketImpl.setOnCloseListener", None, 10)
+            .unwrap()
+            .iter()
+            .any(|hit| {
+                hit.symbol.id == callback.id
+                    && hit.evidence.provenance == "dynamic/callback-argument"
+            }));
     }
 
     #[test]
