@@ -14,13 +14,9 @@ concurrency:
 
 jobs:
   test:
-    name: ${{ matrix.os }}
+    name: palantir-actions
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: [self-hosted, Linux, X64, palantir-actions]
     steps:
       - name: Check out source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -30,39 +26,21 @@ jobs:
         run: rustup show active-toolchain
 
       - name: Check formatting
-        if: runner.os == 'Linux'
         run: cargo fmt --check
 
       - name: Check Unix installer
-        if: runner.os == 'Linux'
         run: sh -n scripts/install.sh
-
-      - name: Check Windows installer
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $tokens = $null
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path install.ps1),
-            [ref]$tokens,
-            [ref]$errors
-          ) | Out-Null
-          if ($errors.Count -gt 0) {
-            $errors | Format-List | Out-String | Write-Error
-          }
 
       - name: Lint all targets
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Run tests
-        run: cargo test --lib --bins --test mcp_cli_contract --locked
+        run: cargo test --all-targets --all-features --locked
 
       - name: Verify daemon lifecycle
         run: cargo test --test daemon_cli --locked -- --nocapture
 
       - name: Verify semantic quality fixture
-        if: runner.os == 'Linux'
         shell: bash
         run: |
           cargo run --locked -- init fixtures/semantic
@@ -71,7 +49,6 @@ jobs:
             --manifest fixtures/semantic/quality.json
 
       - name: Enforce incremental visibility budget
-        if: runner.os == 'Linux'
         shell: bash
         run: |
           python3 - <<'PY'
@@ -94,11 +71,9 @@ jobs:
           PY
 
       - name: Test benchmark comparator
-        if: runner.os == 'Linux'
         run: python3 -m unittest scripts/test_compare_benchmarks.py
 
       - name: Check documentation
-        if: runner.os == 'Linux'
         run: python3 scripts/check_docs.py
 
       - name: Build release binary
