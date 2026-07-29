@@ -4953,6 +4953,7 @@ mod tests {
              }\n\
              const fortyTwo = new EventDescriptor(42)\n\
              let mutable = new EventDescriptor(42)\n\
+             mutable = new EventDescriptor(43)\n\
              const propertyMutated = new EventDescriptor(45)\n\
              propertyMutated.eventId = 46\n\
              function onDirect() {}\n\

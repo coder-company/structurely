@@ -424,13 +424,10 @@ fn collect_ohos_emitter_descriptors(
                 imports,
                 constructors,
             ) {
-                let constructor_built = value.kind() == "new_expression";
-                if !constructor_built || enclosing_const_declaration(node, source) {
-                    if output.contains_key(&name) {
-                        reassigned.insert(name.clone());
-                    }
-                    output.entry(name).or_default().push(channel);
+                if output.contains_key(&name) {
+                    reassigned.insert(name.clone());
                 }
+                output.entry(name).or_default().push(channel);
             }
         }
     }
@@ -456,23 +453,6 @@ fn collect_ohos_emitter_descriptors(
     for child in node.named_children(&mut cursor) {
         collect_ohos_emitter_descriptors(child, source, imports, constructors, output, reassigned);
     }
-}
-
-fn enclosing_const_declaration(node: Node<'_>, source: &[u8]) -> bool {
-    let mut ancestor = node.parent();
-    while let Some(candidate) = ancestor {
-        if matches!(
-            candidate.kind(),
-            "lexical_declaration" | "variable_declaration"
-        ) {
-            return text(candidate, source).trim_start().starts_with("const ");
-        }
-        if matches!(candidate.kind(), "statement_block" | "program") {
-            break;
-        }
-        ancestor = candidate.parent();
-    }
-    false
 }
 
 fn ohos_emitter_descriptor_constructors(node: Node<'_>, source: &[u8]) -> HashSet<String> {
