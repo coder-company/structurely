@@ -1,6 +1,7 @@
 use crate::model::{
-    CallbackArgumentFact, CallbackParameterInvocation, Evidence, FileFacts, Language, Relationship,
-    RelationshipKind, SourceSpan, Symbol, SymbolKind, UnresolvedCall, UnresolvedReference,
+    CallbackArgumentFact, CallbackParameterDelegationFact, CallbackParameterInvocation, Evidence,
+    FileFacts, Language, Relationship, RelationshipKind, SourceSpan, Symbol, SymbolKind,
+    UnresolvedCall, UnresolvedReference,
 };
 use crate::semantic::enrich_file_facts;
 use anyhow::{anyhow, Context, Result};
@@ -72,6 +73,7 @@ pub(crate) fn parse_file_as(
 
     let mut unresolved_calls = Vec::new();
     let mut callback_parameter_invocations = Vec::new();
+    let mut callback_parameter_delegations = Vec::new();
     let mut callback_arguments = Vec::new();
     let mut symbol_owners = symbols
         .iter()
@@ -97,6 +99,7 @@ pub(crate) fn parse_file_as(
         &call_context,
         &mut unresolved_calls,
         &mut callback_parameter_invocations,
+        &mut callback_parameter_delegations,
         &mut callback_arguments,
     );
     let mut unresolved_references = Vec::new();
@@ -116,6 +119,7 @@ pub(crate) fn parse_file_as(
         relationships,
         unresolved_calls,
         callback_parameter_invocations,
+        callback_parameter_delegations,
         callback_arguments,
         arkui_builder_flow: Default::default(),
         unresolved_references,
@@ -778,6 +782,7 @@ fn collect_calls(
     context: &CallCollectionContext<'_>,
     output: &mut Vec<UnresolvedCall>,
     callback_invocations: &mut Vec<CallbackParameterInvocation>,
+    callback_delegations: &mut Vec<CallbackParameterDelegationFact>,
     callback_arguments: &mut Vec<CallbackArgumentFact>,
 ) {
     if matches!(
@@ -830,6 +835,7 @@ fn collect_calls(
                     resolvable,
                     file: context.file.to_owned(),
                     line: node.start_position().row + 1,
+                    start_byte: node.start_byte(),
                 });
                 if let Some(invocation) = parameter_invocation {
                     if !callback_invocations.iter().any(|candidate| {
@@ -844,6 +850,7 @@ fn collect_calls(
                         &name,
                         caller_id.unwrap_or(context.file_symbol_id),
                         context,
+                        callback_delegations,
                         callback_arguments,
                     );
                 }
@@ -857,6 +864,7 @@ fn collect_calls(
             context,
             output,
             callback_invocations,
+            callback_delegations,
             callback_arguments,
         );
     }
@@ -980,6 +988,7 @@ fn collect_callback_arguments(
     callee_name: &str,
     caller_id: &str,
     context: &CallCollectionContext<'_>,
+    delegations: &mut Vec<CallbackParameterDelegationFact>,
     output: &mut Vec<CallbackArgumentFact>,
 ) {
     let Some(arguments) = call.child_by_field_name("arguments") else {
@@ -987,8 +996,23 @@ fn collect_callback_arguments(
     };
     let mut cursor = arguments.walk();
     for (argument_index, argument) in arguments.named_children(&mut cursor).enumerate() {
-        if is_parameter_reference(call, argument, context.source) {
-            continue;
+        match referenced_parameter(call, argument, context.source, context.symbol_owners) {
+            ParameterReference::Exact {
+                owner_id,
+                parameter_index,
+            } => {
+                delegations.push(CallbackParameterDelegationFact {
+                    owner_id,
+                    parameter_index,
+                    callee_name: callee_name.to_owned(),
+                    argument_index,
+                    line: call.start_position().row + 1,
+                    call_start_byte: call.start_byte(),
+                });
+                continue;
+            }
+            ParameterReference::Unsafe => continue,
+            ParameterReference::NotFormal => {}
         }
         let (target_name, target_qualified_hint) = match argument.kind() {
             "identifier" => (node_text(argument, context.source), None),
@@ -1025,6 +1049,7 @@ fn collect_callback_arguments(
             target_name,
             target_qualified_hint,
             line: call.start_position().row + 1,
+            call_start_byte: call.start_byte(),
         });
     }
 }
@@ -1059,12 +1084,27 @@ fn enclosing_container_name(node: Node<'_>, source: &[u8]) -> Option<String> {
     None
 }
 
-fn is_parameter_reference(call: Node<'_>, argument: Node<'_>, source: &[u8]) -> bool {
+enum ParameterReference {
+    NotFormal,
+    Unsafe,
+    Exact {
+        owner_id: String,
+        parameter_index: usize,
+    },
+}
+
+fn referenced_parameter(
+    call: Node<'_>,
+    argument: Node<'_>,
+    source: &[u8],
+    symbol_owners: &HashMap<(usize, usize), String>,
+) -> ParameterReference {
     if argument.kind() != "identifier" {
-        return false;
+        return ParameterReference::NotFormal;
     }
     let name = node_text(argument, source);
     let mut ancestor = call.parent();
+    let mut crossed_callable = false;
     while let Some(current) = ancestor {
         if matches!(
             current.kind(),
@@ -1074,17 +1114,94 @@ fn is_parameter_reference(call: Node<'_>, argument: Node<'_>, source: &[u8]) -> 
                 | "method_definition"
                 | "function_definition"
         ) {
-            return current
-                .child_by_field_name("parameters")
-                .is_some_and(|parameters| {
-                    direct_parameter_names(parameters, source)
-                        .iter()
-                        .any(|parameter| parameter.as_deref() == Some(name.as_str()))
-                });
+            let Some(parameters) = current.child_by_field_name("parameters") else {
+                crossed_callable = true;
+                ancestor = current.parent();
+                continue;
+            };
+            let parameter_index = direct_parameter_names(parameters, source)
+                .iter()
+                .position(|parameter| parameter.as_deref() == Some(name.as_str()));
+            let Some(parameter_index) = parameter_index else {
+                if parameter_tree_declares_name(parameters, &name, source) {
+                    return ParameterReference::Unsafe;
+                }
+                crossed_callable = true;
+                ancestor = current.parent();
+                continue;
+            };
+            let Some(owner_id) = symbol_owners
+                .get(&(current.start_byte(), current.end_byte()))
+                .cloned()
+            else {
+                return ParameterReference::Unsafe;
+            };
+            if crossed_callable || parameter_mutated_before(current, call, &name, source) {
+                return ParameterReference::Unsafe;
+            }
+            return ParameterReference::Exact {
+                owner_id,
+                parameter_index,
+            };
         }
         ancestor = current.parent();
     }
-    false
+    ParameterReference::NotFormal
+}
+
+fn parameter_tree_declares_name(node: Node<'_>, name: &str, source: &[u8]) -> bool {
+    if matches!(
+        node.kind(),
+        "identifier" | "shorthand_property_identifier_pattern"
+    ) && node_text(node, source) == name
+    {
+        return true;
+    }
+    let mut cursor = node.walk();
+    let declares = node
+        .named_children(&mut cursor)
+        .any(|child| parameter_tree_declares_name(child, name, source));
+    declares
+}
+
+fn parameter_mutated_before(callable: Node<'_>, call: Node<'_>, name: &str, source: &[u8]) -> bool {
+    fn visit(node: Node<'_>, before: usize, name: &str, source: &[u8]) -> bool {
+        if node.start_byte() >= before {
+            return false;
+        }
+        let mut cursor = node.walk();
+        let children = node.named_children(&mut cursor).collect::<Vec<_>>();
+        let assigned = match node.kind() {
+            "assignment_expression" | "augmented_assignment_expression" => node
+                .child_by_field_name("left")
+                .or_else(|| node.child_by_field_name("target"))
+                .is_some_and(|target| target_contains_identifier(target, name, source)),
+            "update_expression" => children
+                .iter()
+                .any(|child| target_contains_identifier(*child, name, source)),
+            "for_in_statement" | "for_of_statement" => node
+                .child_by_field_name("left")
+                .is_some_and(|target| target_contains_identifier(target, name, source)),
+            _ => false,
+        };
+        assigned
+            || children
+                .into_iter()
+                .any(|child| visit(child, before, name, source))
+    }
+
+    visit(callable, call.start_byte(), name, source)
+}
+
+fn target_contains_identifier(node: Node<'_>, name: &str, source: &[u8]) -> bool {
+    if node.kind() == "identifier" && node_text(node, source) == name {
+        return true;
+    }
+    let mut cursor = node.walk();
+    let contains = node
+        .named_children(&mut cursor)
+        .any(|child| target_contains_identifier(child, name, source));
+    contains
 }
 
 fn receiver_type_hint(
@@ -1345,6 +1462,33 @@ mod tests {
                 && argument.target_name == "selected"
                 && argument.target_qualified_hint.as_deref() == Some("Page.selected")
         }));
+
+        let delegated = parse_file(
+            "delegated.ts",
+            "function leaf(callback: () => void) { callback(); }\n\
+             function middle(callback: () => void) { leaf(callback); }\n",
+        )
+        .unwrap();
+        assert_eq!(delegated.callback_parameter_delegations.len(), 1);
+        let delegation = &delegated.callback_parameter_delegations[0];
+        assert_eq!(delegation.parameter_index, 0);
+        assert_eq!(delegation.callee_name, "leaf");
+        assert_eq!(delegation.argument_index, 0);
+        assert!(delegation.call_start_byte > 0);
+
+        let deferred_outer = parse_file(
+            "deferred.ts",
+            "function leaf(callback: () => void) { callback(); }\n\
+             function outer(callback: () => void) {\n\
+               [1].forEach(() => leaf(callback));\n\
+             }\n",
+        )
+        .unwrap();
+        assert!(deferred_outer.callback_parameter_delegations.is_empty());
+        assert!(deferred_outer
+            .callback_arguments
+            .iter()
+            .all(|argument| argument.target_name != "callback"));
     }
 
     #[test]

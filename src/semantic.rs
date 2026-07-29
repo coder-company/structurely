@@ -740,6 +740,7 @@ fn enrich_ohos_emitter_parts(
                     resolvable: true,
                     file: facts.path.clone(),
                     line: observation.start_position().row + 1,
+                    start_byte: observation.start_byte(),
                 });
                 name
             } else if matches!(callback.kind(), "arrow_function" | "function_expression") {
@@ -1758,6 +1759,7 @@ fn enrich_arkui_component(component: Node<'_>, source: &[u8], facts: &mut FileFa
             resolvable: true,
             file: facts.path.clone(),
             line: method.start_position().row + 1,
+            start_byte: method.start_byte(),
         });
     }
 }
@@ -1962,6 +1964,7 @@ fn collect_arkui_route_call(
         resolvable: true,
         file: facts.path.clone(),
         line: node.start_position().row + 1,
+        start_byte: node.start_byte(),
     });
 }
 
@@ -2293,6 +2296,7 @@ fn append_arkui_call(
         resolvable: true,
         file: facts.path.clone(),
         line: observation.start_position().row + 1,
+        start_byte: observation.start_byte(),
     });
 }
 
@@ -2471,6 +2475,7 @@ fn collect_component_template_edges(root: Node<'_>, source: &[u8], facts: &mut F
             resolvable: true,
             file: facts.path.clone(),
             line: byte_line(source, offset),
+            start_byte: offset,
         });
     }
     facts.symbols.push(component);
@@ -2712,6 +2717,7 @@ fn enrich_nestjs_controller(class: Node<'_>, source: &[u8], facts: &mut FileFact
                         resolvable: true,
                         file: facts.path.clone(),
                         line: decorator.start_position().row + 1,
+                        start_byte: decorator.start_byte(),
                     });
                     facts.symbols.push(route);
                 }
@@ -2962,6 +2968,7 @@ fn enrich_fastapi_definition(definition: Node<'_>, source: &[u8], facts: &mut Fi
             resolvable: true,
             file: facts.path.clone(),
             line: decorator.start_position().row + 1,
+            start_byte: decorator.start_byte(),
         });
         facts.symbols.push(route);
     }
@@ -3070,6 +3077,7 @@ fn enrich_django_call(call: Node<'_>, source: &[u8], facts: &mut FileFacts) {
         resolvable: true,
         file: facts.path.clone(),
         line: call.start_position().row + 1,
+        start_byte: call.start_byte(),
     });
     facts.symbols.push(route);
 }
@@ -3242,6 +3250,7 @@ fn enrich_javascript_call(call: Node<'_>, source: &[u8], facts: &mut FileFacts) 
             resolvable: true,
             file: facts.path.clone(),
             line: call.start_position().row + 1,
+            start_byte: call.start_byte(),
         });
     }
 }
@@ -3302,6 +3311,7 @@ fn collect_react_class_rerenders(node: Node<'_>, source: &[u8], facts: &mut File
                     resolvable: true,
                     file: facts.path.clone(),
                     line: method.start_position().row + 1,
+                    start_byte: method.start_byte(),
                 });
             }
         }
@@ -3407,6 +3417,7 @@ fn append_jsx_child_render(element: Node<'_>, source: &[u8], facts: &mut FileFac
         resolvable: true,
         file: facts.path.clone(),
         line: element.start_position().row + 1,
+        start_byte: element.start_byte(),
     });
 }
 
@@ -3558,6 +3569,7 @@ fn append_react_route(
         resolvable: true,
         file: facts.path.clone(),
         line: registration.start_position().row + 1,
+        start_byte: registration.start_byte(),
     });
     facts.symbols.push(route);
 }

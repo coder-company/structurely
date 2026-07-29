@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::Serialize;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -168,7 +168,8 @@ impl Store {
                 explanation TEXT NOT NULL DEFAULT 'direct call expression',
                 resolvable INTEGER NOT NULL DEFAULT 1,
                 evidence_file TEXT NOT NULL,
-                evidence_line INTEGER NOT NULL
+                evidence_line INTEGER NOT NULL,
+                start_byte INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS unresolved_calls_name_idx
                 ON unresolved_calls(callee_name);
@@ -178,6 +179,19 @@ impl Store {
                 parameter_index INTEGER NOT NULL,
                 PRIMARY KEY(file_id,owner_public_id,parameter_index)
             );
+            CREATE TABLE IF NOT EXISTS callback_parameter_delegations (
+                file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                owner_public_id TEXT NOT NULL,
+                parameter_index INTEGER NOT NULL,
+                callee_name TEXT NOT NULL,
+                argument_index INTEGER NOT NULL,
+                evidence_line INTEGER NOT NULL,
+                call_start_byte INTEGER NOT NULL,
+                PRIMARY KEY(
+                    file_id,owner_public_id,parameter_index,callee_name,
+                    argument_index,evidence_line,call_start_byte
+                )
+            );
             CREATE TABLE IF NOT EXISTS callback_argument_batches (
                 file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
                 payload TEXT NOT NULL
@@ -185,6 +199,12 @@ impl Store {
             CREATE TABLE IF NOT EXISTS arkui_builder_flow_batches (
                 file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
                 payload TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS resolved_call_targets (
+                call_id INTEGER NOT NULL REFERENCES unresolved_calls(id) ON DELETE CASCADE,
+                target_public_id TEXT NOT NULL,
+                target_qualified_name TEXT NOT NULL,
+                PRIMARY KEY(call_id,target_public_id)
             );
             CREATE TABLE IF NOT EXISTS dynamic_events (
                 id INTEGER PRIMARY KEY,
@@ -291,6 +311,12 @@ impl Store {
             "unresolved_calls",
             "resolvable",
             "INTEGER NOT NULL DEFAULT 1",
+        )?;
+        Self::ensure_column(
+            &self.connection,
+            "unresolved_calls",
+            "start_byte",
+            "INTEGER NOT NULL DEFAULT 0",
         )?;
         Self::ensure_column(
             &self.connection,
@@ -661,8 +687,8 @@ impl Store {
                 "INSERT INTO unresolved_calls(
                     file_id,caller_public_id,callee_name,receiver_binding,receiver_type,
                     target_file_hint,provenance,confidence,explanation,resolvable,
-                    evidence_file,evidence_line
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                    evidence_file,evidence_line,start_byte
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
             )?
             .execute(params![
                 file_id,
@@ -676,7 +702,8 @@ impl Store {
                 call.explanation,
                 call.resolvable,
                 call.file,
-                call.line as i64
+                call.line as i64,
+                call.start_byte as i64
             ])?;
         }
         for invocation in &file.callback_parameter_invocations {
@@ -691,6 +718,23 @@ impl Store {
                 invocation.parameter_index as i64
             ])?;
         }
+        for delegation in &file.callback_parameter_delegations {
+            tx.prepare_cached(
+                "INSERT INTO callback_parameter_delegations(
+                    file_id,owner_public_id,parameter_index,callee_name,
+                    argument_index,evidence_line,call_start_byte
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            )?
+            .execute(params![
+                file_id,
+                delegation.owner_id,
+                delegation.parameter_index as i64,
+                delegation.callee_name,
+                delegation.argument_index as i64,
+                delegation.line as i64,
+                delegation.call_start_byte as i64
+            ])?;
+        }
         if !file.callback_arguments.is_empty() {
             let arguments = file
                 .callback_arguments
@@ -703,6 +747,7 @@ impl Store {
                         argument.target_name.as_str(),
                         argument.target_qualified_hint.as_deref(),
                         argument.line,
+                        argument.call_start_byte,
                     )
                 })
                 .collect::<Vec<_>>();
@@ -812,6 +857,7 @@ impl Store {
     fn resolve_calls(tx: &Transaction<'_>) -> Result<usize> {
         const CALL_FANOUT_CAP: usize = 6;
         let mut resolved = Self::resolve_structural_references(tx)?;
+        tx.execute("DELETE FROM resolved_call_targets", [])?;
         tx.execute(
             "DELETE FROM relationships
              WHERE provenance IN (
@@ -828,9 +874,9 @@ impl Store {
             [],
         )?;
         let mut calls_statement = tx.prepare(
-            "SELECT u.caller_public_id,u.callee_name,u.receiver_binding,u.receiver_type,
+            "SELECT u.id,u.caller_public_id,u.callee_name,u.receiver_binding,u.receiver_type,
                     u.target_file_hint,u.provenance,u.confidence,u.explanation,
-                    u.evidence_file,u.evidence_line,s.language,u.file_id,u.resolvable
+                    u.evidence_file,u.evidence_line,s.language,u.file_id,u.resolvable,u.start_byte
              FROM unresolved_calls u
              JOIN symbols s ON s.public_id=u.caller_public_id
              ORDER BY u.evidence_file,u.evidence_line,u.id",
@@ -838,19 +884,21 @@ impl Store {
         let calls = calls_statement
             .query_map([], |row| {
                 Ok((
-                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(2)?,
                     row.get::<_, Option<String>>(3)?,
                     row.get::<_, Option<String>>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, f64>(6)?,
-                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, f64>(7)?,
                     row.get::<_, String>(8)?,
-                    row.get::<_, i64>(9)? as usize,
-                    row.get::<_, String>(10)?,
-                    row.get::<_, i64>(11)?,
-                    row.get::<_, bool>(12)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, i64>(10)? as usize,
+                    row.get::<_, String>(11)?,
+                    row.get::<_, i64>(12)?,
+                    row.get::<_, bool>(13)?,
+                    row.get::<_, i64>(14)? as usize,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -968,6 +1016,7 @@ impl Store {
             bindings
         };
         for (
+            call_id,
             caller_id,
             callee_name,
             receiver_binding,
@@ -981,6 +1030,7 @@ impl Store {
             language,
             file_id,
             resolvable,
+            _start_byte,
         ) in calls
         {
             if !resolvable {
@@ -1125,6 +1175,12 @@ impl Store {
             for (target_id, qualified_name, _) in
                 targets.iter().take_while(|target| target.2 == best_rank)
             {
+                tx.prepare_cached(
+                    "INSERT OR REPLACE INTO resolved_call_targets(
+                        call_id,target_public_id,target_qualified_name
+                     ) VALUES (?1,?2,?3)",
+                )?
+                .execute(params![call_id, target_id, qualified_name])?;
                 Self::insert_relationship(
                     tx,
                     &Relationship {
@@ -1157,10 +1213,14 @@ impl Store {
 
     fn resolve_callback_arguments(tx: &Transaction<'_>) -> Result<usize> {
         tx.execute(
-            "DELETE FROM relationships WHERE provenance='dynamic/callback-argument'",
+            "DELETE FROM relationships
+             WHERE provenance IN (
+                 'dynamic/callback-argument',
+                 'dynamic/callback-delegation'
+             )",
             [],
         )?;
-        type StoredCallbackArgument = (String, String, usize, String, Option<String>, usize);
+        type StoredCallbackArgument = (String, String, usize, String, Option<String>, usize, usize);
         let mut arguments = Vec::new();
         let mut statement = tx.prepare(
             "SELECT b.file_id,f.path,b.payload
@@ -1181,7 +1241,7 @@ impl Store {
             let payload = serde_json::from_str::<Vec<StoredCallbackArgument>>(&row.2)
                 .with_context(|| format!("decode callback argument observations for {}", row.1))?;
             arguments.extend(payload.into_iter().map(
-                |(caller, callee, index, target, hint, line)| {
+                |(caller, callee, index, target, hint, line, start_byte)| {
                     (
                         row.0,
                         caller,
@@ -1191,40 +1251,41 @@ impl Store {
                         hint,
                         row.1.clone(),
                         line,
+                        start_byte,
                     )
                 },
             ));
         }
         drop(statement);
 
-        let mut resolved_callees =
-            HashMap::<(String, String, usize, String), Vec<(String, String)>>::new();
+        type CallsiteKey = (i64, String, String, usize, usize);
+        let mut resolved_callees = HashMap::<CallsiteKey, Vec<(String, String)>>::new();
         let mut statement = tx.prepare(
-            "SELECT r.source_public_id,r.evidence_file,r.evidence_line,s.name,
-                    r.target_public_id,s.qualified_name
-             FROM relationships r
-             JOIN symbols s ON s.public_id=r.target_public_id
-             WHERE r.kind='calls' AND r.provenance!='dynamic/callback-argument'
-             ORDER BY r.source_public_id,r.evidence_file,r.evidence_line,s.name,
-                      s.qualified_name,r.target_public_id",
+            "SELECT u.file_id,u.caller_public_id,u.callee_name,u.evidence_line,
+                    u.start_byte,t.target_public_id,t.target_qualified_name
+             FROM unresolved_calls u
+             JOIN resolved_call_targets t ON t.call_id=u.id
+             ORDER BY u.file_id,u.caller_public_id,u.callee_name,u.evidence_line,
+                      u.start_byte,t.target_qualified_name,t.target_public_id",
         )?;
         for row in statement
             .query_map([], |row| {
                 Ok((
-                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)? as usize,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)? as usize,
+                    row.get::<_, i64>(4)? as usize,
                     row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?
         {
             resolved_callees
-                .entry((row.0, row.1, row.2, row.3))
+                .entry((row.0, row.1, row.2, row.3, row.4))
                 .or_default()
-                .push((row.4, row.5));
+                .push((row.5, row.6));
         }
         drop(statement);
 
@@ -1244,6 +1305,49 @@ impl Store {
         }
         drop(statement);
 
+        type Formal = (String, usize);
+        let mut delegations = HashMap::<Formal, Vec<(Formal, String)>>::new();
+        let mut statement = tx.prepare(
+            "SELECT d.file_id,d.owner_public_id,d.parameter_index,d.callee_name,
+                    d.argument_index,d.evidence_line,d.call_start_byte
+             FROM callback_parameter_delegations d
+             ORDER BY d.file_id,d.owner_public_id,d.parameter_index,d.evidence_line,
+                      d.call_start_byte,d.callee_name,d.argument_index",
+        )?;
+        for row in statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)? as usize,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)? as usize,
+                    row.get::<_, i64>(5)? as usize,
+                    row.get::<_, i64>(6)? as usize,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        {
+            let key = (row.0, row.1.clone(), row.3, row.5, row.6);
+            let callees = resolved_callees
+                .get(&key)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            if callees.len() != 1 {
+                continue;
+            }
+            let (callee_id, callee_qualified) = &callees[0];
+            delegations
+                .entry((row.1, row.2))
+                .or_default()
+                .push(((callee_id.clone(), row.4), callee_qualified.clone()));
+        }
+        drop(statement);
+        for edges in delegations.values_mut() {
+            edges.sort();
+            edges.dedup();
+        }
+
         let mut resolved = 0;
         for (
             file_id,
@@ -1254,17 +1358,39 @@ impl Store {
             target_qualified_hint,
             file,
             line,
+            call_start_byte,
         ) in arguments
         {
             let callees = resolved_callees
-                .get(&(caller_id, file.clone(), line, callee_name))
+                .get(&(file_id, caller_id, callee_name, line, call_start_byte))
                 .map(Vec::as_slice)
                 .unwrap_or_default();
             if callees.len() != 1 {
                 continue;
             }
             let (callee_id, callee_qualified) = &callees[0];
-            if !invoked_parameters.contains(&(callee_id.clone(), argument_index)) {
+            let initial_formal = (callee_id.clone(), argument_index);
+            let mut terminal_consumers = HashMap::<Formal, Vec<String>>::new();
+            let mut queue =
+                VecDeque::from([(initial_formal.clone(), vec![callee_qualified.clone()])]);
+            let mut visited = HashSet::from([initial_formal.clone()]);
+            while let Some((formal, path)) = queue.pop_front() {
+                if invoked_parameters.contains(&formal) {
+                    terminal_consumers.insert(formal.clone(), path.clone());
+                }
+                if path.len() >= 16 {
+                    continue;
+                }
+                for (next, next_qualified) in delegations.get(&formal).into_iter().flatten() {
+                    if !visited.insert(next.clone()) {
+                        continue;
+                    }
+                    let mut next_path = path.clone();
+                    next_path.push(next_qualified.clone());
+                    queue.push_back((next.clone(), next_path));
+                }
+            }
+            if terminal_consumers.is_empty() {
                 continue;
             }
 
@@ -1305,26 +1431,45 @@ impl Store {
                 continue;
             }
             let (target_id, target_qualified) = targets.pop().expect("one callback target");
-            Self::insert_relationship(
-                tx,
-                &Relationship {
-                    source_id: callee_id.clone(),
-                    target_id,
-                    kind: RelationshipKind::Calls,
-                    evidence: Evidence::new(
-                        "dynamic/callback-argument",
-                        0.96,
-                        format!(
-                            "{callee_qualified} directly invokes callback parameter {}; \
-                             registration resolves it to {target_qualified}",
-                            argument_index + 1
-                        ),
-                        &file,
-                        line,
-                    ),
-                },
-            )?;
-            resolved += 1;
+            let mut terminal_consumers = terminal_consumers.into_iter().collect::<Vec<_>>();
+            terminal_consumers.sort_by(|left, right| left.0.cmp(&right.0));
+            for ((consumer_id, consumer_index), path) in terminal_consumers {
+                let delegated =
+                    (consumer_id.as_str(), consumer_index) != (callee_id.as_str(), argument_index);
+                let provenance = if delegated {
+                    "dynamic/callback-delegation"
+                } else {
+                    "dynamic/callback-argument"
+                };
+                let confidence = if delegated { 0.94 } else { 0.96 };
+                let explanation = if delegated {
+                    format!(
+                        "{} delegates callback parameter {} through {}; {} directly invokes \
+                         parameter {}; registration resolves it to {target_qualified}",
+                        callee_qualified,
+                        argument_index + 1,
+                        path.join(" -> "),
+                        path.last().expect("terminal path"),
+                        consumer_index + 1
+                    )
+                } else {
+                    format!(
+                        "{callee_qualified} directly invokes callback parameter {}; \
+                         registration resolves it to {target_qualified}",
+                        argument_index + 1
+                    )
+                };
+                Self::insert_relationship(
+                    tx,
+                    &Relationship {
+                        source_id: consumer_id,
+                        target_id: target_id.clone(),
+                        kind: RelationshipKind::Calls,
+                        evidence: Evidence::new(provenance, confidence, explanation, &file, line),
+                    },
+                )?;
+                resolved += 1;
+            }
         }
         Ok(resolved)
     }
@@ -2903,5 +3048,18 @@ mod tests {
         assert!(call_columns.contains(&"confidence".to_owned()));
         assert!(call_columns.contains(&"explanation".to_owned()));
         assert!(call_columns.contains(&"resolvable".to_owned()));
+        assert!(call_columns.contains(&"start_byte".to_owned()));
+        for table in ["callback_parameter_delegations", "resolved_call_targets"] {
+            let exists = store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type='table' AND name=?1",
+                    [table],
+                    |row| row.get::<_, usize>(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 1);
+        }
     }
 }

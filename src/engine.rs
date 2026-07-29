@@ -1089,14 +1089,27 @@ mod tests {
     #[test]
     fn graph_model_upgrade_forces_semantic_reindex() {
         let temp = tempfile::tempdir().unwrap();
-        fs::write(temp.path().join("main.rs"), "fn main() {}\n").unwrap();
+        fs::write(
+            temp.path().join("main.ts"),
+            "function selected() {}\n\
+             function invoke(callback: () => void) { callback(); }\n\
+             function caller() { invoke(selected); }\n",
+        )
+        .unwrap();
         let (engine, _) = Engine::init(temp.path()).unwrap();
         drop(engine);
         let database = temp.path().join(PROJECT_DIR).join(DATABASE_FILE);
         let connection = rusqlite::Connection::open(database).unwrap();
         connection
             .execute(
-                "UPDATE metadata SET value='1' WHERE key='graph_model_version'",
+                "UPDATE metadata SET value='43' WHERE key='graph_model_version'",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE callback_argument_batches
+                 SET payload='[[\"legacy\",\"invoke\",0,\"selected\",null,3]]'",
                 [],
             )
             .unwrap();
@@ -1105,6 +1118,21 @@ mod tests {
         let mut engine = Engine::open(temp.path()).unwrap();
         let report = engine.sync().unwrap();
         assert_eq!(report.files_changed, 1);
+        let invoke = engine
+            .search("invoke", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.qualified_name == "invoke")
+            .unwrap()
+            .symbol;
+        assert!(engine
+            .callees(&invoke.id)
+            .unwrap()
+            .iter()
+            .any(|(target, evidence)| {
+                target.qualified_name == "selected"
+                    && evidence.provenance == "dynamic/callback-argument"
+            }));
     }
 
     #[test]
@@ -2274,6 +2302,180 @@ mod tests {
             .unwrap()
             .iter()
             .all(|(_, evidence)| evidence.provenance != "dynamic/callback-argument"));
+    }
+
+    #[test]
+    fn callback_delegation_is_exact_bounded_and_incremental() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("main.ts");
+        let source = "function selected() {}\n\
+                      function other() {}\n\
+                      function callback() {}\n\
+                      function leaf(decoy: () => void, callback: () => void) { callback(); }\n\
+                      function middle(callback: () => void) { leaf(other, callback); }\n\
+                      function outer(callback: () => void) { middle(callback); }\n\
+                      function mutated(callback: () => void) { callback = other; leaf(other, callback); }\n\
+                      function nestedMutated(callback: () => void) { (() => { callback = other; })(); leaf(other, callback); }\n\
+                      function captured(callback: () => void) { [1].forEach(() => leaf(other, callback)); }\n\
+                      function shadowContainer() { [1].forEach((callback: () => void) => leaf(other, callback)); }\n\
+                      function defaultForward(callback = other) { leaf(other, callback); }\n\
+                      function restForward(...callback: Array<() => void>) { leaf(other, callback); }\n\
+                      function left(callback: () => void) { leaf(other, callback); }\n\
+                      function right(callback: () => void) { leaf(other, callback); }\n\
+                      function diamond(callback: () => void) { left(callback); right(callback); }\n\
+                      function cycleA(callback: () => void) { cycleB(callback); }\n\
+                      function cycleB(callback: () => void) { cycleA(callback); }\n\
+                      class AmbiguousA { forward(callback: () => void) { leaf(other, callback); } }\n\
+                      class AmbiguousB { forward(callback: () => void) { leaf(other, callback); } }\n\
+                      function ambiguousForward(value: any, callback: () => void) { value.forward(callback); }\n\
+                      class First { invoke(callback: () => void) { callback(); } }\n\
+                      class Second { invoke(callback: () => void) { callback(); } }\n\
+                      function caller() { outer(selected); mutated(selected); nestedMutated(selected); captured(other); shadowContainer(); defaultForward(selected); restForward(selected); diamond(selected); cycleA(selected); ambiguousForward(new AmbiguousA(), other); new First().invoke(selected); new Second().invoke(other); }\n";
+        fs::write(&path, source).unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let symbol = |engine: &Engine, qualified_name: &str| {
+            engine
+                .search(qualified_name, 20)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.qualified_name == qualified_name)
+                .unwrap()
+                .symbol
+        };
+        let delegated = |engine: &Engine, qualified_name: &str| {
+            let owner = symbol(engine, qualified_name);
+            engine
+                .callees(&owner.id)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, evidence)| {
+                    matches!(
+                        evidence.provenance.as_str(),
+                        "dynamic/callback-argument" | "dynamic/callback-delegation"
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let leaf = delegated(&engine, "leaf");
+        assert_eq!(leaf.len(), 1);
+        assert_eq!(leaf[0].0.qualified_name, "selected");
+        assert_eq!(leaf[0].1.provenance, "dynamic/callback-delegation");
+        assert_eq!(leaf[0].1.confidence, 0.94);
+        assert!(leaf[0].1.explanation.contains("leaf"));
+        assert!(delegated(&engine, "middle").is_empty());
+        assert!(delegated(&engine, "outer").is_empty());
+        assert!(delegated(&engine, "mutated").is_empty());
+        assert!(delegated(&engine, "nestedMutated").is_empty());
+        assert!(delegated(&engine, "captured").is_empty());
+        assert!(delegated(&engine, "shadowContainer").is_empty());
+        assert!(delegated(&engine, "defaultForward").is_empty());
+        assert!(delegated(&engine, "restForward").is_empty());
+        assert!(delegated(&engine, "left").is_empty());
+        assert!(delegated(&engine, "right").is_empty());
+        assert!(delegated(&engine, "diamond").is_empty());
+        assert!(delegated(&engine, "cycleA").is_empty());
+        assert!(delegated(&engine, "cycleB").is_empty());
+        assert!(delegated(&engine, "ambiguousForward").is_empty());
+
+        let first = delegated(&engine, "First.invoke");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].0.qualified_name, "selected");
+        let second = delegated(&engine, "Second.invoke");
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].0.qualified_name, "other");
+
+        let replacement_source = source.replacen("callback();", "void callback;", 1);
+        let before_rollback = serde_json::to_string(&engine.snapshot().unwrap()).unwrap();
+        let replacement = parse_file("main.ts", &replacement_source).unwrap();
+        engine
+            .store
+            .inject_rolled_back_publish(&[replacement], &[])
+            .unwrap();
+        assert_eq!(
+            serde_json::to_string(&engine.snapshot().unwrap()).unwrap(),
+            before_rollback
+        );
+        assert_eq!(delegated(&engine, "leaf").len(), 1);
+
+        fs::write(&path, replacement_source).unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 1);
+        assert!(delegated(&engine, "leaf").is_empty());
+        assert_eq!(delegated(&engine, "First.invoke").len(), 1);
+        assert_eq!(delegated(&engine, "Second.invoke").len(), 1);
+    }
+
+    #[test]
+    fn callback_delegation_bounds_branching_and_depth() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut source = "function selected() {}\n\
+                          function other() {}\n\
+                          function leafOk(callback: () => void) { callback(); }\n\
+                          function leafOverflow(callback: () => void) { callback(); }\n"
+            .to_owned();
+        for index in (0..15).rev() {
+            let next = if index == 14 {
+                "leafOk".to_owned()
+            } else {
+                format!("ok{}", index + 1)
+            };
+            source.push_str(&format!(
+                "function ok{index}(callback: () => void) {{ {next}(callback); }}\n"
+            ));
+        }
+        for index in (0..16).rev() {
+            let next = if index == 15 {
+                "leafOverflow".to_owned()
+            } else {
+                format!("overflow{}", index + 1)
+            };
+            source.push_str(&format!(
+                "function overflow{index}(callback: () => void) {{ {next}(callback); }}\n"
+            ));
+        }
+        for layer in (0..6).rev() {
+            for branch in 0..6 {
+                let calls = if layer == 5 {
+                    "leafOk(callback);".to_owned()
+                } else {
+                    (0..6)
+                        .map(|next| format!("wide{}_{}(callback);", layer + 1, next))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                };
+                source.push_str(&format!(
+                    "function wide{layer}_{branch}(callback: () => void) {{ {calls} }}\n"
+                ));
+            }
+        }
+        source.push_str(
+            "function wideRoot(callback: () => void) { \
+               wide0_0(callback); wide0_1(callback); wide0_2(callback); \
+               wide0_3(callback); wide0_4(callback); wide0_5(callback); \
+             }\n\
+             function caller() { ok0(selected); overflow0(other); wideRoot(selected); }\n",
+        );
+        fs::write(temp.path().join("main.ts"), source).unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let callbacks = |qualified_name: &str| {
+            let owner = engine
+                .search(qualified_name, 20)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.qualified_name == qualified_name)
+                .unwrap()
+                .symbol;
+            engine
+                .callees(&owner.id)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, evidence)| evidence.provenance == "dynamic/callback-delegation")
+                .collect::<Vec<_>>()
+        };
+        let accepted = callbacks("leafOk");
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].0.qualified_name, "selected");
+        assert!(callbacks("leafOverflow").is_empty());
     }
 
     #[test]

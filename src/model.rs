@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path};
 
-pub const GRAPH_MODEL_VERSION: u32 = 43;
+pub const GRAPH_MODEL_VERSION: u32 = 44;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -274,6 +274,7 @@ pub(crate) struct UnresolvedCall {
     pub resolvable: bool,
     pub file: String,
     pub line: usize,
+    pub start_byte: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -290,6 +291,17 @@ pub(crate) struct CallbackArgumentFact {
     pub target_name: String,
     pub target_qualified_hint: Option<String>,
     pub line: usize,
+    pub call_start_byte: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CallbackParameterDelegationFact {
+    pub owner_id: String,
+    pub parameter_index: usize,
+    pub callee_name: String,
+    pub argument_index: usize,
+    pub line: usize,
+    pub call_start_byte: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -407,6 +419,7 @@ pub(crate) struct FileFacts {
     pub relationships: Vec<Relationship>,
     pub unresolved_calls: Vec<UnresolvedCall>,
     pub callback_parameter_invocations: Vec<CallbackParameterInvocation>,
+    pub callback_parameter_delegations: Vec<CallbackParameterDelegationFact>,
     pub callback_arguments: Vec<CallbackArgumentFact>,
     pub arkui_builder_flow: ArkuiBuilderFlowFacts,
     pub unresolved_references: Vec<UnresolvedReference>,
