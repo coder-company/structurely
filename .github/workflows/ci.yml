@@ -37,7 +37,10 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Run tests
-        run: cargo test --all-targets --locked
+        run: cargo test --lib --bins --test mcp_cli_contract --locked
+
+      - name: Verify daemon lifecycle
+        run: cargo test --test daemon_cli --locked -- --nocapture
 
       - name: Verify semantic quality fixture
         if: runner.os == 'Linux'

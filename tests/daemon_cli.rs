@@ -16,6 +16,7 @@ fn daemon_start_status_catch_up_and_stop_are_idempotent() {
     let temp = tempfile::tempdir().unwrap().keep();
     fs::write(temp.join("main.ts"), "function before() {}\n").unwrap();
     run(&temp, &["init", temp.to_str().unwrap()]);
+    eprintln!("daemon acceptance: initialized");
 
     let started = run_json(
         &temp,
@@ -30,6 +31,7 @@ fn daemon_start_status_catch_up_and_stop_are_idempotent() {
     );
     assert_eq!(started["started"], true);
     assert_eq!(started["status"]["running"], true);
+    eprintln!("daemon acceptance: started");
     let initial_epoch = started["status"]["state"]["epoch"].as_u64().unwrap();
 
     let duplicate = run_json(
@@ -38,6 +40,7 @@ fn daemon_start_status_catch_up_and_stop_are_idempotent() {
     );
     assert_eq!(duplicate["started"], false);
     assert_eq!(duplicate["status"]["running"], true);
+    eprintln!("daemon acceptance: duplicate start rejected");
 
     fs::write(temp.join("main.ts"), "function afterDaemonSync() {}\n").unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -55,6 +58,7 @@ fn daemon_start_status_catch_up_and_stop_are_idempotent() {
         );
         thread::sleep(Duration::from_millis(50));
     }
+    eprintln!("daemon acceptance: source synchronized");
 
     #[cfg(unix)]
     {
@@ -85,6 +89,7 @@ fn daemon_start_status_catch_up_and_stop_are_idempotent() {
     assert_eq!(stopped["stopped"], true);
     assert_eq!(stopped["status"]["running"], false);
     assert_eq!(stopped["status"]["state"]["phase"], "stopped");
+    eprintln!("daemon acceptance: stopped");
 
     let duplicate_stop = run_json(&temp, &["daemon", "stop", "--path", temp.to_str().unwrap()]);
     assert_eq!(duplicate_stop["stopped"], false);
@@ -101,6 +106,7 @@ fn daemon_start_status_catch_up_and_stop_are_idempotent() {
         ],
     );
     assert_eq!(restarted["started"], true);
+    eprintln!("daemon acceptance: restarted");
     #[cfg(unix)]
     {
         let broken = temp.join("broken.ts");
@@ -149,8 +155,10 @@ fn daemon_start_status_catch_up_and_stop_are_idempotent() {
         &["daemon", "start", "--path", temp.to_str().unwrap()],
     );
     assert_eq!(duplicate["started"], false);
+    eprintln!("daemon acceptance: duplicate restart rejected");
     let final_stop = run_json(&temp, &["daemon", "stop", "--path", temp.to_str().unwrap()]);
     assert_eq!(final_stop["stopped"], true);
+    eprintln!("daemon acceptance: final stop completed");
     #[cfg(unix)]
     fs::remove_dir_all(temp).unwrap();
 }
