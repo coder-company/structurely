@@ -1,9 +1,11 @@
+#[cfg(unix)]
 use serde_json::Value;
+#[cfg(unix)]
+use std::io::{BufRead, BufReader, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{
     fs,
-    io::{BufRead, BufReader, Write},
     path::Path,
     process::{Command, Stdio},
     thread,
@@ -55,27 +57,30 @@ fn daemon_start_status_catch_up_and_stop_are_idempotent() {
         thread::sleep(Duration::from_millis(50));
     }
 
-    let mcp = run_mcp(
-        &temp,
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "codegraph_search",
-                "arguments": { "query": "afterDaemonSync" }
-            }
-        }),
-    );
-    assert_eq!(mcp["result"]["_meta"]["freshness"]["state"], "current");
-    assert_eq!(mcp["result"]["_meta"]["freshness"]["mode"], "daemon");
-    assert!(mcp["result"]["_meta"]["freshness"]["daemonPid"]
-        .as_u64()
-        .is_some());
-    assert_eq!(
-        mcp["result"]["structuredContent"][0]["symbol"]["name"],
-        "afterDaemonSync"
-    );
+    #[cfg(unix)]
+    {
+        let mcp = run_mcp(
+            &temp,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "codegraph_search",
+                    "arguments": { "query": "afterDaemonSync" }
+                }
+            }),
+        );
+        assert_eq!(mcp["result"]["_meta"]["freshness"]["state"], "current");
+        assert_eq!(mcp["result"]["_meta"]["freshness"]["mode"], "daemon");
+        assert!(mcp["result"]["_meta"]["freshness"]["daemonPid"]
+            .as_u64()
+            .is_some());
+        assert_eq!(
+            mcp["result"]["structuredContent"][0]["symbol"]["name"],
+            "afterDaemonSync"
+        );
+    }
 
     let stopped = run_json(&temp, &["daemon", "stop", "--path", temp.to_str().unwrap()]);
     assert_eq!(stopped["stopped"], true);
@@ -150,6 +155,7 @@ fn daemon_start_status_catch_up_and_stop_are_idempotent() {
     fs::remove_dir_all(temp).unwrap();
 }
 
+#[cfg(unix)]
 fn run_mcp(current_dir: &Path, request: Value) -> Value {
     let mut child = Command::new(env!("CARGO_BIN_EXE_structurely"))
         .args(["serve", "--mcp", "--path", current_dir.to_str().unwrap()])
