@@ -376,6 +376,8 @@ impl Store {
                 call_id INTEGER NOT NULL,
                 target_public_id TEXT NOT NULL,
                 target_qualified_name TEXT NOT NULL,
+                resolution_confidence REAL NOT NULL,
+                resolution_scope TEXT NOT NULL,
                 PRIMARY KEY(call_id,target_public_id)
             ) WITHOUT ROWID;
             ",
@@ -604,13 +606,8 @@ impl Store {
     fn finish_epoch(tx: &Transaction<'_>, next_epoch: u64) -> Result<usize> {
         Self::clear_inline_callback_symbols(tx)?;
         let mut relationships_resolved = Self::resolve_calls(tx)?;
-        for _ in 0..INLINE_CALLBACK_DEPTH_CAP {
-            let (_, inline_symbols) = Self::resolve_callback_arguments(tx)?;
-            if inline_symbols == 0 {
-                break;
-            }
-            relationships_resolved = Self::resolve_calls(tx)?;
-        }
+        let _ = Self::resolve_callback_arguments(tx)?;
+        relationships_resolved += Self::publish_deferred_inline_calls(tx)?;
         relationships_resolved += tx.query_row(
             "SELECT COUNT(*) FROM relationships
              WHERE provenance IN (
@@ -811,7 +808,19 @@ impl Store {
                         argument.argument_index,
                         argument.target_name.as_str(),
                         argument.target_qualified_hint.as_deref(),
-                        argument.target_symbol.as_ref(),
+                        argument.target_symbol.as_ref().map(|symbol| {
+                            (
+                                symbol.language,
+                                symbol.id.as_str(),
+                                symbol.semantic_key.as_str(),
+                                symbol.name.as_str(),
+                                symbol.qualified_name.as_str(),
+                                symbol.start_byte,
+                                symbol.end_byte,
+                                symbol.start_line,
+                                symbol.end_line,
+                            )
+                        }),
                         argument.line,
                         argument.call_start_byte,
                     )
@@ -945,7 +954,7 @@ impl Store {
                     u.target_file_hint,u.provenance,u.confidence,u.explanation,
                     u.evidence_file,u.evidence_line,
                     COALESCE(primary_symbol.language,fallback_symbol.language),
-                    u.file_id,u.resolvable,u.start_byte
+                    u.file_id,u.resolvable,u.start_byte,u.fallback_caller_public_id
              FROM unresolved_calls u
              LEFT JOIN symbols primary_symbol
                     ON primary_symbol.public_id=u.caller_public_id
@@ -973,6 +982,7 @@ impl Store {
                     row.get::<_, i64>(12)?,
                     row.get::<_, bool>(13)?,
                     row.get::<_, i64>(14)? as usize,
+                    row.get::<_, Option<String>>(15)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1105,6 +1115,7 @@ impl Store {
             file_id,
             resolvable,
             _start_byte,
+            fallback_caller_id,
         ) in calls
         {
             if !resolvable {
@@ -1251,10 +1262,20 @@ impl Store {
             {
                 tx.prepare_cached(
                     "INSERT OR REPLACE INTO resolved_call_targets(
-                        call_id,target_public_id,target_qualified_name
-                     ) VALUES (?1,?2,?3)",
+                        call_id,target_public_id,target_qualified_name,
+                        resolution_confidence,resolution_scope
+                     ) VALUES (?1,?2,?3,?4,?5)",
                 )?
-                .execute(params![call_id, target_id, qualified_name])?;
+                .execute(params![
+                    call_id,
+                    target_id,
+                    qualified_name,
+                    resolution_confidence,
+                    scope
+                ])?;
+                if fallback_caller_id.is_some() {
+                    continue;
+                }
                 Self::insert_relationship(
                     tx,
                     &Relationship {
@@ -1285,14 +1306,102 @@ impl Store {
         Ok(resolved)
     }
 
+    fn publish_deferred_inline_calls(tx: &Transaction<'_>) -> Result<usize> {
+        let mut statement = tx.prepare(
+            "SELECT COALESCE(primary_symbol.public_id,fallback_symbol.public_id),
+                    u.provenance,u.confidence,u.explanation,u.evidence_file,u.evidence_line,
+                    t.target_public_id,t.target_qualified_name,
+                    t.resolution_confidence,t.resolution_scope
+             FROM unresolved_calls u
+             JOIN resolved_call_targets t ON t.call_id=u.id
+             LEFT JOIN symbols primary_symbol
+                    ON primary_symbol.public_id=u.caller_public_id
+             LEFT JOIN symbols fallback_symbol
+                    ON fallback_symbol.public_id=u.fallback_caller_public_id
+             WHERE u.fallback_caller_public_id IS NOT NULL
+               AND (primary_symbol.public_id IS NOT NULL
+                    OR fallback_symbol.public_id IS NOT NULL)
+             ORDER BY u.evidence_file,u.evidence_line,u.id,t.target_qualified_name",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, f64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)? as usize,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, f64>(8)?,
+                    row.get::<_, String>(9)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        let mut resolved = 0;
+        for (
+            caller_id,
+            provenance,
+            fact_confidence,
+            explanation,
+            file,
+            line,
+            target_id,
+            qualified_name,
+            resolution_confidence,
+            scope,
+        ) in rows
+        {
+            Self::insert_relationship(
+                tx,
+                &Relationship {
+                    source_id: caller_id,
+                    target_id,
+                    kind: RelationshipKind::Calls,
+                    evidence: Evidence::new(
+                        &provenance,
+                        fact_confidence.min(resolution_confidence),
+                        if resolution_confidence >= 0.75 {
+                            format!(
+                                "{explanation}; target resolves to {qualified_name} through {scope}"
+                            )
+                        } else {
+                            format!(
+                                "{explanation}; {scope} has multiple candidates; \
+                                 {qualified_name} is a possible target"
+                            )
+                        },
+                        &file,
+                        line,
+                    ),
+                },
+            )?;
+            resolved += 1;
+        }
+        Ok(resolved)
+    }
+
     fn resolve_callback_arguments(tx: &Transaction<'_>) -> Result<(usize, usize)> {
+        type StoredInlineCallbackSymbol = (
+            Language,
+            String,
+            String,
+            String,
+            String,
+            usize,
+            usize,
+            usize,
+            usize,
+        );
         type StoredCallbackArgument = (
             String,
             String,
             usize,
             String,
             Option<String>,
-            Option<Symbol>,
+            Option<StoredInlineCallbackSymbol>,
             usize,
             usize,
         );
@@ -1317,6 +1426,31 @@ impl Store {
                 .with_context(|| format!("decode callback argument observations for {}", row.1))?;
             arguments.extend(payload.into_iter().map(
                 |(caller, callee, index, target, hint, symbol, line, start_byte)| {
+                    let symbol = symbol.map(
+                        |(
+                            language,
+                            id,
+                            semantic_key,
+                            name,
+                            qualified_name,
+                            start_byte,
+                            end_byte,
+                            start_line,
+                            end_line,
+                        )| Symbol {
+                            id,
+                            semantic_key,
+                            language,
+                            kind: SymbolKind::Function,
+                            name,
+                            qualified_name,
+                            file: row.1.clone(),
+                            start_byte,
+                            end_byte,
+                            start_line,
+                            end_line,
+                        },
+                    );
                     (
                         row.0,
                         caller,
@@ -1337,18 +1471,11 @@ impl Store {
         type CallsiteKey = (i64, String, String, usize, usize);
         let mut resolved_callees = HashMap::<CallsiteKey, Vec<(String, String)>>::new();
         let mut statement = tx.prepare(
-            "SELECT u.file_id,
-                    COALESCE(primary_symbol.public_id,fallback_symbol.public_id),
+            "SELECT u.file_id,u.caller_public_id,
                     u.callee_name,u.evidence_line,
                     u.start_byte,t.target_public_id,t.target_qualified_name
              FROM unresolved_calls u
              JOIN resolved_call_targets t ON t.call_id=u.id
-             LEFT JOIN symbols primary_symbol
-                    ON primary_symbol.public_id=u.caller_public_id
-             LEFT JOIN symbols fallback_symbol
-                    ON fallback_symbol.public_id=u.fallback_caller_public_id
-             WHERE primary_symbol.public_id IS NOT NULL
-                OR fallback_symbol.public_id IS NOT NULL
              ORDER BY u.file_id,u.caller_public_id,u.callee_name,u.evidence_line,
                       u.start_byte,t.target_qualified_name,t.target_public_id",
         )?;
@@ -1434,6 +1561,16 @@ impl Store {
 
         let mut resolved = 0;
         let mut materialized = 0;
+        let mut caller_depths = {
+            let mut statement = tx.prepare("SELECT public_id FROM symbols ORDER BY public_id")?;
+            let public_ids = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            public_ids
+                .into_iter()
+                .map(|public_id| (public_id, 0usize))
+                .collect::<HashMap<_, _>>()
+        };
         for (
             file_id,
             caller_id,
@@ -1447,6 +1584,12 @@ impl Store {
             call_start_byte,
         ) in arguments
         {
+            let Some(caller_depth) = caller_depths.get(&caller_id).copied() else {
+                continue;
+            };
+            if target_symbol.is_some() && caller_depth >= INLINE_CALLBACK_DEPTH_CAP {
+                continue;
+            }
             let callees = resolved_callees
                 .get(&(
                     file_id,
@@ -1588,6 +1731,7 @@ impl Store {
                     materialized += 1;
                     resolved += 1;
                 }
+                caller_depths.insert(target.id.clone(), caller_depth + 1);
             }
             let mut terminal_consumers = terminal_consumers.into_iter().collect::<Vec<_>>();
             terminal_consumers.sort_by(|left, right| left.0.cmp(&right.0));

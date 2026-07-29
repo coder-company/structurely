@@ -1102,14 +1102,18 @@ mod tests {
         let connection = rusqlite::Connection::open(database).unwrap();
         connection
             .execute(
-                "UPDATE metadata SET value='44' WHERE key='graph_model_version'",
+                "UPDATE metadata SET value='45' WHERE key='graph_model_version'",
                 [],
             )
             .unwrap();
         connection
             .execute(
                 "UPDATE callback_argument_batches
-                 SET payload='[[\"legacy\",\"invoke\",0,\"selected\",null,3,42]]'",
+                 SET payload='[[\"legacy\",\"invoke\",0,\"selected\",null,
+                 {\"id\":\"old\",\"semantic_key\":\"old\",\"language\":\"typescript\",
+                  \"kind\":\"function\",\"name\":\"old\",\"qualified_name\":\"old\",
+                  \"file\":\"main.ts\",\"start_byte\":0,\"end_byte\":1,
+                  \"start_line\":1,\"end_line\":1},3,42]]'",
                 [],
             )
             .unwrap();
@@ -2633,6 +2637,58 @@ mod tests {
                 .count(),
             16
         );
+    }
+
+    #[test]
+    fn callback_facts_inside_rejected_inline_callbacks_do_not_leak() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("main.ts"),
+            "function selected() {}\n\
+             function other() {}\n\
+             function invoke(callback: () => void) { callback(); }\n\
+             function never(callback: () => void) {}\n\
+             function caller() {\n\
+               never(() => invoke(selected));\n\
+               never(() => invoke(() => other()));\n\
+               invoke(() => invoke(selected));\n\
+             }\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let invoke = engine
+            .search("invoke", 20)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.qualified_name == "invoke")
+            .unwrap()
+            .symbol;
+        let callback_targets = engine
+            .callees(&invoke.id)
+            .unwrap()
+            .into_iter()
+            .filter(|(_, evidence)| evidence.provenance == "dynamic/callback-argument")
+            .map(|(target, _)| target)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            callback_targets
+                .iter()
+                .filter(|target| target.qualified_name == "selected")
+                .count(),
+            1
+        );
+        assert_eq!(
+            callback_targets
+                .iter()
+                .filter(|target| target.name.starts_with("<callback invoke argument"))
+                .count(),
+            1
+        );
+        assert!(engine
+            .search("<callback never", 20)
+            .unwrap()
+            .into_iter()
+            .all(|hit| !hit.symbol.name.starts_with("<callback never")));
     }
 
     #[test]
