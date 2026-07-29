@@ -207,6 +207,13 @@ impl Store {
                 parameter_index INTEGER NOT NULL,
                 PRIMARY KEY(file_id,owner_public_id,parameter_index)
             );
+            CREATE TABLE IF NOT EXISTS python_callback_formals (
+                file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                owner_public_id TEXT NOT NULL,
+                formal_name TEXT NOT NULL,
+                parameter_index INTEGER NOT NULL,
+                PRIMARY KEY(file_id,owner_public_id,formal_name)
+            );
             CREATE TABLE IF NOT EXISTS callback_parameter_delegations (
                 file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
                 owner_public_id TEXT NOT NULL,
@@ -825,6 +832,19 @@ impl Store {
                 invocation.parameter_index as i64
             ])?;
         }
+        for formal in &file.python_callback_formals {
+            tx.prepare_cached(
+                "INSERT INTO python_callback_formals(
+                    file_id,owner_public_id,formal_name,parameter_index
+                 ) VALUES (?1,?2,?3,?4)",
+            )?
+            .execute(params![
+                file_id,
+                formal.owner_id,
+                formal.formal_name,
+                formal.parameter_index as i64
+            ])?;
+        }
         for delegation in &file.callback_parameter_delegations {
             tx.prepare_cached(
                 "INSERT INTO callback_parameter_delegations(
@@ -851,6 +871,7 @@ impl Store {
                         argument.caller_id.as_str(),
                         argument.callee_name.as_str(),
                         argument.argument_index,
+                        argument.formal_name.as_deref(),
                         argument.target_name.as_str(),
                         argument.target_qualified_hint.as_deref(),
                         argument.target_symbol.as_ref().map(|symbol| {
@@ -1839,6 +1860,7 @@ impl Store {
             String,
             String,
             usize,
+            Option<String>,
             String,
             Option<String>,
             Option<StoredInlineCallbackSymbol>,
@@ -1865,7 +1887,7 @@ impl Store {
             let payload = serde_json::from_str::<Vec<StoredCallbackArgument>>(&row.2)
                 .with_context(|| format!("decode callback argument observations for {}", row.1))?;
             arguments.extend(payload.into_iter().map(
-                |(caller, callee, index, target, hint, symbol, line, start_byte)| {
+                |(caller, callee, index, formal_name, target, hint, symbol, line, start_byte)| {
                     let symbol = symbol.map(
                         |(
                             language,
@@ -1896,6 +1918,7 @@ impl Store {
                         caller,
                         callee,
                         index,
+                        formal_name,
                         target,
                         hint,
                         symbol,
@@ -2016,6 +2039,7 @@ impl Store {
             caller_id,
             callee_name,
             argument_index,
+            formal_name,
             target_name,
             target_qualified_hint,
             target_symbol,
@@ -2044,7 +2068,26 @@ impl Store {
                 continue;
             }
             let (callee_id, callee_qualified) = &callees[0];
-            let initial_formal = (callee_id.clone(), argument_index);
+            let parameter_index = if let Some(formal_name) = formal_name.as_deref() {
+                let mut statement = tx.prepare(
+                    "SELECT parameter_index
+                     FROM python_callback_formals
+                     WHERE owner_public_id=?1 AND formal_name=?2
+                     ORDER BY parameter_index",
+                )?;
+                let matches = statement
+                    .query_map(params![callee_id, formal_name], |row| {
+                        row.get::<_, i64>(0).map(|value| value as usize)
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                if matches.len() != 1 {
+                    continue;
+                }
+                matches[0]
+            } else {
+                argument_index
+            };
+            let initial_formal = (callee_id.clone(), parameter_index);
             let mut terminal_consumers = HashMap::<Formal, Vec<String>>::new();
             let mut queue =
                 VecDeque::from([(initial_formal.clone(), vec![callee_qualified.clone()])]);
@@ -2177,7 +2220,7 @@ impl Store {
             terminal_consumers.sort_by(|left, right| left.0.cmp(&right.0));
             for ((consumer_id, consumer_index), path) in terminal_consumers {
                 let delegated =
-                    (consumer_id.as_str(), consumer_index) != (callee_id.as_str(), argument_index);
+                    (consumer_id.as_str(), consumer_index) != (callee_id.as_str(), parameter_index);
                 let provenance = if delegated {
                     "dynamic/callback-delegation"
                 } else {
@@ -2189,7 +2232,7 @@ impl Store {
                         "{} delegates callback parameter {} through {}; {} directly invokes \
                          parameter {}; registration resolves it to {target_qualified}",
                         callee_qualified,
-                        argument_index + 1,
+                        parameter_index + 1,
                         path.join(" -> "),
                         path.last().expect("terminal path"),
                         consumer_index + 1
@@ -2198,7 +2241,7 @@ impl Store {
                     format!(
                         "{callee_qualified} directly invokes callback parameter {}; \
                          registration resolves it to {target_qualified}",
-                        argument_index + 1
+                        parameter_index + 1
                     )
                 };
                 Self::insert_relationship(

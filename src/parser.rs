@@ -1,7 +1,8 @@
 use crate::model::{
     CallableReturnFact, CallbackArgumentFact, CallbackParameterDelegationFact,
-    CallbackParameterInvocation, Evidence, FileFacts, Language, Relationship, RelationshipKind,
-    SourceSpan, Symbol, SymbolKind, UnresolvedCall, UnresolvedReference,
+    CallbackParameterInvocation, Evidence, FileFacts, Language, PythonCallbackFormalFact,
+    Relationship, RelationshipKind, SourceSpan, Symbol, SymbolKind, UnresolvedCall,
+    UnresolvedReference,
 };
 use crate::semantic::{enrich_file_facts, is_arkui_intrinsic_name};
 use anyhow::{anyhow, Context, Result};
@@ -96,6 +97,11 @@ pub(crate) fn parse_file_as(
         .skip(1)
         .map(|symbol| ((symbol.start_byte, symbol.end_byte), symbol.id.clone()))
         .collect::<HashMap<_, _>>();
+    let python_callback_formals = if language == Language::Python {
+        collect_python_callback_formals(tree.root_node(), source_bytes, &symbol_owners)
+    } else {
+        Vec::new()
+    };
     if language == Language::Dart {
         collect_dart_body_owners(tree.root_node(), &symbols, &mut symbol_owners);
     }
@@ -191,6 +197,7 @@ pub(crate) fn parse_file_as(
         callback_parameter_invocations,
         callback_parameter_delegations,
         callback_arguments,
+        python_callback_formals,
         callable_returns,
         arkui_builder_flow: Default::default(),
         unresolved_references,
@@ -916,6 +923,139 @@ type ReceiverBindingMap = HashMap<(String, usize, usize), Vec<ReceiverBinding>>;
 type FactoryReturnMap = HashMap<(String, usize, usize), Vec<ReceiverBinding>>;
 type CollectionElementMap = HashMap<(String, usize, usize), Vec<ReceiverBinding>>;
 
+const MAX_PYTHON_CALLBACK_FORMALS: usize = 64;
+const MAX_PYTHON_CALL_ARGUMENTS: usize = 64;
+
+fn collect_python_callback_formals(
+    node: Node<'_>,
+    source: &[u8],
+    owners: &HashMap<(usize, usize), String>,
+) -> Vec<PythonCallbackFormalFact> {
+    fn visit(
+        node: Node<'_>,
+        source: &[u8],
+        owners: &HashMap<(usize, usize), String>,
+        output: &mut Vec<PythonCallbackFormalFact>,
+    ) {
+        if node.kind() == "function_definition"
+            && node
+                .parent()
+                .is_none_or(|parent| parent.kind() != "decorated_definition")
+        {
+            if let (Some(owner_id), Some(parameters)) = (
+                owners.get(&(node.start_byte(), node.end_byte())),
+                node.child_by_field_name("parameters"),
+            ) {
+                let positional_separator = python_positional_separator_byte(parameters);
+                let mut cursor = parameters.walk();
+                let children = parameters
+                    .named_children(&mut cursor)
+                    .filter(|parameter| !parameter.is_extra())
+                    .take(MAX_PYTHON_CALLBACK_FORMALS + 1)
+                    .collect::<Vec<_>>();
+                if children.len() <= MAX_PYTHON_CALLBACK_FORMALS {
+                    let mut names = std::collections::HashSet::new();
+                    for (parameter_index, parameter) in children.into_iter().enumerate() {
+                        if positional_separator
+                            .is_some_and(|separator| parameter.start_byte() < separator)
+                            || parameter_contains_variadic_form(parameter)
+                        {
+                            continue;
+                        }
+                        let name = if parameter.kind() == "identifier" {
+                            Some(node_text(parameter, source))
+                        } else {
+                            parameter
+                                .child_by_field_name("name")
+                                .or_else(|| parameter.child_by_field_name("pattern"))
+                                .filter(|name| name.kind() == "identifier")
+                                .map(|name| node_text(name, source))
+                                .or_else(|| {
+                                    let mut children = parameter.walk();
+                                    let name = parameter
+                                        .named_children(&mut children)
+                                        .find(|child| child.kind() == "identifier")
+                                        .map(|name| node_text(name, source));
+                                    name
+                                })
+                        };
+                        if let Some(formal_name) =
+                            name.filter(|name| !name.is_empty() && names.insert(name.clone()))
+                        {
+                            output.push(PythonCallbackFormalFact {
+                                owner_id: owner_id.clone(),
+                                formal_name,
+                                parameter_index,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            visit(child, source, owners, output);
+        }
+    }
+
+    let mut output = Vec::new();
+    visit(node, source, owners, &mut output);
+    output
+}
+
+fn python_positional_separator_byte(parameters: Node<'_>) -> Option<usize> {
+    (0..parameters.child_count())
+        .filter_map(|index| parameters.child(index))
+        .find_map(|child| {
+            if !child.is_named() && child.kind() == "/" {
+                return Some(child.start_byte());
+            }
+            (child.kind() == "positional_separator").then(|| {
+                (0..child.child_count())
+                    .filter_map(|index| child.child(index))
+                    .find(|token| !token.is_named() && token.kind() == "/")
+                    .map_or(child.start_byte(), |token| token.start_byte())
+            })
+        })
+}
+
+fn python_keyword_argument<'tree>(
+    argument: Node<'tree>,
+    source: &[u8],
+) -> Option<(String, Node<'tree>)> {
+    if argument.kind() != "keyword_argument" {
+        return None;
+    }
+    let name = argument.child_by_field_name("name")?;
+    let value = argument.child_by_field_name("value")?;
+    (name.kind() == "identifier").then(|| (node_text(name, source), value))
+}
+
+fn python_keyword_mapping_unsafe(arguments: Node<'_>, source: &[u8]) -> bool {
+    let mut cursor = arguments.walk();
+    let mut names = std::collections::HashSet::new();
+    let unsafe_mapping = arguments
+        .named_children(&mut cursor)
+        .filter(|argument| !argument.is_extra())
+        .take(MAX_PYTHON_CALL_ARGUMENTS + 1)
+        .any(|argument| {
+            matches!(argument.kind(), "dictionary_splat" | "ERROR")
+                || python_keyword_argument(argument, source)
+                    .is_some_and(|(name, _)| !names.insert(name))
+        });
+    unsafe_mapping
+}
+
+fn python_call_exceeds_argument_cap(arguments: Node<'_>) -> bool {
+    let mut cursor = arguments.walk();
+    arguments
+        .named_children(&mut cursor)
+        .filter(|argument| !argument.is_extra())
+        .take(MAX_PYTHON_CALL_ARGUMENTS + 1)
+        .count()
+        > MAX_PYTHON_CALL_ARGUMENTS
+}
+
 struct InlineCallbackCollection<'a> {
     source: &'a [u8],
     language: Language,
@@ -959,6 +1099,17 @@ impl InlineCallbackCollection<'_> {
                 if let (Some(caller), Some(arguments)) =
                     (caller, node.child_by_field_name("arguments"))
                 {
+                    if self.language == Language::Python
+                        && python_call_exceeds_argument_cap(arguments)
+                    {
+                        let mut cursor = node.walk();
+                        for child in node.named_children(&mut cursor) {
+                            self.visit(child);
+                        }
+                        return;
+                    }
+                    let unsafe_keywords = self.language == Language::Python
+                        && python_keyword_mapping_unsafe(arguments, self.source);
                     let mut cursor = arguments.walk();
                     let mut positional_mapping_unsafe = false;
                     for (argument_index, argument) in arguments
@@ -966,33 +1117,56 @@ impl InlineCallbackCollection<'_> {
                         .filter(|argument| !argument.is_extra())
                         .enumerate()
                     {
-                        if self.language == Language::Python
-                            && matches!(
-                                argument.kind(),
-                                "keyword_argument"
-                                    | "list_splat"
-                                    | "dictionary_splat"
-                                    | "generator_expression"
-                            )
+                        let (callback, formal_name) = if self.language == Language::Python
+                            && argument.kind() == "keyword_argument"
                         {
-                            positional_mapping_unsafe = true;
-                            continue;
-                        }
-                        if positional_mapping_unsafe
-                            || !is_inline_callback_argument(argument, self.language)
-                        {
-                            continue;
-                        }
+                            let Some((name, value)) =
+                                python_keyword_argument(argument, self.source)
+                            else {
+                                continue;
+                            };
+                            if unsafe_keywords || !is_inline_callback_argument(value, self.language)
+                            {
+                                continue;
+                            }
+                            (value, Some(name))
+                        } else {
+                            if self.language == Language::Python
+                                && matches!(
+                                    argument.kind(),
+                                    "list_splat" | "dictionary_splat" | "generator_expression"
+                                )
+                            {
+                                positional_mapping_unsafe = true;
+                                continue;
+                            }
+                            if positional_mapping_unsafe
+                                || !is_inline_callback_argument(argument, self.language)
+                            {
+                                continue;
+                            }
+                            (argument, None)
+                        };
+                        let stable_argument = formal_name
+                            .as_deref()
+                            .map(|name| format!("keyword:{name}"))
+                            .unwrap_or_else(|| format!("position:{argument_index}"));
+                        let ordinal_key = formal_name.as_deref().map_or(argument_index, |_| 0);
                         let ordinal = self
                             .ordinals
-                            .entry((caller.id.clone(), selector.clone(), argument_index))
+                            .entry((
+                                caller.id.clone(),
+                                format!("{selector}|{stable_argument}"),
+                                ordinal_key,
+                            ))
                             .and_modify(|value| *value += 1)
                             .or_insert(1);
-                        let name = format!(
-                            "<callback {callee_name} argument {} #{}>",
-                            argument_index + 1,
-                            *ordinal
-                        );
+                        let argument_label = formal_name
+                            .as_deref()
+                            .map(|name| format!("keyword {name}"))
+                            .unwrap_or_else(|| format!("argument {}", argument_index + 1));
+                        let name =
+                            format!("<callback {callee_name} {argument_label} #{}>", *ordinal);
                         let qualified_name = format!("{}.{}", caller.qualified_name, name);
                         let symbol = Symbol::new_disambiguated(
                             self.language,
@@ -1000,19 +1174,19 @@ impl InlineCallbackCollection<'_> {
                             &name,
                             &qualified_name,
                             self.file,
-                            span(argument),
+                            span(callback),
                             &format!(
                                 "inline-callback|{}|{}|{}|{}",
-                                caller.semantic_key, selector, argument_index, *ordinal
+                                caller.semantic_key, selector, stable_argument, *ordinal
                             ),
                         );
                         self.symbol_owners.insert(
-                            (argument.start_byte(), argument.end_byte()),
+                            (callback.start_byte(), callback.end_byte()),
                             symbol.id.clone(),
                         );
                         self.known_symbols.insert(symbol.id.clone(), symbol.clone());
                         self.output
-                            .insert((argument.start_byte(), argument.end_byte()), symbol);
+                            .insert((callback.start_byte(), callback.end_byte()), symbol);
                     }
                 }
             }
@@ -1245,7 +1419,12 @@ fn invoked_parameter(
                 | "function_definition"
         ) {
             if let Some(parameters) = node.child_by_field_name("parameters") {
-                if let Some(parameter_index) = direct_parameter_names(parameters, source)
+                let parameter_names = if node.kind() == "function_definition" {
+                    python_direct_parameter_names(parameters, source)
+                } else {
+                    direct_parameter_names(parameters, source)
+                };
+                if let Some(parameter_index) = parameter_names
                     .iter()
                     .position(|parameter| parameter.as_deref() == Some(name))
                 {
@@ -1678,10 +1857,44 @@ fn direct_parameter_names(parameters: Node<'_>, source: &[u8]) -> Vec<Option<Str
         .collect()
 }
 
+fn python_direct_parameter_names(parameters: Node<'_>, source: &[u8]) -> Vec<Option<String>> {
+    let mut cursor = parameters.walk();
+    parameters
+        .named_children(&mut cursor)
+        .filter(|parameter| !parameter.is_extra())
+        .map(|parameter| {
+            if parameter_contains_variadic_form(parameter) {
+                return None;
+            }
+            if parameter.kind() == "identifier" {
+                return Some(node_text(parameter, source));
+            }
+            parameter
+                .child_by_field_name("name")
+                .or_else(|| parameter.child_by_field_name("pattern"))
+                .filter(|name| name.kind() == "identifier")
+                .map(|name| node_text(name, source))
+                .or_else(|| {
+                    let mut children = parameter.walk();
+                    let name = parameter
+                        .named_children(&mut children)
+                        .find(|child| child.kind() == "identifier")
+                        .map(|name| node_text(name, source));
+                    name
+                })
+        })
+        .collect()
+}
+
 fn parameter_contains_variadic_form(node: Node<'_>) -> bool {
     if matches!(
         node.kind(),
-        "list_splat" | "dictionary_splat" | "rest_pattern" | "variadic_parameter"
+        "list_splat"
+            | "dictionary_splat"
+            | "list_splat_pattern"
+            | "dictionary_splat_pattern"
+            | "rest_pattern"
+            | "variadic_parameter"
     ) {
         return true;
     }
@@ -1703,6 +1916,11 @@ fn collect_callback_arguments(
     let Some(arguments) = call.child_by_field_name("arguments") else {
         return;
     };
+    if context.language == Language::Python && python_call_exceeds_argument_cap(arguments) {
+        return;
+    }
+    let unsafe_keywords = context.language == Language::Python
+        && python_keyword_mapping_unsafe(arguments, context.source);
     let mut cursor = arguments.walk();
     let mut positional_mapping_unsafe = false;
     for (argument_index, argument) in arguments
@@ -1710,23 +1928,38 @@ fn collect_callback_arguments(
         .filter(|argument| !argument.is_extra())
         .enumerate()
     {
-        if context.language == Language::Python
-            && matches!(
-                argument.kind(),
-                "keyword_argument" | "list_splat" | "dictionary_splat" | "generator_expression"
-            )
-        {
-            positional_mapping_unsafe = true;
-            continue;
-        }
-        if positional_mapping_unsafe {
-            continue;
-        }
+        let (argument, formal_name) =
+            if context.language == Language::Python && argument.kind() == "keyword_argument" {
+                let Some((name, value)) = python_keyword_argument(argument, context.source) else {
+                    continue;
+                };
+                if unsafe_keywords {
+                    continue;
+                }
+                (value, Some(name))
+            } else {
+                if context.language == Language::Python
+                    && matches!(
+                        argument.kind(),
+                        "list_splat" | "dictionary_splat" | "generator_expression"
+                    )
+                {
+                    positional_mapping_unsafe = true;
+                    continue;
+                }
+                if positional_mapping_unsafe {
+                    continue;
+                }
+                (argument, None)
+            };
         match referenced_parameter(call, argument, context.source, context.symbol_owners) {
             ParameterReference::Exact {
                 owner_id,
                 parameter_index,
             } => {
+                if formal_name.is_some() {
+                    continue;
+                }
                 delegations.push(CallbackParameterDelegationFact {
                     owner_id,
                     parameter_index,
@@ -1785,6 +2018,7 @@ fn collect_callback_arguments(
             caller_id: caller_id.to_owned(),
             callee_name: callee_name.to_owned(),
             argument_index,
+            formal_name,
             target_name,
             target_qualified_hint,
             target_symbol,
@@ -1860,7 +2094,12 @@ fn referenced_parameter(
                 ancestor = current.parent();
                 continue;
             };
-            let parameter_index = direct_parameter_names(parameters, source)
+            let parameter_names = if current.kind() == "function_definition" {
+                python_direct_parameter_names(parameters, source)
+            } else {
+                direct_parameter_names(parameters, source)
+            };
+            let parameter_index = parameter_names
                 .iter()
                 .position(|parameter| parameter.as_deref() == Some(name.as_str()));
             let Some(parameter_index) = parameter_index else {
@@ -2944,9 +3183,161 @@ mod tests {
     }
 
     #[test]
+    fn python_keyword_lambdas_map_to_exact_eligible_formals() {
+        let facts = parse_file(
+            "main.py",
+            "def invoke(value, callback=lambda: None, *, on_done=None):\n    callback()\n    on_done()\n\ndef caller():\n    invoke(on_done=lambda: None, callback=lambda: None, value=1)\n",
+        )
+        .unwrap();
+        let invoke = facts
+            .symbols
+            .iter()
+            .find(|symbol| symbol.qualified_name == "invoke")
+            .unwrap();
+        assert!(facts.python_callback_formals.iter().any(|formal| {
+            formal.owner_id == invoke.id
+                && formal.formal_name == "callback"
+                && formal.parameter_index == 1
+        }));
+        assert!(facts
+            .callback_parameter_invocations
+            .iter()
+            .any(|invocation| invocation.owner_id == invoke.id && invocation.parameter_index == 1));
+        assert!(facts
+            .callback_parameter_invocations
+            .iter()
+            .any(|invocation| invocation.owner_id == invoke.id && invocation.parameter_index == 3));
+        assert!(facts.python_callback_formals.iter().any(|formal| {
+            formal.owner_id == invoke.id
+                && formal.formal_name == "on_done"
+                && formal.parameter_index == 3
+        }));
+        let keyword_callbacks = facts
+            .callback_arguments
+            .iter()
+            .filter(|argument| argument.callee_name == "invoke")
+            .collect::<Vec<_>>();
+        assert_eq!(keyword_callbacks.len(), 2);
+        assert!(keyword_callbacks.iter().any(|argument| {
+            argument.formal_name.as_deref() == Some("callback")
+                && argument
+                    .target_symbol
+                    .as_ref()
+                    .is_some_and(|symbol| symbol.name.contains("keyword callback"))
+        }));
+        assert!(keyword_callbacks.iter().any(|argument| {
+            argument.formal_name.as_deref() == Some("on_done")
+                && argument
+                    .target_symbol
+                    .as_ref()
+                    .is_some_and(|symbol| symbol.name.contains("keyword on_done"))
+        }));
+    }
+
+    #[test]
+    fn python_keyword_callback_formals_fail_closed_for_unsafe_shapes() {
+        let decorated = parse_file(
+            "decorated.py",
+            "def deco(fn):\n    return fn\n\
+             @deco\n\
+             def invoke(callback):\n    callback()\n\
+             def caller():\n    invoke(callback=lambda: None)\n",
+        )
+        .unwrap();
+        let decorated_invoke = decorated
+            .symbols
+            .iter()
+            .find(|symbol| symbol.qualified_name == "invoke")
+            .unwrap();
+        assert!(decorated
+            .python_callback_formals
+            .iter()
+            .all(|formal| formal.owner_id != decorated_invoke.id));
+
+        let positional_only = parse_file(
+            "positional.py",
+            "def invoke(callback, /, ordinary=None, *args, keyword_only=None, **kwargs):\n\
+                 callback()\n\
+                 ordinary()\n\
+                 keyword_only()\n",
+        )
+        .unwrap();
+        let names = positional_only
+            .python_callback_formals
+            .iter()
+            .map(|formal| formal.formal_name.as_str())
+            .collect::<Vec<_>>();
+        assert!(!names.contains(&"callback"));
+        assert!(!names.contains(&"args"));
+        assert!(!names.contains(&"kwargs"));
+        assert!(names.contains(&"ordinary"));
+        assert!(names.contains(&"keyword_only"));
+        let positional_invocation = parse_file(
+            "positional_invocation.py",
+            "def invoke(callback, /):\n    callback()\n\ndef caller():\n    invoke(lambda: None)\n",
+        )
+        .unwrap();
+        let positional_invoke = positional_invocation
+            .symbols
+            .iter()
+            .find(|symbol| symbol.qualified_name == "invoke")
+            .unwrap();
+        assert!(positional_invocation
+            .callback_parameter_invocations
+            .iter()
+            .any(|invocation| {
+                invocation.owner_id == positional_invoke.id && invocation.parameter_index == 0
+            }));
+
+        let slash_in_default = parse_file(
+            "slash_default.py",
+            "def invoke(callback, path='a/b'):\n    callback()\n\ndef caller():\n    invoke(callback=lambda: None)\n",
+        )
+        .unwrap();
+        let invoke = slash_in_default
+            .symbols
+            .iter()
+            .find(|symbol| symbol.qualified_name == "invoke")
+            .unwrap();
+        assert!(slash_in_default
+            .python_callback_formals
+            .iter()
+            .any(|formal| {
+                formal.owner_id == invoke.id
+                    && formal.formal_name == "callback"
+                    && formal.parameter_index == 0
+            }));
+
+        for source in [
+            "def invoke(callback):\n    callback()\n\ndef caller():\n    invoke(callback=lambda: None, callback=lambda: None)\n",
+            "def invoke(callback):\n    callback()\n\ndef caller(values):\n    invoke(callback=lambda: None, **values)\n",
+        ] {
+            let facts = parse_file("unsafe.py", source).unwrap();
+            assert!(
+                facts
+                    .callback_arguments
+                    .iter()
+                    .all(|argument| argument.formal_name.is_none()),
+                "unexpected keyword callback for {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn python_callback_calls_above_argument_cap_emit_no_callback_facts() {
+        let mut arguments = vec!["lambda: None".to_owned()];
+        arguments.extend((1..=MAX_PYTHON_CALL_ARGUMENTS).map(|index| index.to_string()));
+        let source = format!(
+            "def invoke(callback, *values):\n    callback()\n\ndef caller():\n    invoke({})\n",
+            arguments.join(", ")
+        );
+        let facts = parse_file("oversized.py", &source).unwrap();
+        assert!(facts.callback_arguments.is_empty());
+    }
+
+    #[test]
     fn python_lambda_callbacks_fail_closed_after_non_positional_arguments() {
         for source in [
-            "def invoke(callback):\n    callback()\n\ndef caller():\n    invoke(callback=lambda: None)\n",
             "def invoke(value, callback):\n    callback()\n\ndef caller(values):\n    invoke(*values, lambda: None)\n",
             "def invoke(value, callback):\n    callback()\n\ndef caller(values):\n    invoke(**values, lambda: None)\n",
             "def invoke(value, callback):\n    callback()\n\ndef caller(values):\n    invoke((value for value in values), lambda: None)\n",

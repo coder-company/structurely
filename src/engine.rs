@@ -3450,6 +3450,114 @@ mod tests {
     }
 
     #[test]
+    fn python_keyword_inline_callbacks_resolve_exact_formals_and_keep_stable_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("main.py");
+        let initial = "def selected():\n    pass\n\ndef invoke(value, callback=None, *, on_done=None):\n    callback()\n    on_done()\n\ndef caller():\n    invoke(value=1, callback=lambda: selected(), on_done=lambda: selected())\n";
+        fs::write(&path, initial).unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let invoke = engine
+            .search("invoke", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.qualified_name == "invoke")
+            .unwrap()
+            .symbol;
+        let callback_targets = |engine: &Engine| {
+            engine
+                .callees(&invoke.id)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, evidence)| evidence.provenance == "dynamic/callback-argument")
+                .map(|(target, _)| (target.name, target.id))
+                .collect::<Vec<_>>()
+        };
+        let before = callback_targets(&engine);
+        assert_eq!(before.len(), 2, "{before:?}");
+        assert!(before
+            .iter()
+            .any(|(name, _)| name.contains("keyword callback")));
+        assert!(before
+            .iter()
+            .any(|(name, _)| name.contains("keyword on_done")));
+
+        fs::write(
+            &path,
+            initial.replace(
+                "value=1, callback=lambda: selected(), on_done=lambda: selected()",
+                "on_done=lambda: selected(), value=2, callback=lambda: selected()",
+            ),
+        )
+        .unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 1);
+        let mut before_ids = before.into_iter().map(|(_, id)| id).collect::<Vec<_>>();
+        let mut after_ids = callback_targets(&engine)
+            .into_iter()
+            .map(|(_, id)| id)
+            .collect::<Vec<_>>();
+        before_ids.sort();
+        after_ids.sort();
+        assert_eq!(after_ids, before_ids);
+    }
+
+    #[test]
+    fn python_keyword_callbacks_require_unique_callee_and_exact_formal_name() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("main.py"),
+            "def invoke(callback):\n\
+                 callback()\n\
+             def invoke(callback):\n\
+                 callback()\n\
+             def caller():\n\
+                 invoke(callback=lambda: None)\n\
+                 invoke(missing=lambda: None)\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        for invoke in engine
+            .search("invoke", 10)
+            .unwrap()
+            .into_iter()
+            .filter(|hit| hit.symbol.qualified_name == "invoke")
+            .map(|hit| hit.symbol)
+        {
+            assert!(engine
+                .callees(&invoke.id)
+                .unwrap()
+                .iter()
+                .all(|(_, evidence)| evidence.provenance != "dynamic/callback-argument"));
+        }
+    }
+
+    #[test]
+    fn python_positional_only_callbacks_resolve_by_exact_positional_index() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("main.py"),
+            "def selected():\n    pass\n\ndef invoke(callback, /):\n    callback()\n\ndef caller():\n    invoke(lambda: selected())\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let invoke = engine
+            .search("invoke", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.qualified_name == "invoke")
+            .unwrap()
+            .symbol;
+        let callbacks = engine
+            .callees(&invoke.id)
+            .unwrap()
+            .into_iter()
+            .filter(|(_, evidence)| evidence.provenance == "dynamic/callback-argument")
+            .collect::<Vec<_>>();
+        assert_eq!(callbacks.len(), 1);
+        assert_eq!(callbacks[0].0.name, "<callback invoke argument 1 #1>");
+        assert_eq!(callbacks[0].1.confidence, 0.96);
+    }
+
+    #[test]
     fn python_positional_lambda_callbacks_are_exact_fail_closed_and_incremental() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("main.py");
@@ -3457,7 +3565,7 @@ mod tests {
                        \n\
                        def invoke(value, callback):\n    callback()\n\
                        \n\
-                       def caller(values):\n    invoke(1, lambda: selected())\n    invoke(*values, lambda: selected())\n    invoke(callback=lambda: selected(), value=1)\n";
+                       def caller(values):\n    invoke(1, lambda: selected())\n    invoke(*values, lambda: selected())\n    invoke(unknown=lambda: selected(), value=1)\n";
         fs::write(&path, initial).unwrap();
         let (mut engine, _) = Engine::init(temp.path()).unwrap();
         let symbol = |engine: &Engine, qualified_name: &str| {

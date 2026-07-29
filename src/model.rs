@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path};
 
-pub const GRAPH_MODEL_VERSION: u32 = 53;
+pub const GRAPH_MODEL_VERSION: u32 = 54;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -296,11 +296,19 @@ pub(crate) struct CallbackArgumentFact {
     pub caller_id: String,
     pub callee_name: String,
     pub argument_index: usize,
+    pub formal_name: Option<String>,
     pub target_name: String,
     pub target_qualified_hint: Option<String>,
     pub target_symbol: Option<Symbol>,
     pub line: usize,
     pub call_start_byte: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PythonCallbackFormalFact {
+    pub owner_id: String,
+    pub formal_name: String,
+    pub parameter_index: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -430,6 +438,7 @@ pub(crate) struct FileFacts {
     pub callback_parameter_invocations: Vec<CallbackParameterInvocation>,
     pub callback_parameter_delegations: Vec<CallbackParameterDelegationFact>,
     pub callback_arguments: Vec<CallbackArgumentFact>,
+    pub python_callback_formals: Vec<PythonCallbackFormalFact>,
     pub callable_returns: Vec<CallableReturnFact>,
     pub arkui_builder_flow: ArkuiBuilderFlowFacts,
     pub unresolved_references: Vec<UnresolvedReference>,
