@@ -127,14 +127,19 @@ declarations, BuilderParam declarations, assignments, and consumer invocations
 as compact per-file Facts, then resolves them after verified import bindings.
 Object-pair and trailing-child syntax are separate resolver adapters over this
 seam. Object pairs support exact same-owner `this.member` values and verified
-imported bare decorated Builders. Trailing children receive stable synthetic
-Symbols and resolve only when the uniquely imported or local component declares
-exactly one BuilderParam. The module emits both registration and consumer
-dispatch relationships with separate provenance. Undeclared keys, undecorated
-targets, missing or ambiguous imports, multiple possible trailing parameters,
-computed members, and ambiguous components fail closed. Inline arrow adapters,
-cross-file `this.member` forwarding, declaration defaults, and deferred runtime
-assignments remain outside this bounded layer.
+imported bare decorated Builders. Exact inline arrow and function-expression
+values receive synthetic adapter Symbols, including the ArkTS grammar's
+contiguous recovered-sibling form inside ArkUI children. Trailing children
+receive stable synthetic Symbols and resolve only when the uniquely imported or
+local component declares exactly one BuilderParam. Every synthetic Symbol and
+its containment, registration, and consumer-dispatch relationships are
+materialized together in the graph transaction only after that proof; rejected
+observations leave no searchable Symbol or dangling relationship. The module
+emits registration and consumer dispatch relationships with separate
+provenance. Undeclared keys, undecorated targets, missing or ambiguous imports,
+multiple possible trailing parameters, computed members, and ambiguous
+components fail closed. Cross-file `this.member` forwarding, declaration
+defaults, and deferred runtime assignments remain outside this bounded layer.
 
 Direct calls and registrations carry their own provenance, confidence, and
 explanation through one resolution path. Literal event dispatch joins only

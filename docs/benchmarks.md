@@ -228,3 +228,17 @@ query p95 while using 88.62% less peak memory. The
 passes 13/13 assertions, indexes 48,370 symbols and 88,790 relationships, and
 proves both `CodeView.build →` its supplied trailing child and
 `TitleExpansionView.build → titleMenu/titleContent` through verified imports.
+
+After exact inline arrow/function BuilderParam adapters and transactional
+synthetic-Symbol materialization, the
+[`post-inline-builder differential`](../benchmarks/differential-mcp-2026-07-29-post-inline-builder/README.md)
+keeps both engines at 22/22 shared compatibility and 1.0000 usefulness. The
+enforced
+[`performance run`](../benchmarks/codegraph-source-intersection-2026-07-29-post-inline-builder/README.md)
+is 3.399× faster to index, 9.460× faster at query p50, and 8.278× faster at
+query p95 while using 89.26% less peak memory. The
+[`real OpenHarmony gate`](../benchmarks/openharmony-inline-builder-2026-07-29/README.md)
+passes 14/14 assertions across 6,995 files and proves
+`ListExchange.build →` its exact inline `deductionView` adapter. Rejected
+ordinary object callbacks and ambiguous trailing children leave no synthetic
+Symbol behind.

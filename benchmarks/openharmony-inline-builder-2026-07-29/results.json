@@ -1,0 +1,260 @@
+{
+  "passed": true,
+  "repositories": [
+    {
+      "name": "openharmony",
+      "url": "https://github.com/openharmony/applications_app_samples",
+      "commit": "a826ab0e75fe51d028c1c5af58188e908736b53b",
+      "freshIndexWallMs": 117308.837,
+      "indexedFiles": 6995,
+      "symbols": 47955,
+      "relationships": 88979,
+      "databaseBytes": 193331200,
+      "assertions": [
+        {
+          "command": "search",
+          "query": "OperationView.build",
+          "passed": true,
+          "requiredText": [
+            "code/BasicFeature/International/International/entry/src/main/ets/component/OperationView.ets",
+            "\"language\": \"arkts\"",
+            "\"qualified_name\": \"OperationView.build\""
+          ],
+          "recordContains": [],
+          "matchingRecord": true
+        },
+        {
+          "command": "callers",
+          "query": "handleClick",
+          "passed": true,
+          "requiredText": [
+            "\"qualified_name\": \"OperationView.build\"",
+            "\"provenance\": \"framework/arkui-event\"",
+            "\"confidence\": 0.97",
+            "\"line\": 41"
+          ],
+          "recordContains": [
+            "\"qualified_name\": \"OperationView.build\"",
+            "\"provenance\": \"framework/arkui-event\"",
+            "\"confidence\": 0.97",
+            "\"line\": 41"
+          ],
+          "matchingRecord": true
+        },
+        {
+          "command": "callees",
+          "query": "VideoPlayer.build",
+          "passed": true,
+          "requiredText": [
+            "\"qualified_name\": \"WindowComponent\"",
+            "code/SystemFeature/WindowManagement/WindowManage/WindowComponent/src/main/ets/components/MainPage/MainPage.ets",
+            "\"provenance\": \"framework/arkui-render\"",
+            "\"confidence\": 0.97",
+            "\"line\": 25"
+          ],
+          "recordContains": [
+            "\"qualified_name\": \"WindowComponent\"",
+            "code/SystemFeature/WindowManagement/WindowManage/WindowComponent/src/main/ets/components/MainPage/MainPage.ets",
+            "\"provenance\": \"framework/arkui-render\"",
+            "\"confidence\": 0.97",
+            "\"line\": 25"
+          ],
+          "matchingRecord": true
+        },
+        {
+          "command": "callees",
+          "query": "Index.build",
+          "passed": true,
+          "requiredText": [
+            "\"qualified_name\": \"DocumentPage\"",
+            "code/Solutions/Media/MultiMedia/entry/src/main/ets/pages/DocumentPage.ets",
+            "\"provenance\": \"framework/arkui-route\"",
+            "\"confidence\": 0.97",
+            "\"line\": 148"
+          ],
+          "recordContains": [
+            "\"qualified_name\": \"DocumentPage\"",
+            "code/Solutions/Media/MultiMedia/entry/src/main/ets/pages/DocumentPage.ets",
+            "\"provenance\": \"framework/arkui-route\"",
+            "\"confidence\": 0.97",
+            "\"line\": 148"
+          ],
+          "matchingRecord": true
+        },
+        {
+          "command": "callees",
+          "query": "VerifyCodeComponentWithoutCursor.buildVerifyCodeComponent",
+          "passed": true,
+          "requiredText": [
+            "\"qualified_name\": \"verifyCodeUnitStyle\"",
+            "\"provenance\": \"framework/arkui-helper\"",
+            "\"confidence\": 0.97",
+            "\"line\": 149"
+          ],
+          "recordContains": [
+            "\"qualified_name\": \"verifyCodeUnitStyle\"",
+            "\"provenance\": \"framework/arkui-helper\"",
+            "\"confidence\": 0.97",
+            "\"line\": 149"
+          ],
+          "matchingRecord": true
+        },
+        {
+          "command": "callees",
+          "query": "NotificationPublish.view",
+          "passed": true,
+          "requiredText": [
+            "\"qualified_name\": \"NotificationPublish.viewStyle\"",
+            "\"provenance\": \"framework/arkui-helper\"",
+            "\"confidence\": 0.97",
+            "\"line\": 71"
+          ],
+          "recordContains": [
+            "\"qualified_name\": \"NotificationPublish.viewStyle\"",
+            "\"provenance\": \"framework/arkui-helper\"",
+            "\"confidence\": 0.97",
+            "\"line\": 71"
+          ],
+          "matchingRecord": true
+        },
+        {
+          "command": "callees",
+          "query": "PageThreadModel.build",
+          "passed": true,
+          "requiredText": [
+            "\"qualified_name\": \"PageThreadModel.build.callback\"",
+            "\"provenance\": \"framework/ohos-emitter\"",
+            "\"confidence\": 0.97",
+            "\"line\": 121"
+          ],
+          "recordContains": [
+            "\"qualified_name\": \"PageThreadModel.build.callback\"",
+            "\"provenance\": \"framework/ohos-emitter\"",
+            "\"confidence\": 0.97",
+            "\"line\": 121"
+          ],
+          "matchingRecord": true
+        },
+        {
+          "command": "callees",
+          "query": "sendProcessMessage",
+          "passed": true,
+          "requiredText": [
+            "\"qualified_name\": \"KeyManager.aboutToAppear.<emitter callback",
+            "\"provenance\": \"framework/ohos-emitter\""
+          ],
+          "recordContains": [
+            "\"qualified_name\": \"KeyManager.aboutToAppear.<emitter callback",
+            "code/BasicFeature/Security/KeyManager/entry/src/main/ets/pages/KeyManager.ets",
+            "\"provenance\": \"framework/ohos-emitter\"",
+            "\"confidence\": 0.97",
+            "\"line\": 35"
+          ],
+          "matchingRecord": true
+        },
+        {
+          "command": "callees",
+          "query": "ActionBarButton.build",
+          "passed": true,
+          "requiredText": [
+            "\"qualified_name\": \"ActionBarButton.PopupBuilder\"",
+            "\"provenance\": \"framework/arkui-builder-registration\""
+          ],
+          "recordContains": [
+            "\"qualified_name\": \"ActionBarButton.PopupBuilder\"",
+            "\"provenance\": \"framework/arkui-builder-registration\"",
+            "\"confidence\": 0.97",
+            "\"line\": 99"
+          ],
+          "matchingRecord": true
+        },
+        {
+          "command": "callees",
+          "query": "RequestDownload.downloadFile",
+          "passed": true,
+          "requiredText": [
+            "\"qualified_name\": \"Download.downloadFileCallback\"",
+            "\"provenance\": \"dynamic/callback-argument\""
+          ],
+          "recordContains": [
+            "\"qualified_name\": \"Download.downloadFileCallback\"",
+            "code/BasicFeature/Connectivity/UploadAndDownLoad/entry/src/main/ets/pages/Download.ets",
+            "\"provenance\": \"dynamic/callback-argument\"",
+            "\"confidence\": 0.96",
+            "\"line\": 401"
+          ],
+          "matchingRecord": true
+        },
+        {
+          "command": "callees",
+          "query": "HeatHistogramContent.build",
+          "passed": true,
+          "requiredText": [
+            "\"qualified_name\": \"HeatHistogramContent.content\"",
+            "\"provenance\": \"framework/arkui-builder-param\""
+          ],
+          "recordContains": [
+            "\"qualified_name\": \"HeatHistogramContent.content\"",
+            "code/SuperFeature/MultiDeviceAppDev/HealthyDiet/entry/src/main/ets/pages/components/DietRecord.ets",
+            "\"provenance\": \"framework/arkui-builder-param\"",
+            "\"confidence\": 0.97",
+            "\"line\": 179"
+          ],
+          "matchingRecord": true
+        },
+        {
+          "command": "callees",
+          "query": "CodeView.build",
+          "passed": true,
+          "requiredText": [
+            "\"qualified_name\": \"BrotherComponentSync.build.<BuilderParam child CodeView>\"",
+            "\"provenance\": \"framework/arkui-builder-param-dispatch\""
+          ],
+          "recordContains": [
+            "\"qualified_name\": \"BrotherComponentSync.build.<BuilderParam child CodeView>\"",
+            "code/UI/ArkTsComponentCollection/StateManagement/entry/src/main/ets/pages/pagelevelstagemanagement/multicompomentssync/brothercomponentssync/BrotherComponentSync.ets",
+            "\"provenance\": \"framework/arkui-builder-param-dispatch\"",
+            "\"confidence\": 0.97",
+            "\"line\": 26"
+          ],
+          "matchingRecord": true
+        },
+        {
+          "command": "callees",
+          "query": "TitleExpansionView.build",
+          "passed": true,
+          "requiredText": [
+            "\"qualified_name\": \"titleMenu\"",
+            "\"qualified_name\": \"titleContent\"",
+            "\"provenance\": \"framework/arkui-builder-param\""
+          ],
+          "recordContains": [
+            "\"qualified_name\": \"titleMenu\"",
+            "code/UI/ExpandTitle/entry/src/main/ets/pages/TitleMenu.ets",
+            "\"provenance\": \"framework/arkui-builder-param\"",
+            "\"confidence\": 0.97",
+            "\"line\": 93"
+          ],
+          "matchingRecord": true
+        },
+        {
+          "command": "callees",
+          "query": "ListExchange.build",
+          "passed": true,
+          "requiredText": [
+            "\"qualified_name\": \"ListExchangeViewComponent.build.<BuilderParam adapter ListExchange.deductionView>\"",
+            "\"provenance\": \"framework/arkui-builder-param-dispatch\""
+          ],
+          "recordContains": [
+            "\"qualified_name\": \"ListExchangeViewComponent.build.<BuilderParam adapter ListExchange.deductionView>\"",
+            "code/UI/ListBeExchange/ListExchange/src/main/ets/view/ListExchangeView.ets",
+            "\"provenance\": \"framework/arkui-builder-param-dispatch\"",
+            "\"confidence\": 0.97",
+            "\"line\": 117"
+          ],
+          "matchingRecord": true
+        }
+      ]
+    }
+  ]
+}
