@@ -765,6 +765,7 @@ dependencies = [
  "tree-sitter-scala",
  "tree-sitter-swift",
  "tree-sitter-typescript",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

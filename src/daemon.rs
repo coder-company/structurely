@@ -1,4 +1,4 @@
-use crate::{engine::PROJECT_DIR, Engine};
+use crate::{atomic_file, engine::PROJECT_DIR, Engine};
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
 use serde::Serialize;
@@ -162,13 +162,24 @@ pub fn run(project: impl AsRef<Path>, debounce: Duration) -> Result<()> {
     let report = engine.sync()?;
     write_state(&paths.state, &DaemonState::running(&project, report.epoch))?;
     let state_path = paths.state.clone();
-    let watch_result = engine.watch(
+    let watch_stop = Arc::clone(&stop);
+    let mut state_write_error = None;
+    let mut watch_result = engine.watch(
         stop.clone(),
         debounce.max(Duration::from_millis(10)),
         |report| {
-            let _ = write_state(&state_path, &DaemonState::running(&project, report.epoch));
+            record_state_update(
+                &state_path,
+                &project,
+                report.epoch,
+                &watch_stop,
+                &mut state_write_error,
+            );
         },
     );
+    if let Some(error) = state_write_error {
+        watch_result = Err(error.context("publish daemon state after index update"));
+    }
     stop.store(true, Ordering::Relaxed);
     let _ = monitor.join();
     let _ = fs::remove_file(&paths.stop);
@@ -257,10 +268,24 @@ fn open_lock(path: &Path) -> Result<File> {
 }
 
 fn write_state(path: &Path, state: &DaemonState) -> Result<()> {
-    let temporary = path.with_extension("json.tmp");
-    fs::write(&temporary, serde_json::to_vec_pretty(state)?)
-        .with_context(|| format!("write daemon state {}", temporary.display()))?;
-    fs::rename(&temporary, path).with_context(|| format!("publish daemon state {}", path.display()))
+    atomic_file::write_atomic(path, &serde_json::to_vec_pretty(state)?)
+        .with_context(|| format!("publish daemon state {}", path.display()))
+}
+
+fn record_state_update(
+    path: &Path,
+    project: &Path,
+    epoch: u64,
+    stop: &AtomicBool,
+    error: &mut Option<anyhow::Error>,
+) {
+    if error.is_some() {
+        return;
+    }
+    if let Err(write_error) = write_state(path, &DaemonState::running(project, epoch)) {
+        *error = Some(write_error);
+        stop.store(true, Ordering::Relaxed);
+    }
 }
 
 fn unix_millis() -> u128 {
@@ -268,4 +293,26 @@ fn unix_millis() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_publication_failure_requests_shutdown_and_is_retained() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_path = directory.path().join("daemon.json");
+        fs::create_dir(&state_path).unwrap();
+        fs::write(state_path.join("sentinel"), b"keep").unwrap();
+        let stop = AtomicBool::new(false);
+        let mut error = None;
+
+        record_state_update(&state_path, directory.path(), 42, &stop, &mut error);
+
+        assert!(stop.load(Ordering::Relaxed));
+        let message = format!("{:#}", error.unwrap());
+        assert!(message.contains("publish daemon state"));
+        assert_eq!(fs::read(state_path.join("sentinel")).unwrap(), b"keep");
+    }
 }

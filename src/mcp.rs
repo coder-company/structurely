@@ -84,6 +84,9 @@ fn handle(engine: &mut Engine, request: Value) -> Result<Option<Value>> {
         "tools/list" => json!({ "tools": enabled_tool_definitions(
             std::env::var("CODEGRAPH_MCP_TOOLS").ok().as_deref()
         ) }),
+        "resources/list" => json!({ "resources": [] }),
+        "resources/templates/list" => json!({ "resourceTemplates": [] }),
+        "prompts/list" => json!({ "prompts": [] }),
         "tools/call" => {
             let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
             if !params.is_object() {
@@ -907,6 +910,39 @@ mod tests {
             .unwrap()
             .unwrap();
             assert_eq!(response["result"]["protocolVersion"], expected);
+        }
+    }
+
+    #[test]
+    fn unsupported_mcp_capability_probes_return_successful_empty_lists() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("main.ts"), "function main() {}\n").unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+
+        for (id, method, expected) in [
+            (11, "resources/list", json!({ "resources": [] })),
+            (
+                12,
+                "resources/templates/list",
+                json!({ "resourceTemplates": [] }),
+            ),
+            (13, "prompts/list", json!({ "prompts": [] })),
+        ] {
+            let response = handle(
+                &mut engine,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": method,
+                    "params": {}
+                }),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                response,
+                json!({ "jsonrpc": "2.0", "id": id, "result": expected })
+            );
         }
     }
 

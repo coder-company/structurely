@@ -1,3 +1,4 @@
+use crate::atomic_file;
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -290,13 +291,8 @@ fn absolute_executable(executable: &Path) -> Result<PathBuf> {
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let temporary = path.with_extension("structurely.tmp");
-    fs::write(&temporary, bytes)?;
-    fs::rename(&temporary, path)?;
-    Ok(())
+    atomic_file::write_atomic(path, bytes)
+        .with_context(|| format!("publish coding-agent configuration {}", path.display()))
 }
 
 fn remove_empty_parent(path: &Path) {

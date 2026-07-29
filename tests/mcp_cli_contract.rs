@@ -45,6 +45,19 @@ fn mcp_stdio_preserves_the_codegraph_agent_contract() {
         assert!(names.contains(&expected), "missing MCP tool {expected}");
     }
 
+    assert_eq!(
+        session.request("resources/list", json!({}))["result"],
+        json!({ "resources": [] })
+    );
+    assert_eq!(
+        session.request("resources/templates/list", json!({}))["result"],
+        json!({ "resourceTemplates": [] })
+    );
+    assert_eq!(
+        session.request("prompts/list", json!({}))["result"],
+        json!({ "prompts": [] })
+    );
+
     let exact = session.call("codegraph_search", json!({"query": "showUser"}));
     assert!(text(&exact).contains("showUser"));
     assert!(exact["result"]["structuredContent"].is_array());

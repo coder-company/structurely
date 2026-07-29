@@ -1,3 +1,4 @@
+mod atomic_file;
 pub mod daemon;
 pub mod engine;
 pub mod integrations;
