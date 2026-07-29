@@ -82,6 +82,10 @@ def predicates(
         "initialize": capture["initialize"]["result"]["protocolVersion"]
         in {"2024-11-05", "2025-03-26", "2025-06-18"},
         "tools": expected_tools <= tool_names(capture["tools"]),
+        "resources": capture["resources"].get("result") == {"resources": []},
+        "resource-templates": capture["resource-templates"].get("result")
+        == {"resourceTemplates": []},
+        "prompts": capture["prompts"].get("result") == {"prompts": []},
         "search-exact": "showUser" in result_text(capture["search-exact"]),
         "search-ambiguous": result_text(capture["search-ambiguous"]).count("duplicate")
         >= 2,

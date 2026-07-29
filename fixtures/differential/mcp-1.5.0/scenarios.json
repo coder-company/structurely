@@ -39,6 +39,13 @@
       }
     },
     { "label": "tools", "method": "tools/list", "params": {} },
+    { "label": "resources", "method": "resources/list", "params": {} },
+    {
+      "label": "resource-templates",
+      "method": "resources/templates/list",
+      "params": {}
+    },
+    { "label": "prompts", "method": "prompts/list", "params": {} },
     {
       "label": "search-exact",
       "method": "tools/call",

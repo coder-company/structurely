@@ -45,7 +45,9 @@ structurely daemon stop --path /absolute/project
 Start and stop are idempotent. Status reports the owning PID, graph epoch,
 phase, last update time, and terminal indexing error when present. A failed
 watcher releases its lock, records the error, and can be restarted after the
-source problem is corrected.
+source problem is corrected. State epochs are published with a durable atomic
+replacement; a publication failure stops the watcher instead of leaving a
+running daemon with silently stale status.
 
 MCP requests prefer the shared daemon. Each tool response reports
 `_meta.freshness.mode`, `epoch`, and `daemonPid`. If daemon catch-up exceeds
@@ -80,6 +82,11 @@ Codex uses `.codex/config.toml`; Claude Code uses `.mcp.json`; Cursor uses
 `.cursor/mcp.json`. The commands are idempotent, use the absolute installed
 Structurely executable and project path, preserve unrelated configuration, and
 remove only the `structurely` server entry.
+
+Configuration updates use a unique temporary file in the destination
+directory, synchronize it, and atomically replace the previous configuration.
+A failed publication preserves the previous file and cleans up its temporary
+file.
 
 ## Uninstall
 

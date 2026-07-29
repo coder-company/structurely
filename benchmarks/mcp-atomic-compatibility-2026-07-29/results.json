@@ -1,0 +1,37 @@
+{
+  "structurely": {
+    "commit": "b94080166f87bb9641b52f465a7077371a7ea4ef",
+    "release_binary_sha256": "f6f2f648c234ebe6202436afdcba76a19d5f861ac37740bec687eefb19d78581"
+  },
+  "codegraph": {
+    "version": "1.5.0",
+    "commit": "572d22bfbe82602080e457bec655f72e3314f9ef"
+  },
+  "differential": {
+    "shared_passed": 25,
+    "shared_total": 25,
+    "structurely_extension_passed": 1,
+    "structurely_extension_total": 1,
+    "structurely_usefulness": 1.0,
+    "codegraph_usefulness": 1.0,
+    "structurely_context_characters": 2459,
+    "codegraph_context_characters": 2532,
+    "raw_sha256": "50f5eddcb6ccb104ae88e2ec70cc865d5f759d308245b66d9b108b9903084d2e"
+  },
+  "atomic_publication": {
+    "repeated_replacements": 64,
+    "failed_publication_preserves_destination": true,
+    "failed_publication_cleans_temporary": true,
+    "daemon_publication_failure_requests_shutdown": true,
+    "daemon_publication_failure_retained": true,
+    "unix_parent_directory_sync": true,
+    "windows_replace_existing_write_through": true
+  },
+  "verification": {
+    "library_tests_passed": 200,
+    "daemon_process_tests_passed": 1,
+    "mcp_process_tests_passed": 1,
+    "differential_script_tests_passed": 4,
+    "clippy_warnings": 0
+  }
+}
