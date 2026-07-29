@@ -28,6 +28,7 @@ pub(crate) fn enrich_file_facts(root: Node<'_>, source: &[u8], facts: &mut FileF
             collect_javascript_registrations(root, source, facts);
             collect_javascript_function_references(root, source, facts);
             collect_nestjs_transport_routes(root, source, facts);
+            collect_nestjs_graphql_routes(root, source, facts);
             collect_nestjs_routes(root, source, facts);
             if facts.language == Language::ArkTs {
                 collect_arkui_routes(root, source, facts);
@@ -2904,6 +2905,623 @@ enum NestTransportDecorator {
     Event,
     Grpc,
     GrpcStream,
+}
+
+#[derive(Clone, Copy)]
+enum NestGraphqlDecorator {
+    Resolver,
+    Query,
+    Mutation,
+    ResolveField,
+    Subscription,
+    ResolveReference,
+}
+
+impl NestGraphqlDecorator {
+    fn canonical_name(self) -> &'static str {
+        match self {
+            Self::Resolver => "Resolver",
+            Self::Query => "Query",
+            Self::Mutation => "Mutation",
+            Self::ResolveField => "ResolveField",
+            Self::Subscription => "Subscription",
+            Self::ResolveReference => "ResolveReference",
+        }
+    }
+}
+
+#[derive(Default)]
+struct NestGraphqlImports {
+    named: HashMap<String, NestGraphqlDecorator>,
+    namespaces: HashSet<String>,
+}
+
+fn collect_nestjs_graphql_routes(root: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+    if !contains_bytes(source, b"@nestjs/graphql") {
+        return;
+    }
+    let imports = nestjs_graphql_imports(root, source);
+    if imports.namespaces.is_empty()
+        && !imports
+            .named
+            .values()
+            .any(|kind| matches!(kind, NestGraphqlDecorator::Resolver))
+    {
+        return;
+    }
+    let mut occurrences = HashMap::new();
+    collect_nestjs_graphql_classes(root, source, facts, &imports, &mut occurrences, 0);
+}
+
+fn nestjs_graphql_imports(root: Node<'_>, source: &[u8]) -> NestGraphqlImports {
+    fn visit(node: Node<'_>, source: &[u8], output: &mut NestGraphqlImports) {
+        if node.kind() == "import_statement" {
+            let Some("@nestjs/graphql") = node
+                .child_by_field_name("source")
+                .and_then(|value| string_literal(value, source))
+                .as_deref()
+            else {
+                return;
+            };
+            let statement = text(node, source);
+            let Some(clause) = statement
+                .strip_prefix("import")
+                .and_then(|body| body.rsplit_once(" from ").map(|(clause, _)| clause.trim()))
+                .filter(|clause| !clause.starts_with("type "))
+            else {
+                return;
+            };
+            if let Some(namespace) = clause
+                .strip_prefix("* as ")
+                .filter(|binding| is_javascript_identifier(binding))
+            {
+                output.namespaces.insert(namespace.to_owned());
+                return;
+            }
+            for (canonical, kind) in [
+                ("Resolver", NestGraphqlDecorator::Resolver),
+                ("Query", NestGraphqlDecorator::Query),
+                ("Mutation", NestGraphqlDecorator::Mutation),
+                ("ResolveField", NestGraphqlDecorator::ResolveField),
+                ("Subscription", NestGraphqlDecorator::Subscription),
+                ("ResolveReference", NestGraphqlDecorator::ResolveReference),
+            ] {
+                for binding in named_import_bindings(clause, canonical) {
+                    output.named.insert(binding, kind);
+                }
+            }
+            return;
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            visit(child, source, output);
+        }
+    }
+
+    let mut output = NestGraphqlImports::default();
+    visit(root, source, &mut output);
+    output
+}
+
+fn collect_nestjs_graphql_classes(
+    node: Node<'_>,
+    source: &[u8],
+    facts: &mut FileFacts,
+    imports: &NestGraphqlImports,
+    occurrences: &mut HashMap<String, usize>,
+    class_count: usize,
+) -> usize {
+    let mut class_count = class_count;
+    if node.kind() == "class_declaration" {
+        if class_count >= 256 {
+            return class_count;
+        }
+        class_count += 1;
+        enrich_nestjs_graphql_class(node, source, facts, imports, occurrences);
+        return class_count;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        class_count =
+            collect_nestjs_graphql_classes(child, source, facts, imports, occurrences, class_count);
+        if class_count >= 256 {
+            break;
+        }
+    }
+    class_count
+}
+
+fn enrich_nestjs_graphql_class(
+    class: Node<'_>,
+    source: &[u8],
+    facts: &mut FileFacts,
+    imports: &NestGraphqlImports,
+    occurrences: &mut HashMap<String, usize>,
+) {
+    let Some(class_name) = class
+        .child_by_field_name("name")
+        .map(|name| text(name, source))
+        .filter(|name| is_javascript_identifier(name))
+    else {
+        return;
+    };
+    let class_decorators = direct_decorators(class).take(16);
+    let parent_decorators = class
+        .parent()
+        .into_iter()
+        .flat_map(direct_decorators)
+        .take(16);
+    let Some(parent_type) = class_decorators
+        .chain(parent_decorators)
+        .find_map(|decorator| {
+            let (kind, arguments) = nestjs_graphql_decorator_call(decorator, source, imports)?;
+            if !matches!(kind, NestGraphqlDecorator::Resolver) {
+                return None;
+            }
+            nestjs_graphql_resolver_parent(&arguments, source)
+        })
+    else {
+        return;
+    };
+
+    let Some(body) = class.child_by_field_name("body") else {
+        return;
+    };
+    let mut cursor = body.walk();
+    let children = body.named_children(&mut cursor).collect::<Vec<_>>();
+    let mut pending = Vec::new();
+    let mut route_count = 0usize;
+    for method in children {
+        if method.kind() == "decorator" {
+            if pending.len() < 16 {
+                pending.push(method);
+            }
+            continue;
+        }
+        if method.kind() != "method_definition" {
+            pending.clear();
+            continue;
+        }
+        let Some(handler) = method
+            .child_by_field_name("name")
+            .map(|name| text(name, source))
+            .filter(|name| is_javascript_identifier(name))
+        else {
+            pending.clear();
+            continue;
+        };
+        for decorator in pending.drain(..) {
+            if route_count >= 256 {
+                return;
+            }
+            let Some((kind, arguments)) = nestjs_graphql_decorator_call(decorator, source, imports)
+            else {
+                continue;
+            };
+            if matches!(kind, NestGraphqlDecorator::Resolver) {
+                continue;
+            }
+            let Some(operation) = nestjs_graphql_operation_name(&arguments, source, &handler)
+            else {
+                continue;
+            };
+            let name = match kind {
+                NestGraphqlDecorator::Query => format!("GRAPHQL QUERY {operation}"),
+                NestGraphqlDecorator::Mutation => format!("GRAPHQL MUTATION {operation}"),
+                NestGraphqlDecorator::Subscription => {
+                    format!("GRAPHQL SUBSCRIPTION {operation}")
+                }
+                NestGraphqlDecorator::ResolveField => {
+                    let parent = parent_type.as_str();
+                    if parent.is_empty() {
+                        continue;
+                    }
+                    format!("GRAPHQL FIELD {parent}.{operation}")
+                }
+                NestGraphqlDecorator::ResolveReference => {
+                    let parent = parent_type.as_str();
+                    if parent.is_empty() {
+                        continue;
+                    }
+                    format!("GRAPHQL REFERENCE {parent}")
+                }
+                NestGraphqlDecorator::Resolver => continue,
+            };
+            if name.len() > 512 {
+                continue;
+            }
+            route_count += 1;
+            let occurrence_key = format!("{}|{name}|{class_name}|{handler}", kind.canonical_name());
+            let occurrence = occurrences.entry(occurrence_key).or_default();
+            *occurrence += 1;
+            let route = Symbol::new_disambiguated(
+                facts.language,
+                SymbolKind::Route,
+                &name,
+                &name,
+                &facts.path,
+                span(decorator),
+                &format!(
+                    "nestjs-graphql|{}|{name}|{class_name}|{handler}|occurrence:{occurrence}",
+                    kind.canonical_name()
+                ),
+            );
+            let file_symbol = facts.symbols.first().expect("file symbol");
+            facts.relationships.push(Relationship {
+                source_id: file_symbol.id.clone(),
+                target_id: route.id.clone(),
+                kind: RelationshipKind::Contains,
+                evidence: Evidence::new(
+                    "framework/nestjs-graphql",
+                    1.0,
+                    format!("{name} is declared by {class_name}.{handler}"),
+                    &facts.path,
+                    decorator.start_position().row + 1,
+                ),
+            });
+            facts.unresolved_calls.push(UnresolvedCall {
+                caller_id: route.id.clone(),
+                fallback_caller_id: None,
+                callee_name: handler.clone(),
+                receiver_binding: None,
+                receiver_type: Some(class_name.clone()),
+                receiver_call_start_byte: None,
+                target_file_hint: None,
+                provenance: "framework/nestjs-graphql".to_owned(),
+                confidence: 0.99,
+                explanation: format!(
+                    "NestJS GraphQL {} {name} decorates {class_name}.{handler}",
+                    kind.canonical_name()
+                ),
+                resolvable: true,
+                file: facts.path.clone(),
+                line: decorator.start_position().row + 1,
+                start_byte: decorator.start_byte(),
+            });
+            facts.symbols.push(route);
+        }
+    }
+}
+
+fn nestjs_graphql_decorator_call<'tree>(
+    decorator: Node<'tree>,
+    source: &[u8],
+    imports: &NestGraphqlImports,
+) -> Option<(NestGraphqlDecorator, Vec<Node<'tree>>)> {
+    let call = first_descendant_of_kind(decorator, "call_expression")?;
+    let function = call.child_by_field_name("function")?;
+    let (binding, canonical) = match function.kind() {
+        "identifier" => {
+            let binding = text(function, source);
+            let kind = imports.named.get(&binding).copied()?;
+            (binding, kind.canonical_name().to_owned())
+        }
+        "member_expression" => {
+            let object = function.child_by_field_name("object")?;
+            let property = function.child_by_field_name("property")?;
+            if object.kind() != "identifier"
+                || !matches!(property.kind(), "property_identifier" | "identifier")
+            {
+                return None;
+            }
+            let binding = text(object, source);
+            if !imports.namespaces.contains(&binding) {
+                return None;
+            }
+            (binding, text(property, source))
+        }
+        _ => return None,
+    };
+    if graphql_import_binding_shadowed(decorator, source, &binding) {
+        return None;
+    }
+    let kind = match canonical.as_str() {
+        "Resolver" => NestGraphqlDecorator::Resolver,
+        "Query" => NestGraphqlDecorator::Query,
+        "Mutation" => NestGraphqlDecorator::Mutation,
+        "ResolveField" => NestGraphqlDecorator::ResolveField,
+        "Subscription" => NestGraphqlDecorator::Subscription,
+        "ResolveReference" => NestGraphqlDecorator::ResolveReference,
+        _ => return None,
+    };
+    let arguments = call.child_by_field_name("arguments")?;
+    let mut cursor = arguments.walk();
+    Some((kind, arguments.named_children(&mut cursor).collect()))
+}
+
+fn graphql_import_binding_shadowed(use_node: Node<'_>, source: &[u8], binding: &str) -> bool {
+    fn import_clause_binds(clause: &str, binding: &str) -> bool {
+        let clause = clause.strip_prefix("type ").unwrap_or(clause).trim();
+        if clause
+            .strip_prefix("* as ")
+            .is_some_and(|candidate| candidate.trim() == binding)
+        {
+            return true;
+        }
+        let named = if clause.starts_with('{') {
+            clause
+        } else {
+            let (default, named) = clause
+                .split_once(',')
+                .map_or((clause, None), |(default, rest)| (default, Some(rest)));
+            if default.trim() == binding {
+                return true;
+            }
+            named.unwrap_or("")
+        }
+        .trim();
+        let Some(named) = named
+            .strip_prefix('{')
+            .and_then(|body| body.strip_suffix('}'))
+        else {
+            return false;
+        };
+        named.split(',').any(|specifier| {
+            let words = specifier.split_whitespace().collect::<Vec<_>>();
+            match words.as_slice() {
+                [name] => *name == binding,
+                [_, "as", alias] => *alias == binding,
+                _ => false,
+            }
+        })
+    }
+
+    fn import_binding_count(root: Node<'_>, source: &[u8], binding: &str) -> usize {
+        let mut cursor = root.walk();
+        root.named_children(&mut cursor)
+            .filter(|node| node.kind() == "import_statement")
+            .filter(|node| {
+                text(*node, source)
+                    .strip_prefix("import")
+                    .and_then(|body| body.rsplit_once(" from ").map(|(clause, _)| clause.trim()))
+                    .is_some_and(|clause| import_clause_binds(clause, binding))
+            })
+            .count()
+    }
+
+    fn pattern_binds(node: Node<'_>, source: &[u8], binding: &str) -> bool {
+        if matches!(
+            node.kind(),
+            "identifier"
+                | "shorthand_property_identifier_pattern"
+                | "shorthand_property_identifier"
+        ) {
+            return text(node, source) == binding;
+        }
+        if node.kind() == "pair_pattern" {
+            return node
+                .child_by_field_name("value")
+                .is_some_and(|value| pattern_binds(value, source, binding));
+        }
+        if node.kind() == "assignment_pattern" {
+            return node
+                .child_by_field_name("left")
+                .is_some_and(|left| pattern_binds(left, source, binding));
+        }
+        if !matches!(
+            node.kind(),
+            "object_pattern"
+                | "array_pattern"
+                | "rest_pattern"
+                | "required_parameter"
+                | "optional_parameter"
+        ) {
+            return false;
+        }
+        let mut cursor = node.walk();
+        let found = node
+            .named_children(&mut cursor)
+            .any(|child| pattern_binds(child, source, binding));
+        found
+    }
+
+    fn declaration_binds(node: Node<'_>, source: &[u8], binding: &str) -> bool {
+        match node.kind() {
+            "import_statement" => false,
+            "variable_declarator" => node
+                .child_by_field_name("name")
+                .is_some_and(|name| pattern_binds(name, source, binding)),
+            "function_declaration" | "class_declaration" => node
+                .child_by_field_name("name")
+                .is_some_and(|name| pattern_binds(name, source, binding)),
+            "export_statement"
+            | "lexical_declaration"
+            | "variable_declaration"
+            | "ambient_declaration" => {
+                let mut cursor = node.walk();
+                let found = node
+                    .named_children(&mut cursor)
+                    .any(|child| declaration_binds(child, source, binding));
+                found
+            }
+            _ => false,
+        }
+    }
+
+    fn scope_declares(scope: Node<'_>, source: &[u8], binding: &str) -> bool {
+        let mut cursor = scope.walk();
+        let found = scope
+            .named_children(&mut cursor)
+            .any(|child| declaration_binds(child, source, binding));
+        found
+    }
+
+    fn function_hoists_var(node: Node<'_>, source: &[u8], binding: &str) -> bool {
+        if node.kind() == "variable_declaration" && declaration_binds(node, source, binding) {
+            return true;
+        }
+        if matches!(
+            node.kind(),
+            "function_declaration"
+                | "function_expression"
+                | "arrow_function"
+                | "method_definition"
+                | "generator_function_declaration"
+                | "class_declaration"
+                | "class"
+        ) {
+            return false;
+        }
+        let mut cursor = node.walk();
+        let found = node
+            .named_children(&mut cursor)
+            .any(|child| function_hoists_var(child, source, binding));
+        found
+    }
+
+    let mut root = use_node;
+    while let Some(parent) = root.parent() {
+        root = parent;
+    }
+    if import_binding_count(root, source, binding) != 1 || scope_declares(root, source, binding) {
+        return true;
+    }
+
+    let mut ancestor = use_node.parent();
+    while let Some(scope) = ancestor {
+        if matches!(
+            scope.kind(),
+            "function_declaration"
+                | "function_expression"
+                | "arrow_function"
+                | "method_definition"
+                | "generator_function_declaration"
+        ) && (scope
+            .child_by_field_name("parameters")
+            .is_some_and(|parameters| pattern_binds(parameters, source, binding))
+            || scope
+                .child_by_field_name("body")
+                .is_some_and(|body| function_hoists_var(body, source, binding)))
+        {
+            return true;
+        }
+        if scope.kind() == "catch_clause"
+            && scope
+                .child_by_field_name("parameter")
+                .is_some_and(|parameter| pattern_binds(parameter, source, binding))
+        {
+            return true;
+        }
+        if scope.kind() == "statement_block" && scope_declares(scope, source, binding) {
+            return true;
+        }
+        ancestor = scope.parent();
+    }
+    false
+}
+
+fn nestjs_graphql_resolver_parent(arguments: &[Node<'_>], source: &[u8]) -> Option<String> {
+    if arguments.is_empty() {
+        return Some(String::new());
+    }
+    if arguments.len() != 1 {
+        return None;
+    }
+    let argument = arguments[0];
+    if let Some(parent) = string_literal(argument, source) {
+        return (parent.len() <= 256 && is_graphql_identifier(&parent)).then_some(parent);
+    }
+    if argument.kind() != "arrow_function" {
+        return None;
+    }
+    if text(argument, source).trim_start().starts_with("async") {
+        return None;
+    }
+    if let Some(parameters) = argument.child_by_field_name("parameters") {
+        let mut parameter_cursor = parameters.walk();
+        let parameters = parameters
+            .named_children(&mut parameter_cursor)
+            .collect::<Vec<_>>();
+        if parameters.len() > 1 {
+            return None;
+        }
+        if let Some(parameter) = parameters.first() {
+            let direct_identifier = parameter.kind() == "identifier";
+            let required_identifier = parameter.kind() == "required_parameter"
+                && parameter
+                    .child_by_field_name("pattern")
+                    .or_else(|| parameter.child_by_field_name("name"))
+                    .is_some_and(|pattern| pattern.kind() == "identifier")
+                && parameter.child_by_field_name("type").is_none()
+                && parameter.child_by_field_name("value").is_none();
+            if !direct_identifier && !required_identifier {
+                return None;
+            }
+        }
+    } else {
+        let parameter = argument.child_by_field_name("parameter")?;
+        if parameter.kind() != "identifier" {
+            return None;
+        }
+    }
+    let body = argument.child_by_field_name("body")?;
+    let body = unwrap_parenthesized_expression(body);
+    let parent = text(body, source);
+    (body.kind() == "identifier" && parent.len() <= 256 && is_graphql_identifier(&parent))
+        .then_some(parent)
+}
+
+fn unwrap_parenthesized_expression(mut node: Node<'_>) -> Node<'_> {
+    while node.kind() == "parenthesized_expression" {
+        let mut cursor = node.walk();
+        let mut children = node.named_children(&mut cursor);
+        let Some(child) = children.next() else {
+            break;
+        };
+        if children.next().is_some() {
+            break;
+        }
+        node = child;
+    }
+    node
+}
+
+fn nestjs_graphql_operation_name(
+    arguments: &[Node<'_>],
+    source: &[u8],
+    handler: &str,
+) -> Option<String> {
+    if arguments.len() > 3 {
+        return None;
+    }
+    let mut configured_name = None;
+    for argument in arguments {
+        if argument.kind() != "object" {
+            continue;
+        }
+        let mut cursor = argument.walk();
+        let pairs = argument.named_children(&mut cursor).collect::<Vec<_>>();
+        if pairs.len() > 16 || pairs.iter().any(|pair| pair.kind() != "pair") {
+            return None;
+        }
+        for pair in pairs {
+            let key = pair.child_by_field_name("key")?;
+            let key = string_literal(key, source).unwrap_or_else(|| text(key, source));
+            if key != "name" {
+                continue;
+            }
+            if configured_name.is_some() {
+                return None;
+            }
+            configured_name = Some(string_literal(pair.child_by_field_name("value")?, source)?);
+        }
+    }
+    let name = configured_name
+        .or_else(|| {
+            arguments
+                .first()
+                .and_then(|node| string_literal(*node, source))
+        })
+        .unwrap_or_else(|| handler.to_owned());
+    (!name.is_empty() && name.len() <= 256 && is_graphql_identifier(&name)).then_some(name)
+}
+
+fn is_graphql_identifier(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    bytes
+        .next()
+        .is_some_and(|byte| byte == b'_' || byte.is_ascii_alphabetic())
+        && bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
 }
 
 impl NestTransportDecorator {

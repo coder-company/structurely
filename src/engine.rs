@@ -6170,6 +6170,230 @@ mod tests {
     }
 
     #[test]
+    fn nestjs_graphql_decorators_create_exact_routes_and_handler_edges() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("graphql.ts"),
+            "import {\n\
+               Resolver as ObjectResolver,\n\
+               Query as Read,\n\
+               Mutation,\n\
+               ResolveField as Field,\n\
+               Subscription,\n\
+               ResolveReference,\n\
+             } from '@nestjs/graphql';\n\
+             import * as gql from '@nestjs/graphql';\n\
+             class User {}\n\
+             @ObjectResolver(of => User)\n\
+             export class UserResolver {\n\
+               @Read(() => User, { name: 'user' })\n\
+               findOne() {}\n\
+               @Mutation('createUser')\n\
+               create() {}\n\
+               @Field(() => User, { name: 'displayName' })\n\
+               display() {}\n\
+               @Subscription(() => User)\n\
+               userChanged() {}\n\
+               @ResolveReference()\n\
+               resolveReference() {}\n\
+             }\n\
+             @gql.Resolver('Account')\n\
+             class AccountResolver {\n\
+               @gql.ResolveField('owner')\n\
+               accountOwner() {}\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        for (route_name, handler) in [
+            ("GRAPHQL QUERY user", "findOne"),
+            ("GRAPHQL MUTATION createUser", "create"),
+            ("GRAPHQL FIELD User.displayName", "display"),
+            ("GRAPHQL SUBSCRIPTION userChanged", "userChanged"),
+            ("GRAPHQL REFERENCE User", "resolveReference"),
+            ("GRAPHQL FIELD Account.owner", "accountOwner"),
+        ] {
+            let route = engine
+                .search(route_name, 20)
+                .unwrap()
+                .into_iter()
+                .find(|hit| {
+                    hit.symbol.kind == crate::model::SymbolKind::Route
+                        && hit.symbol.name == route_name
+                })
+                .unwrap_or_else(|| panic!("missing GraphQL route {route_name}"))
+                .symbol;
+            let callees = engine.callees(&route.id).unwrap();
+            assert_eq!(callees.len(), 1, "{route_name}");
+            assert_eq!(callees[0].0.name, handler);
+            assert_eq!(callees[0].1.provenance, "framework/nestjs-graphql");
+            assert_eq!(callees[0].1.confidence, 0.99);
+        }
+    }
+
+    #[test]
+    fn nestjs_graphql_adapter_rejects_unproven_dynamic_and_parentless_shapes() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("adversarial.ts"),
+            "import { Resolver, Query, Query as Read, ResolveField } from '@nestjs/graphql';\n\
+             import { Mutation } from 'lookalike';\n\
+             import * as gql from 'lookalike';\n\
+             import * as duplicate from '@nestjs/graphql';\n\
+             import * as duplicate from 'lookalike';\n\
+             const dynamicName = 'unsafe';\n\
+             function Query() {}\n\
+             class User {}\n\
+             @Resolver(() => User.Model)\n\
+             class QualifiedParent { @ResolveField() qualified() {} }\n\
+             @Resolver(() => { return User })\n\
+             class BlockParent { @ResolveField() block() {} }\n\
+             @Resolver(async () => User)\n\
+             class AsyncParent { @ResolveField() asynchronous() {} }\n\
+             @Resolver((value = User) => User)\n\
+             class DefaultParent { @ResolveField() defaulted() {} }\n\
+             @Resolver(({ value }) => User)\n\
+             class DestructuredParent { @ResolveField() destructured() {} }\n\
+             @Resolver((...value) => User)\n\
+             class RestParent { @ResolveField() rest() {} }\n\
+             @duplicate.Resolver()\n\
+             class DuplicateNamespace { @duplicate.Query('duplicate') duplicate() {} }\n\
+             @Resolver()\n\
+             class Parentless {\n\
+               @ResolveField() field() {}\n\
+               @Query('shadowed') shadowed() {}\n\
+               @Read(() => User, { name: dynamicName }) dynamic() {}\n\
+               @Read('$invalid') invalidGraphqlName() {}\n\
+               @Mutation('lookalike') mutation() {}\n\
+               @gql.Query('namespace') namespaceQuery() {}\n\
+             }\n\
+             function nested(Query) {\n\
+               @Resolver()\n\
+               class NestedResolver { @Query('nestedShadow') nestedShadow() {} }\n\
+             }\n\
+             class MissingResolver { @Query('accidental') accidental() {} }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        assert!(engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .iter()
+            .all(|symbol| symbol.kind != crate::model::SymbolKind::Route));
+    }
+
+    #[test]
+    fn nestjs_graphql_shadowing_is_lexical_and_namespace_provenance_is_exact() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("lexical.ts"),
+            "import { Resolver, Query } from '@nestjs/graphql';\n\
+             import * as gql from '@nestjs/graphql';\n\
+             function unrelated(Query, { gql }) { return Query || gql }\n\
+             @Resolver()\n\
+             class RootResolver { @Query('_root2') root() {} }\n\
+             @gql.Resolver()\n\
+             class NamespaceResolver { @gql.Query('namespace2') namespaced() {} }\n\
+             function hoistedVarScope() {\n\
+               @Resolver()\n\
+               class HoistedResolver { @Query('hoistedVarLeak') leaked() {} }\n\
+               if (condition) { var Query = fakeDecorator }\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        for route_name in ["GRAPHQL QUERY _root2", "GRAPHQL QUERY namespace2"] {
+            assert!(engine
+                .snapshot()
+                .unwrap()
+                .symbols
+                .iter()
+                .any(|symbol| symbol.kind == crate::model::SymbolKind::Route
+                    && symbol.name == route_name));
+        }
+        assert!(engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .iter()
+            .all(|symbol| symbol.kind != crate::model::SymbolKind::Route
+                || symbol.name != "GRAPHQL QUERY hoistedVarLeak"));
+    }
+
+    #[test]
+    fn nestjs_graphql_route_ids_ignore_unrelated_same_operation_insertions() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("stable.ts");
+        fs::write(
+            &path,
+            "import { Resolver, Query } from '@nestjs/graphql';\n\
+             @Resolver() class StableResolver { @Query('same') target() {} }\n",
+        )
+        .unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let original = engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .into_iter()
+            .find(|symbol| {
+                symbol.kind == crate::model::SymbolKind::Route
+                    && symbol.name == "GRAPHQL QUERY same"
+            })
+            .unwrap();
+
+        fs::write(
+            &path,
+            "import { Resolver, Query } from '@nestjs/graphql';\n\
+             @Resolver() class EarlierResolver { @Query('same') unrelated() {} }\n\
+             @Resolver() class StableResolver { @Query('same') target() {} }\n",
+        )
+        .unwrap();
+        engine.sync().unwrap();
+        assert!(engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .iter()
+            .any(|symbol| symbol.id == original.id
+                && symbol.kind == crate::model::SymbolKind::Route
+                && symbol.name == "GRAPHQL QUERY same"));
+    }
+
+    #[test]
+    fn nestjs_graphql_routes_clean_up_incrementally() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("incremental.ts");
+        fs::write(
+            &path,
+            "import { Resolver, Query } from '@nestjs/graphql';\n\
+             @Resolver() class ResolverClass { @Query() active() {} }\n",
+        )
+        .unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        assert!(engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .iter()
+            .any(|symbol| symbol.kind == crate::model::SymbolKind::Route
+                && symbol.name == "GRAPHQL QUERY active"));
+
+        fs::write(&path, "class ResolverClass { active() {} }\n").unwrap();
+        engine.sync().unwrap();
+        assert!(engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .iter()
+            .all(|symbol| symbol.kind != crate::model::SymbolKind::Route));
+    }
+
+    #[test]
     fn watcher_makes_saved_symbols_query_visible() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("main.ts"), "function before() {}\n").unwrap();
