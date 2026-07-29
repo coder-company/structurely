@@ -3108,10 +3108,34 @@ mod tests {
                @Builder PopupBuilder() { Text('popup') }\n\
                PlainBuilder() { Text('plain') }\n\
                build() {\n\
-                 Row().onClick(() => { this.open = true })\n\
-                   .bindPopup(this.open, { builder: this.PopupBuilder })\n\
+                 Row() {\n\
+                   Text('trigger')\n\
+                 }\n\
+                   .onClick((): void => { this.open = true })\n\
+                   .bindPopup(this.open, {\n\
+                     builder: this.PopupBuilder,\n\
+                     placement: Placement.Top,\n\
+                     onStateChange: (event: EventVisibility): void => {\n\
+                       if (!event.isVisible) { this.open = false }\n\
+                     }\n\
+                   })\n\
                  Row().bindPopup(this.open, { builder: this.PlainBuilder })\n\
                  customApi({ builder: this.PopupBuilder })\n\
+                 Column() { Text('quoted key') }\n\
+                   .bindPopup(this.open, { 'builder': this.PopupBuilder })\n\
+               }\n\
+             }\n\
+             @Component\n\
+             struct OrphanCard {\n\
+               @State open: boolean = false\n\
+               @Builder PopupBuilder() { Text('orphan') }\n\
+               build() {\n\
+                 .bindPopup\n\
+                 (this.open, { builder: this.PopupBuilder })\n\
+                 Row() { Text('interrupted') }\n\
+                 .bindPopup\n\
+                 Text('not arguments')\n\
+                 (this.open, { builder: this.PopupBuilder })\n\
                }\n\
              }\n\
              @Component\n\
@@ -3122,16 +3146,16 @@ mod tests {
         )
         .unwrap();
         let (mut engine, _) = Engine::init(temp.path()).unwrap();
-        let targets = |engine: &Engine| {
-            let build = engine
-                .search("PopupCard.build", 10)
+        let targets = |engine: &Engine, qualified_name: &str| {
+            let callable = engine
+                .search(qualified_name, 10)
                 .unwrap()
                 .into_iter()
-                .find(|hit| hit.symbol.qualified_name == "PopupCard.build")
+                .find(|hit| hit.symbol.qualified_name == qualified_name)
                 .unwrap()
                 .symbol;
             engine
-                .callees(&build.id)
+                .callees(&callable.id)
                 .unwrap()
                 .into_iter()
                 .filter(|(_, evidence)| {
@@ -3139,11 +3163,19 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        let registered = targets(&engine);
-        assert_eq!(registered.len(), 1);
-        assert_eq!(registered[0].0.qualified_name, "PopupCard.PopupBuilder");
-        assert_eq!(registered[0].1.confidence, 0.97);
-        assert_eq!(registered[0].1.line, 8);
+        let registered = targets(&engine, "PopupCard.build");
+        assert_eq!(registered.len(), 2);
+        assert!(registered.iter().all(|(target, evidence)| {
+            target.qualified_name == "PopupCard.PopupBuilder" && evidence.confidence == 0.97
+        }));
+        assert_eq!(
+            registered
+                .iter()
+                .map(|(_, evidence)| evidence.line)
+                .collect::<Vec<_>>(),
+            vec![12, 21]
+        );
+        assert!(targets(&engine, "OrphanCard.build").is_empty());
 
         fs::write(
             &source,
@@ -3156,7 +3188,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(engine.sync().unwrap().files_changed, 1);
-        assert!(targets(&engine).is_empty());
+        assert!(targets(&engine, "PopupCard.build").is_empty());
     }
 
     #[test]

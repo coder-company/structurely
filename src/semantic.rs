@@ -872,6 +872,9 @@ fn collect_arkui_builder_registration_calls(
     builders: &[ArkuiBuilder],
     emitted: &mut HashSet<(String, String, usize)>,
 ) {
+    if node.kind() == "statement_block" {
+        collect_recovered_arkui_builder_registration_calls(node, source, facts, builders, emitted);
+    }
     if matches!(
         node.kind(),
         "call_expression" | "arkui_component_expression"
@@ -882,6 +885,64 @@ fn collect_arkui_builder_registration_calls(
     for child in node.named_children(&mut cursor) {
         collect_arkui_builder_registration_calls(child, source, facts, builders, emitted);
     }
+}
+
+fn collect_recovered_arkui_builder_registration_calls(
+    block: Node<'_>,
+    source: &[u8],
+    facts: &mut FileFacts,
+    builders: &[ArkuiBuilder],
+    emitted: &mut HashSet<(String, String, usize)>,
+) {
+    let mut cursor = block.walk();
+    let statements = block.named_children(&mut cursor).collect::<Vec<_>>();
+    let mut index = 0;
+    while index < statements.len() {
+        let Some(base) = direct_expression_child(statements[index]) else {
+            index += 1;
+            continue;
+        };
+        if base.kind() != "arkui_component_expression" {
+            index += 1;
+            continue;
+        }
+
+        let mut modifier = index + 1;
+        while modifier + 1 < statements.len() {
+            let Some(dot) = direct_expression_child(statements[modifier]) else {
+                break;
+            };
+            let Some(arguments) = direct_expression_child(statements[modifier + 1]) else {
+                break;
+            };
+            if dot.kind() != "leading_dot_expression"
+                || arguments.kind() != "parenthesized_expression"
+                || dot.end_byte() != arguments.start_byte()
+            {
+                break;
+            }
+            let method = dot
+                .child_by_field_name("expression")
+                .map(|expression| text(expression, source));
+            if method.as_deref() == Some("bindPopup") {
+                enrich_arkui_builder_registration_arguments(
+                    dot, arguments, source, facts, builders, emitted,
+                );
+            }
+            modifier += 2;
+        }
+        index = modifier.max(index + 1);
+    }
+}
+
+fn direct_expression_child(statement: Node<'_>) -> Option<Node<'_>> {
+    if statement.kind() != "expression_statement" {
+        return None;
+    }
+    let mut cursor = statement.walk();
+    let mut children = statement.named_children(&mut cursor);
+    let child = children.next()?;
+    children.next().is_none().then_some(child)
 }
 
 fn enrich_arkui_builder_registration(
@@ -914,6 +975,17 @@ fn enrich_arkui_builder_registration(
     let Some(arguments) = arguments else {
         return;
     };
+    enrich_arkui_builder_registration_arguments(call, arguments, source, facts, builders, emitted);
+}
+
+fn enrich_arkui_builder_registration_arguments(
+    call: Node<'_>,
+    arguments: Node<'_>,
+    source: &[u8],
+    facts: &mut FileFacts,
+    builders: &[ArkuiBuilder],
+    emitted: &mut HashSet<(String, String, usize)>,
+) {
     let caller = owning_callable_symbol(call, &facts.symbols)
         .or_else(|| facts.symbols.first())
         .cloned()
@@ -922,11 +994,9 @@ fn enrich_arkui_builder_registration(
         .qualified_name
         .rsplit_once('.')
         .map(|(owner, _)| owner);
-    let mut argument_cursor = arguments.walk();
-    for object in arguments
-        .named_children(&mut argument_cursor)
-        .filter(|argument| argument.kind() == "object")
-    {
+    let mut objects = Vec::new();
+    collect_arkui_builder_option_objects(arguments, &mut objects);
+    for object in objects {
         let mut pair_cursor = object.walk();
         for pair in object
             .named_children(&mut pair_cursor)
@@ -985,6 +1055,23 @@ fn enrich_arkui_builder_registration(
                 ),
             });
         }
+    }
+}
+
+fn collect_arkui_builder_option_objects<'tree>(node: Node<'tree>, output: &mut Vec<Node<'tree>>) {
+    if node.kind() == "object" {
+        output.push(node);
+        return;
+    }
+    if !matches!(
+        node.kind(),
+        "arguments" | "parenthesized_expression" | "sequence_expression"
+    ) {
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_arkui_builder_option_objects(child, output);
     }
 }
 
