@@ -1,15 +1,17 @@
 use crate::{
+    budget::ResourceBudget,
     inventory::{InventoryStale, ProjectInventory},
     model::{Evidence, RelationshipKind},
     parser::parse_file_as,
     project_resolution::ProjectResolutionContext,
+    source::{read_source_snapshot, SourceRead},
     store::{ConcurrentPublication, FileSummary, SearchHit, StorageMetrics, Store},
 };
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use serde::Serialize;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::{
@@ -80,6 +82,7 @@ pub struct ExploreHit {
     pub callees: Vec<(crate::model::Symbol, Evidence)>,
     pub referenced_by: Vec<(crate::model::Symbol, Evidence)>,
     pub references: Vec<(crate::model::Symbol, Evidence)>,
+    pub relationships_truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -374,7 +377,10 @@ impl Engine {
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
-        self.store.search(query, limit)
+        self.store.search(
+            ResourceBudget::query(query)?,
+            ResourceBudget::result_limit(limit)?,
+        )
     }
 
     pub fn search_filtered(
@@ -383,7 +389,11 @@ impl Engine {
         kind: Option<crate::model::SymbolKind>,
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
-        self.store.search_filtered(query, kind, limit)
+        self.store.search_filtered(
+            ResourceBudget::query(query)?,
+            kind,
+            ResourceBudget::result_limit(limit)?,
+        )
     }
 
     pub fn files(&self) -> Result<Vec<FileSummary>> {
@@ -400,7 +410,8 @@ impl Engine {
         iterations: usize,
         initial_sync: IndexReport,
     ) -> Result<BenchmarkReport> {
-        let iterations = iterations.clamp(1, 1_000);
+        let query = ResourceBudget::query(query)?;
+        let iterations = ResourceBudget::benchmark_iterations(iterations)?;
         let mut sync_times = Vec::with_capacity(iterations);
         let mut query_times = Vec::with_capacity(iterations);
         for _ in 0..iterations {
@@ -639,6 +650,10 @@ impl Engine {
         limit: Option<usize>,
         symbols_only: bool,
     ) -> Result<NodeResult> {
+        let symbol = symbol.map(ResourceBudget::identifier).transpose()?;
+        let file = file.map(ResourceBudget::identifier).transpose()?;
+        let offset = offset.map(ResourceBudget::node_offset).transpose()?;
+        let limit = limit.map(ResourceBudget::node_lines).transpose()?;
         let all_files = self.store.file_summaries()?;
         let matched_files: Vec<_> = if let Some(file) = file {
             all_files
@@ -675,8 +690,7 @@ impl Engine {
                 });
             }
             let wants_source = !symbols_only && (symbol.is_none() || include_code);
-            let raw = fs::read_to_string(self.root.join(&path))
-                .with_context(|| format!("read source {}", path))?;
+            let raw = read_bounded_source(&self.root.join(&path))?;
             let total_lines = raw.lines().count().max(1);
             let (source, shown_start_line, shown_end_line, truncated) = if wants_source {
                 if symbol.is_some() {
@@ -701,8 +715,10 @@ impl Engine {
                     let (snippets, truncated) = bounded_source(&snippets, 64_000);
                     (Some(snippets), start, end, truncated)
                 } else {
-                    let start = offset.unwrap_or(1).saturating_sub(1);
-                    let maximum = limit.unwrap_or(2_000).min(2_000);
+                    let start = ResourceBudget::node_offset(offset.unwrap_or(1))?.saturating_sub(1);
+                    let maximum = ResourceBudget::node_lines(
+                        limit.unwrap_or(ResourceBudget::MAX_NODE_LINES),
+                    )?;
                     let selected = raw
                         .lines()
                         .enumerate()
@@ -755,34 +771,85 @@ impl Engine {
     }
 
     pub fn explore(&self, query: &str, max_files: usize) -> Result<Vec<ExploreHit>> {
+        let query = ResourceBudget::query(query)?;
+        let max_files = ResourceBudget::result_limit(max_files)?;
         let mut files = HashSet::new();
+        let mut sources = HashMap::new();
         let mut output = Vec::new();
         for hit in self
             .store
-            .search(query, max_files.saturating_mul(4).max(1))?
+            .search_candidates(query, max_files.saturating_mul(4))?
         {
             if !files.contains(&hit.symbol.file) && files.len() >= max_files {
                 continue;
             }
             files.insert(hit.symbol.file.clone());
-            let path = self.root.join(&hit.symbol.file);
-            let source = fs::read_to_string(&path)
-                .with_context(|| format!("read source {}", path.display()))?;
+            if !sources.contains_key(&hit.symbol.file) {
+                let path = self.root.join(&hit.symbol.file);
+                sources.insert(hit.symbol.file.clone(), read_bounded_source(&path)?);
+            }
+            let source = &sources[&hit.symbol.file];
             let snippet = source
                 .get(hit.symbol.start_byte..hit.symbol.end_byte)
                 .unwrap_or_default();
             let (snippet, source_truncated) = bounded_source(snippet, 4_000);
+            let mut relationships_truncated = false;
+            let callers = self.explore_relationships(
+                &hit.symbol.id,
+                true,
+                RelationshipKind::Calls,
+                &mut relationships_truncated,
+            )?;
+            let callees = self.explore_relationships(
+                &hit.symbol.id,
+                false,
+                RelationshipKind::Calls,
+                &mut relationships_truncated,
+            )?;
+            let referenced_by = self.explore_relationships(
+                &hit.symbol.id,
+                true,
+                RelationshipKind::References,
+                &mut relationships_truncated,
+            )?;
+            let references = self.explore_relationships(
+                &hit.symbol.id,
+                false,
+                RelationshipKind::References,
+                &mut relationships_truncated,
+            )?;
             output.push(ExploreHit {
-                callers: self.callers(&hit.symbol.id)?,
-                callees: self.callees(&hit.symbol.id)?,
-                referenced_by: self.referenced_by(&hit.symbol.id)?,
-                references: self.references(&hit.symbol.id)?,
+                callers,
+                callees,
+                referenced_by,
+                references,
                 symbol: hit.symbol,
                 source: snippet,
                 source_truncated,
+                relationships_truncated,
             });
         }
         Ok(output)
+    }
+
+    fn explore_relationships(
+        &self,
+        symbol_id: &str,
+        incoming: bool,
+        kind: RelationshipKind,
+        truncated: &mut bool,
+    ) -> Result<Vec<(crate::model::Symbol, Evidence)>> {
+        let mut relationships = self.store.related_limited(
+            symbol_id,
+            incoming,
+            kind,
+            ResourceBudget::MAX_EXPLORE_RELATIONSHIPS + 1,
+        )?;
+        if relationships.len() > ResourceBudget::MAX_EXPLORE_RELATIONSHIPS {
+            relationships.truncate(ResourceBudget::MAX_EXPLORE_RELATIONSHIPS);
+            *truncated = true;
+        }
+        Ok(relationships)
     }
 
     pub fn callers(&self, symbol_id: &str) -> Result<Vec<(crate::model::Symbol, Evidence)>> {
@@ -810,7 +877,13 @@ impl Engine {
         file: Option<&str>,
         limit: usize,
     ) -> Result<Vec<RelatedHit>> {
-        self.related_named(symbol, file, limit, true)
+        let file = file.map(ResourceBudget::identifier).transpose()?;
+        self.related_named(
+            ResourceBudget::identifier(symbol)?,
+            file,
+            ResourceBudget::result_limit(limit)?,
+            true,
+        )
     }
 
     pub fn callees_named(
@@ -819,7 +892,13 @@ impl Engine {
         file: Option<&str>,
         limit: usize,
     ) -> Result<Vec<RelatedHit>> {
-        self.related_named(symbol, file, limit, false)
+        let file = file.map(ResourceBudget::identifier).transpose()?;
+        self.related_named(
+            ResourceBudget::identifier(symbol)?,
+            file,
+            ResourceBudget::result_limit(limit)?,
+            false,
+        )
     }
 
     pub fn impact_named(
@@ -828,6 +907,9 @@ impl Engine {
         file: Option<&str>,
         max_depth: usize,
     ) -> Result<Vec<ImpactHit>> {
+        let symbol = ResourceBudget::identifier(symbol)?;
+        let file = file.map(ResourceBudget::identifier).transpose()?;
+        let max_depth = ResourceBudget::traversal_depth(max_depth)?;
         let roots: Vec<_> = self
             .store
             .find_symbols(symbol)?
@@ -849,15 +931,31 @@ impl Engine {
             .collect::<std::collections::VecDeque<_>>();
         let mut visited: HashSet<String> = roots.iter().map(|symbol| symbol.id.clone()).collect();
         let mut output = Vec::new();
+        let mut examined_edges = 0usize;
         while let Some((current, depth)) = queue.pop_front() {
             if depth >= max_depth {
                 continue;
             }
-            for (caller, evidence) in
-                self.store
-                    .related(&current.id, true, RelationshipKind::Calls)?
-            {
+            let callers = self
+                .store
+                .related(&current.id, true, RelationshipKind::Calls)?;
+            examined_edges = examined_edges
+                .checked_add(callers.len())
+                .ok_or_else(|| anyhow!("impact edge work counter overflowed"))?;
+            if examined_edges > ResourceBudget::MAX_IMPACT_EDGES {
+                bail!(
+                    "impact traversal exceeded the {}-edge work limit",
+                    ResourceBudget::MAX_IMPACT_EDGES
+                );
+            }
+            for (caller, evidence) in callers {
                 if visited.insert(caller.id.clone()) {
+                    if output.len() >= ResourceBudget::MAX_IMPACT_NODES {
+                        bail!(
+                            "impact traversal exceeded the {}-node work limit",
+                            ResourceBudget::MAX_IMPACT_NODES
+                        );
+                    }
                     output.push(ImpactHit {
                         depth: depth + 1,
                         origin: current.clone(),
@@ -915,6 +1013,13 @@ fn bounded_source(source: &str, maximum_chars: usize) -> (String, bool) {
     match boundary {
         Some(index) => (source[..index].to_owned(), true),
         None => (source.to_owned(), false),
+    }
+}
+
+fn read_bounded_source(path: &Path) -> Result<String> {
+    match read_source_snapshot(path)? {
+        SourceRead::Snapshot(source) => Ok(source),
+        SourceRead::TooLarge => bail!("source exceeds the bounded read limit: {}", path.display()),
     }
 }
 
@@ -1302,6 +1407,17 @@ mod tests {
         assert_eq!(impact[0].depth, 1);
         assert_eq!(impact[1].symbol.name, "root");
         assert_eq!(impact[1].depth, 2);
+    }
+
+    #[test]
+    fn explore_accepts_the_full_public_file_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("main.ts"), "function main() {}\n").unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+
+        let hits = engine.explore("main", ResourceBudget::MAX_RESULTS).unwrap();
+
+        assert!(!hits.is_empty());
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::{daemon, Engine};
+use crate::{budget::ResourceBudget, daemon, Engine};
 use anyhow::{bail, ensure, Result};
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
@@ -134,12 +134,21 @@ fn tool_definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string" },
+                    "query": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": ResourceBudget::MAX_QUERY_BYTES
+                    },
                     "kind": {
                         "type": "string",
                         "enum": ["function", "method", "class", "interface", "type", "variable", "route", "component"]
                     },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 10 },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": ResourceBudget::MAX_RESULTS,
+                        "default": 10
+                    },
                     "projectPath": { "type": "string" }
                 },
                 "required": ["query"]
@@ -152,8 +161,17 @@ fn tool_definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string" },
-                    "maxFiles": { "type": "integer", "minimum": 1, "maximum": 100, "default": 12 },
+                    "query": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": ResourceBudget::MAX_QUERY_BYTES
+                    },
+                    "maxFiles": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": ResourceBudget::MAX_RESULTS,
+                        "default": 12
+                    },
                     "projectPath": { "type": "string" }
                 },
                 "required": ["query"]
@@ -168,9 +186,22 @@ fn tool_definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "symbol": { "type": "string" },
-                    "file": { "type": "string" },
-                    "depth": { "type": "integer", "minimum": 1, "maximum": 20, "default": 2 },
+                    "symbol": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": ResourceBudget::MAX_IDENTIFIER_BYTES
+                    },
+                    "file": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": ResourceBudget::MAX_IDENTIFIER_BYTES
+                    },
+                    "depth": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": ResourceBudget::MAX_TRAVERSAL_DEPTH,
+                        "default": 2
+                    },
                     "projectPath": { "type": "string" }
                 },
                 "required": ["symbol"]
@@ -208,11 +239,27 @@ fn tool_definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "symbol": { "type": "string" },
+                    "symbol": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": ResourceBudget::MAX_IDENTIFIER_BYTES
+                    },
                     "includeCode": { "type": "boolean", "default": false },
-                    "file": { "type": "string" },
-                    "offset": { "type": "integer", "minimum": 0, "maximum": 2000 },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 2000 },
+                    "file": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": ResourceBudget::MAX_IDENTIFIER_BYTES
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": ResourceBudget::MAX_NODE_OFFSET
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": ResourceBudget::MAX_NODE_LINES
+                    },
                     "symbolsOnly": { "type": "boolean", "default": false },
                     "line": { "type": "number" },
                     "projectPath": { "type": "string" }
@@ -253,9 +300,22 @@ fn relationship_tool(name: &str, description: &str) -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "symbol": { "type": "string" },
-                "file": { "type": "string" },
-                "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
+                "symbol": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": ResourceBudget::MAX_IDENTIFIER_BYTES
+                },
+                "file": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": ResourceBudget::MAX_IDENTIFIER_BYTES
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": ResourceBudget::MAX_RESULTS,
+                    "default": 20
+                },
                 "projectPath": { "type": "string" }
             },
             "required": ["symbol"]
@@ -397,7 +457,7 @@ fn dispatch_tool(engine: &Engine, name: &str, arguments: &Value) -> Result<Value
     let payload = match name {
         "codegraph_search" => {
             let query = required_string(arguments, "query")?;
-            let limit = number_argument(arguments, "limit", 10, 100)?;
+            let limit = number_argument(arguments, "limit", 10, ResourceBudget::MAX_RESULTS)?;
             let kind = match arguments.get("kind") {
                 Some(value) => Some(
                     parse_symbol_kind(
@@ -413,39 +473,41 @@ fn dispatch_tool(engine: &Engine, name: &str, arguments: &Value) -> Result<Value
         }
         "codegraph_explore" => {
             let query = required_string(arguments, "query")?;
-            let max_files = number_argument(arguments, "maxFiles", 12, 100)?;
+            let max_files =
+                number_argument(arguments, "maxFiles", 12, ResourceBudget::MAX_RESULTS)?;
             let hits = engine.explore(query, max_files)?;
             text_override = Some(format_explore_text(engine, query, &hits)?);
             serde_json::to_value(hits)?
         }
         "codegraph_callers" => {
             let symbol = required_string(arguments, "symbol")?;
-            let file = arguments.get("file").and_then(Value::as_str);
-            let limit = number_argument(arguments, "limit", 20, 100)?;
+            let file = optional_string(arguments, "file")?;
+            let limit = number_argument(arguments, "limit", 20, ResourceBudget::MAX_RESULTS)?;
             serde_json::to_value(engine.callers_named(symbol, file, limit)?)?
         }
         "codegraph_callees" => {
             let symbol = required_string(arguments, "symbol")?;
-            let file = arguments.get("file").and_then(Value::as_str);
-            let limit = number_argument(arguments, "limit", 20, 100)?;
+            let file = optional_string(arguments, "file")?;
+            let limit = number_argument(arguments, "limit", 20, ResourceBudget::MAX_RESULTS)?;
             serde_json::to_value(engine.callees_named(symbol, file, limit)?)?
         }
         "codegraph_impact" => {
             let symbol = required_string(arguments, "symbol")?;
-            let file = arguments.get("file").and_then(Value::as_str);
-            let depth = number_argument(arguments, "depth", 2, 20)?;
+            let file = optional_string(arguments, "file")?;
+            let depth =
+                number_argument(arguments, "depth", 2, ResourceBudget::MAX_TRAVERSAL_DEPTH)?;
             serde_json::to_value(engine.impact_named(symbol, file, depth)?)?
         }
         "codegraph_status" => serde_json::to_value(engine.status()?)?,
         "codegraph_files" => {
-            let path = arguments.get("path").and_then(Value::as_str);
-            let pattern = arguments.get("pattern").and_then(Value::as_str);
+            let path = optional_string(arguments, "path")?;
+            let pattern = optional_string(arguments, "pattern")?;
             let limit = number_argument(arguments, "limit", 1_000, 1_000)?;
             let matcher = pattern
                 .map(globset::Glob::new)
                 .transpose()?
                 .map(|glob| glob.compile_matcher());
-            let files = engine
+            let matching_files = engine
                 .files()?
                 .into_iter()
                 .filter(|file| path.is_none_or(|prefix| file.path.starts_with(prefix)))
@@ -454,29 +516,27 @@ fn dispatch_tool(engine: &Engine, name: &str, arguments: &Value) -> Result<Value
                         .as_ref()
                         .is_none_or(|glob| glob.is_match(&file.path))
                 })
-                .take(limit)
                 .collect::<Vec<_>>();
+            let omitted = matching_files.len().saturating_sub(limit);
+            let files = matching_files.into_iter().take(limit).collect::<Vec<_>>();
+            if omitted > 0 {
+                text_override = Some(format!(
+                    "{}\n\nShowing {} files; {omitted} omitted by the {limit}-file limit.",
+                    serde_json::to_string_pretty(&files)?,
+                    files.len()
+                ));
+            }
             serde_json::to_value(files)?
         }
         "codegraph_node" => {
-            let symbol = arguments.get("symbol").and_then(Value::as_str);
-            let file = arguments.get("file").and_then(Value::as_str);
-            let include_code = arguments
-                .get("includeCode")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let offset = arguments
-                .get("offset")
-                .and_then(Value::as_u64)
-                .map(|value| value as usize);
-            let limit = arguments
-                .get("limit")
-                .and_then(Value::as_u64)
-                .map(|value| value as usize);
-            let symbols_only = arguments
-                .get("symbolsOnly")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
+            let symbol = optional_string(arguments, "symbol")?;
+            let file = optional_string(arguments, "file")?;
+            let include_code = optional_bool_argument(arguments, "includeCode")?.unwrap_or(false);
+            let offset =
+                optional_number_argument(arguments, "offset", 0, ResourceBudget::MAX_NODE_OFFSET)?;
+            let limit =
+                optional_number_argument(arguments, "limit", 1, ResourceBudget::MAX_NODE_LINES)?;
+            let symbols_only = optional_bool_argument(arguments, "symbolsOnly")?.unwrap_or(false);
             serde_json::to_value(engine.node(
                 symbol,
                 file,
@@ -623,6 +683,13 @@ pub fn format_explore_text(
                 writeln!(section, "- References: {references}")?;
             }
         }
+        if hit.relationships_truncated {
+            writeln!(
+                section,
+                "- Flow details capped at {} relationships per direction.",
+                ResourceBudget::MAX_EXPLORE_RELATIONSHIPS
+            )?;
+        }
         writeln!(section, "\n```{}", hit.symbol.language)?;
         for (offset, line) in hit.source.lines().enumerate() {
             writeln!(section, "{}\t{}", hit.symbol.start_line + offset, line)?;
@@ -660,6 +727,17 @@ fn required_string<'a>(arguments: &'a Value, name: &str) -> Result<&'a str> {
     Ok(value)
 }
 
+fn optional_string<'a>(arguments: &'a Value, name: &str) -> Result<Option<&'a str>> {
+    let Some(value) = arguments.get(name) else {
+        return Ok(None);
+    };
+    let value = value
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("`{name}` must be a string"))?;
+    ResourceBudget::identifier(value)?;
+    Ok(Some(value))
+}
+
 fn number_argument(arguments: &Value, name: &str, default: usize, maximum: usize) -> Result<usize> {
     let Some(value) = arguments.get(name) else {
         return Ok(default);
@@ -672,6 +750,35 @@ fn number_argument(arguments: &Value, name: &str, default: usize, maximum: usize
         "`{name}` must be between 1 and {maximum}"
     );
     Ok(value as usize)
+}
+
+fn optional_number_argument(
+    arguments: &Value,
+    name: &str,
+    minimum: usize,
+    maximum: usize,
+) -> Result<Option<usize>> {
+    let Some(value) = arguments.get(name) else {
+        return Ok(None);
+    };
+    let Some(value) = value.as_u64() else {
+        bail!("`{name}` must be an integer");
+    };
+    ensure!(
+        (minimum as u64..=maximum as u64).contains(&value),
+        "`{name}` must be between {minimum} and {maximum}"
+    );
+    Ok(Some(value as usize))
+}
+
+fn optional_bool_argument(arguments: &Value, name: &str) -> Result<Option<bool>> {
+    let Some(value) = arguments.get(name) else {
+        return Ok(None);
+    };
+    value
+        .as_bool()
+        .map(Some)
+        .ok_or_else(|| anyhow::anyhow!("`{name}` must be a boolean"))
 }
 
 fn parse_symbol_kind(value: &str) -> Option<crate::model::SymbolKind> {
@@ -952,7 +1059,11 @@ mod tests {
         fs::write(temp.path().join("main.ts"), "function main() {}\n").unwrap();
         let (mut engine, _) = Engine::init(temp.path()).unwrap();
 
-        for arguments in [json!({}), json!({ "query": "main", "limit": 101 })] {
+        for arguments in [
+            json!({}),
+            json!({ "query": "main", "limit": ResourceBudget::MAX_RESULTS + 1 }),
+            json!({ "query": "q".repeat(ResourceBudget::MAX_QUERY_BYTES + 1) }),
+        ] {
             let response = handle(
                 &mut engine,
                 json!({
@@ -970,11 +1081,41 @@ mod tests {
             assert_eq!(response["result"]["isError"], true);
         }
 
+        for arguments in [
+            json!({ "file": 42 }),
+            json!({ "file": "main.ts", "offset": ResourceBudget::MAX_NODE_OFFSET + 1 }),
+            json!({ "file": "main.ts", "limit": ResourceBudget::MAX_NODE_LINES + 1 }),
+            json!({ "file": "main.ts", "includeCode": "yes" }),
+        ] {
+            let response = handle(
+                &mut engine,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 11,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "codegraph_node",
+                        "arguments": arguments
+                    }
+                }),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(response["result"]["isError"], true);
+        }
+
         let schema = tool_definitions()
             .into_iter()
             .find(|tool| tool["name"] == "codegraph_search")
             .unwrap();
-        assert_eq!(schema["inputSchema"]["properties"]["limit"]["maximum"], 100);
+        assert_eq!(
+            schema["inputSchema"]["properties"]["limit"]["maximum"],
+            ResourceBudget::MAX_RESULTS
+        );
+        assert_eq!(
+            schema["inputSchema"]["properties"]["query"]["maxLength"],
+            ResourceBudget::MAX_QUERY_BYTES
+        );
         assert_eq!(
             schema["inputSchema"]["properties"]["limit"]["type"],
             "integer"
@@ -1050,12 +1191,14 @@ mod tests {
             .collect::<String>();
         fs::write(temp.path().join("handlers.ts"), source).unwrap();
         let (engine, _) = Engine::init(temp.path()).unwrap();
-        let hits = engine.explore("handler", 12).unwrap();
+        let mut hits = engine.explore("handler", 12).unwrap();
         assert!(hits.iter().any(|hit| hit.source_truncated));
+        hits[0].relationships_truncated = true;
 
         let text = format_explore_text(&engine, "handler", &hits).unwrap();
         assert!(text.chars().count() <= 48_000);
         assert!(text.contains("source excerpt truncated at 4,000 characters"));
+        assert!(text.contains("Flow details capped at 8 relationships per direction"));
         assert!(!text.contains("omitted 0 symbols"));
         assert!(text.contains("character global budget"));
     }

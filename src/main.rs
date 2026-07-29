@@ -6,7 +6,7 @@ use std::sync::{
     Arc,
 };
 use std::time::Duration;
-use structurely::{mcp, Engine};
+use structurely::{budget::ResourceBudget, mcp, Engine};
 
 #[derive(Parser)]
 #[command(name = "structurely", version, about)]
@@ -30,44 +30,49 @@ enum Command {
         path: PathBuf,
     },
     Search {
+        #[arg(value_parser = parse_query)]
         query: String,
         #[arg(long, default_value = ".")]
         path: PathBuf,
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, default_value_t = 20, value_parser = parse_result_limit)]
         limit: usize,
     },
     Explore {
+        #[arg(value_parser = parse_query)]
         query: String,
         #[arg(long, default_value = ".")]
         path: PathBuf,
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, default_value_t = 20, value_parser = parse_result_limit)]
         limit: usize,
     },
     Callers {
+        #[arg(value_parser = parse_identifier)]
         symbol: String,
-        #[arg(long)]
+        #[arg(long, value_parser = parse_identifier)]
         file: Option<String>,
         #[arg(long, default_value = ".")]
         path: PathBuf,
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, default_value_t = 20, value_parser = parse_result_limit)]
         limit: usize,
     },
     Callees {
+        #[arg(value_parser = parse_identifier)]
         symbol: String,
-        #[arg(long)]
+        #[arg(long, value_parser = parse_identifier)]
         file: Option<String>,
         #[arg(long, default_value = ".")]
         path: PathBuf,
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, default_value_t = 20, value_parser = parse_result_limit)]
         limit: usize,
     },
     Impact {
+        #[arg(value_parser = parse_identifier)]
         symbol: String,
-        #[arg(long)]
+        #[arg(long, value_parser = parse_identifier)]
         file: Option<String>,
         #[arg(long, default_value = ".")]
         path: PathBuf,
-        #[arg(long, default_value_t = 2)]
+        #[arg(long, default_value_t = 2, value_parser = parse_traversal_depth)]
         depth: usize,
     },
     Snapshot {
@@ -77,9 +82,9 @@ enum Command {
     Benchmark {
         #[arg(long, default_value = ".")]
         path: PathBuf,
-        #[arg(long, default_value = "main")]
+        #[arg(long, default_value = "main", value_parser = parse_query)]
         query: String,
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, default_value_t = 20, value_parser = parse_benchmark_iterations)]
         iterations: usize,
     },
     Quality {
@@ -108,6 +113,39 @@ enum Command {
         #[arg(long, default_value = ".")]
         path: PathBuf,
     },
+}
+
+fn parse_query(value: &str) -> std::result::Result<String, String> {
+    ResourceBudget::query(value)
+        .map(str::to_owned)
+        .map_err(|error| error.to_string())
+}
+
+fn parse_identifier(value: &str) -> std::result::Result<String, String> {
+    ResourceBudget::identifier(value)
+        .map(str::to_owned)
+        .map_err(|error| error.to_string())
+}
+
+fn parse_result_limit(value: &str) -> std::result::Result<usize, String> {
+    let value = value
+        .parse::<usize>()
+        .map_err(|_| "result limit must be a positive integer".to_owned())?;
+    ResourceBudget::result_limit(value).map_err(|error| error.to_string())
+}
+
+fn parse_traversal_depth(value: &str) -> std::result::Result<usize, String> {
+    let value = value
+        .parse::<usize>()
+        .map_err(|_| "traversal depth must be a positive integer".to_owned())?;
+    ResourceBudget::traversal_depth(value).map_err(|error| error.to_string())
+}
+
+fn parse_benchmark_iterations(value: &str) -> std::result::Result<usize, String> {
+    let value = value
+        .parse::<usize>()
+        .map_err(|_| "benchmark iterations must be a positive integer".to_owned())?;
+    ResourceBudget::benchmark_iterations(value).map_err(|error| error.to_string())
 }
 
 #[derive(Subcommand)]
@@ -345,4 +383,35 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_rejects_resource_budget_overflow_before_opening_a_project() {
+        assert!(Cli::try_parse_from([
+            "structurely",
+            "search",
+            "main",
+            "--limit",
+            &(ResourceBudget::MAX_RESULTS + 1).to_string(),
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "structurely",
+            "impact",
+            "main",
+            "--depth",
+            &(ResourceBudget::MAX_TRAVERSAL_DEPTH + 1).to_string(),
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "structurely",
+            "search",
+            &"q".repeat(ResourceBudget::MAX_QUERY_BYTES + 1),
+        ])
+        .is_err());
+    }
 }

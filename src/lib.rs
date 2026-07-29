@@ -1,4 +1,5 @@
 mod atomic_file;
+pub mod budget;
 pub mod daemon;
 pub mod engine;
 pub mod integrations;

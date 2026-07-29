@@ -1,3 +1,4 @@
+use crate::budget::ResourceBudget;
 use crate::model::{
     ArkuiBuilderFlowFacts, CCompilerMacroAction, CFunctionPointerBindingFact,
     CFunctionPointerFacts, CMacroInitializerRole, CPreprocessorEventFact, CPreprocessorEventKind,
@@ -4751,27 +4752,43 @@ impl Store {
     }
 
     pub fn find_symbols_by_name(&self, name: &str) -> Result<Vec<Symbol>> {
+        ResourceBudget::identifier(name)?;
         let mut statement = self.connection.prepare(
             "SELECT s.public_id,s.semantic_key,s.language,s.kind,s.name,s.qualified_name,
                     f.path,s.start_byte,s.end_byte,s.start_line,s.end_line
              FROM symbols s JOIN files f ON f.id=s.file_id
-             WHERE s.name=?1 ORDER BY s.qualified_name,f.path",
+             WHERE s.name=?1 ORDER BY s.qualified_name,f.path LIMIT ?2",
         )?;
-        let rows = statement.query_map([name], Self::symbol_from_row)?;
+        let rows = statement.query_map(
+            params![
+                name,
+                ResourceBudget::MAX_IMPACT_NODES.saturating_add(1) as i64
+            ],
+            Self::symbol_from_row,
+        )?;
         let symbols = Self::collect_symbols(rows)?;
+        ensure_query_cardinality(&symbols, "symbol lookup")?;
         Ok(symbols)
     }
 
     pub fn find_symbols(&self, identifier: &str) -> Result<Vec<Symbol>> {
+        ResourceBudget::identifier(identifier)?;
         let mut statement = self.connection.prepare(
             "SELECT s.public_id,s.semantic_key,s.language,s.kind,s.name,s.qualified_name,
                     f.path,s.start_byte,s.end_byte,s.start_line,s.end_line
              FROM symbols s JOIN files f ON f.id=s.file_id
              WHERE s.public_id=?1 OR s.name=?1 OR s.qualified_name=?1
-             ORDER BY s.qualified_name,f.path",
+             ORDER BY s.qualified_name,f.path LIMIT ?2",
         )?;
-        let rows = statement.query_map([identifier], Self::symbol_from_row)?;
+        let rows = statement.query_map(
+            params![
+                identifier,
+                ResourceBudget::MAX_IMPACT_NODES.saturating_add(1) as i64
+            ],
+            Self::symbol_from_row,
+        )?;
         let symbols = Self::collect_symbols(rows)?;
+        ensure_query_cardinality(&symbols, "symbol lookup")?;
         Ok(symbols)
     }
 
@@ -4785,10 +4802,32 @@ impl Store {
         kind: Option<SymbolKind>,
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
+        ResourceBudget::query(query)?;
+        let limit = ResourceBudget::result_limit(limit)?;
+        self.search_filtered_with_limit(query, kind, limit)
+    }
+
+    pub(crate) fn search_candidates(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        ResourceBudget::query(query)?;
+        let limit = ResourceBudget::search_candidate_limit(limit)?;
+        self.search_filtered_with_limit(query, None, limit)
+    }
+
+    fn search_filtered_with_limit(
+        &self,
+        query: &str,
+        kind: Option<SymbolKind>,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>> {
         let terms = search_terms(query);
-        if terms.is_empty() || limit == 0 {
+        if terms.is_empty() {
             return Ok(Vec::new());
         }
+        anyhow::ensure!(
+            terms.len() <= ResourceBudget::MAX_SEARCH_TERMS,
+            "query exceeds the {}-term limit",
+            ResourceBudget::MAX_SEARCH_TERMS
+        );
         let escaped = terms
             .iter()
             .map(|part| format!("\"{}\"*", part.replace('"', "\"\"")))
@@ -4859,6 +4898,35 @@ impl Store {
         incoming: bool,
         kind: RelationshipKind,
     ) -> Result<Vec<(Symbol, Evidence)>> {
+        let related = self.related_with_limit(
+            symbol_id,
+            incoming,
+            kind,
+            ResourceBudget::MAX_IMPACT_NODES.saturating_add(1),
+        )?;
+        ensure_query_cardinality(&related, "relationship lookup")?;
+        Ok(related)
+    }
+
+    pub(crate) fn related_limited(
+        &self,
+        symbol_id: &str,
+        incoming: bool,
+        kind: RelationshipKind,
+        limit: usize,
+    ) -> Result<Vec<(Symbol, Evidence)>> {
+        let limit = ResourceBudget::result_limit(limit)?;
+        self.related_with_limit(symbol_id, incoming, kind, limit)
+    }
+
+    fn related_with_limit(
+        &self,
+        symbol_id: &str,
+        incoming: bool,
+        kind: RelationshipKind,
+        limit: usize,
+    ) -> Result<Vec<(Symbol, Evidence)>> {
+        ResourceBudget::identifier(symbol_id)?;
         let (join_side, filter_side) = if incoming {
             ("r.source_public_id", "r.target_public_id")
         } else {
@@ -4873,24 +4941,26 @@ impl Store {
              JOIN files f ON f.id=s.file_id
              WHERE {filter_side}=?1 AND r.kind=?2
              ORDER BY r.confidence DESC,s.qualified_name,r.evidence_file,
-                      r.evidence_line,r.evidence_site"
+                      r.evidence_line,r.evidence_site
+             LIMIT ?3"
         );
         let mut statement = self.connection.prepare(&sql)?;
-        let rows = statement.query_map(params![symbol_id, kind.to_string()], |row| {
-            Ok((
-                Self::symbol_from_row(row)?,
-                Evidence {
-                    provenance: row.get(11)?,
-                    confidence: row.get(12)?,
-                    explanation: row.get(13)?,
-                    file: row.get(14)?,
-                    line: row.get::<_, i64>(15)? as usize,
-                    site: (row.get::<_, i64>(16)? != 0)
-                        .then(|| row.get::<_, i64>(16).unwrap_or_default() as usize),
-                },
-            ))
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let rows =
+            statement.query_map(params![symbol_id, kind.to_string(), limit as i64], |row| {
+                Ok((
+                    Self::symbol_from_row(row)?,
+                    Evidence {
+                        provenance: row.get(11)?,
+                        confidence: row.get(12)?,
+                        explanation: row.get(13)?,
+                        file: row.get(14)?,
+                        line: row.get::<_, i64>(15)? as usize,
+                        site: (row.get::<_, i64>(16)? != 0)
+                            .then(|| row.get::<_, i64>(16).unwrap_or_default() as usize),
+                    },
+                ))
+            })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     fn collect_symbols(
@@ -6809,6 +6879,15 @@ fn search_terms(query: &str) -> Vec<String> {
 
 fn call_result_resolution_enabled(dependent_calls: usize) -> bool {
     dependent_calls <= CALL_RESULT_DEPENDENT_CAP
+}
+
+fn ensure_query_cardinality<T>(items: &[T], label: &str) -> Result<()> {
+    anyhow::ensure!(
+        items.len() <= ResourceBudget::MAX_IMPACT_NODES,
+        "{label} exceeded the {}-item work limit",
+        ResourceBudget::MAX_IMPACT_NODES
+    );
+    Ok(())
 }
 
 #[cfg(test)]
