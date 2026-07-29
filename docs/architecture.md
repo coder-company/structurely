@@ -96,8 +96,8 @@ canonical value. Numeric and string channel identities remain distinct;
 dynamic IDs, mutable exports, reassignment, lexical shadows, ambiguous
 registrations or exports, and cross-application matches fail closed. Named and
 inline callbacks are supported. Constructor-built descriptors,
-transitive callback delegation, and `@BuilderParam` value flow are
-intentionally not yet resolved.
+transitive callback delegation, and remaining cross-language emitter channels
+are intentionally not yet resolved.
 
 Direct callback-argument propagation records exact formal and actual argument
 positions. It emits an edge only after the ordinary call resolves to one
@@ -121,6 +121,16 @@ the grammar's recovered sibling form for children-bearing components. Recovered
 chains must begin at an ArkUI component expression and contain contiguous
 leading-dot/parenthesized-argument pairs; orphan, interrupted, undecorated, and
 cross-component candidates fail closed.
+
+The same adapter records bounded direct `@BuilderParam` assignments between
+components in one file. A child component name must identify exactly one local
+component, the object key must name one of its declared `@BuilderParam` fields,
+and the value must be an exact noncomputed `this.member` identifying one
+decorated `@Builder` method owned by the caller's component. Undeclared keys,
+bare values, other receivers, undecorated or cross-owner methods, computed
+members, and ambiguous components fail closed. Imported builders, inline
+closures, trailing-closure syntax, and transitive consumer invocation remain
+outside this bounded layer.
 
 Direct calls and registrations carry their own provenance, confidence, and
 explanation through one resolution path. Literal event dispatch joins only

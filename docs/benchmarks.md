@@ -203,3 +203,15 @@ query p95 while using 87.12% less peak memory. The
 [`real OpenHarmony gate`](../benchmarks/openharmony-callback-arguments-2026-07-29/README.md)
 passes 10/10 assertions and proves the package-scoped nested-closure callback
 flow from `RequestDownload.downloadFile` to `Download.downloadFileCallback`.
+
+After bounded same-file ArkUI `@BuilderParam` assignment resolution, the
+[`post-BuilderParam differential`](../benchmarks/differential-mcp-2026-07-29-post-builder-param/README.md)
+keeps both engines at 22/22 shared compatibility and 1.0000 usefulness. The
+enforced
+[`performance run`](../benchmarks/codegraph-source-intersection-2026-07-29-post-builder-param/README.md)
+is 3.273× faster to index, 9.358× faster at query p50, and 6.825× faster at
+query p95 while using 88.86% less peak memory. The
+[`real OpenHarmony gate`](../benchmarks/openharmony-builder-param-2026-07-29/README.md)
+passes 11/11 assertions and proves the exact
+`HeatHistogramContent.build → HeatHistogramContent.content` assignment with
+BuilderParam provenance.
