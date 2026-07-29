@@ -739,6 +739,7 @@ dependencies = [
  "fs2",
  "globset",
  "ignore",
+ "libc",
  "notify",
  "rusqlite",
  "same-file",

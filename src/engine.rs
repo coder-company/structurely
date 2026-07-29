@@ -1,9 +1,8 @@
 use crate::{
-    inventory::ProjectInventory,
+    inventory::{InventoryStale, ProjectInventory},
     model::{Evidence, RelationshipKind},
     parser::parse_file_as,
     project_resolution::ProjectResolutionContext,
-    source::read_source,
     store::{FileSummary, SearchHit, StorageMetrics, Store},
 };
 use anyhow::{anyhow, bail, Context, Result};
@@ -24,8 +23,6 @@ use std::{
 
 pub const PROJECT_DIR: &str = ".structurely";
 pub const DATABASE_FILE: &str = "graph.db";
-pub const MAX_SOURCE_BYTES: u64 = 1024 * 1024;
-
 pub struct Engine {
     root: PathBuf,
     store: Store,
@@ -148,6 +145,28 @@ impl Engine {
     }
 
     pub fn sync(&mut self) -> Result<IndexReport> {
+        const MAX_SYNC_ATTEMPTS: usize = 3;
+        const INITIAL_RETRY_DELAY_MS: u64 = 5;
+        let started = Instant::now();
+        for attempt in 0..MAX_SYNC_ATTEMPTS {
+            match self.sync_once() {
+                Ok(mut report) => {
+                    report.duration_ms = started.elapsed().as_millis();
+                    return Ok(report);
+                }
+                Err(error)
+                    if error.downcast_ref::<InventoryStale>().is_some()
+                        && attempt + 1 < MAX_SYNC_ATTEMPTS =>
+                {
+                    thread::sleep(Duration::from_millis(INITIAL_RETRY_DELAY_MS << attempt));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!("bounded sync attempts always return")
+    }
+
+    fn sync_once(&mut self) -> Result<IndexReport> {
         const RESOLUTION_FINGERPRINT_KEY: &str = "project_resolution_fingerprint";
         let started = Instant::now();
         let resolution_context = Arc::new(ProjectResolutionContext::load(&self.root));
@@ -161,9 +180,13 @@ impl Engine {
         let inventory = ProjectInventory::new(&self.root)?;
         let mut delta = inventory.delta(&indexed, force_reindex)?;
         let header_context_changed = resolution_context.has_compilation_database()
-            && (delta.changed.iter().any(|(path, _, _)| is_c_header(path))
+            && (delta
+                .changed
+                .iter()
+                .any(|snapshot| is_c_header(&snapshot.relative))
                 || delta.deleted.iter().any(|path| is_c_header(path)));
         if header_context_changed && !force_reindex {
+            drop(delta);
             delta = inventory.delta(&indexed, true)?;
         }
         let changed = delta.changed;
@@ -183,9 +206,9 @@ impl Engine {
             if changed.is_empty() && deleted.is_empty() {
                 (self.store.epoch()?, 0, 0, 0, 0)
             } else if parse_workers == 1 {
-                let facts = changed.iter().map(|(relative, path, language)| {
-                    let source = read_source(path)?;
-                    let mut facts = parse_file_as(relative, &source, *language)?;
+                let facts = changed.into_iter().map(|snapshot| {
+                    let (relative, language, source) = snapshot.into_parts()?;
+                    let mut facts = parse_file_as(&relative, &source, language)?;
                     resolution_context.apply(&mut facts);
                     Ok(facts)
                 });
@@ -193,7 +216,7 @@ impl Engine {
             } else {
                 thread::scope(|scope| {
                     let (work_sender, work_receiver) =
-                        mpsc::channel::<(String, PathBuf, crate::model::Language)>();
+                        mpsc::channel::<crate::inventory::SourceSnapshot>();
                     let work_receiver = Arc::new(Mutex::new(work_receiver));
                     let (result_sender, result_receiver) =
                         mpsc::sync_channel::<Result<crate::model::FileFacts>>(
@@ -208,21 +231,22 @@ impl Engine {
                                 Ok(receiver) => receiver.recv(),
                                 Err(_) => return,
                             };
-                            let Ok((relative, path, language)) = work else {
+                            let Ok(snapshot) = work else {
                                 return;
                             };
-                            let facts = read_source(&path).and_then(|source| {
+                            let facts = (|| {
+                                let (relative, language, source) = snapshot.into_parts()?;
                                 let mut facts = parse_file_as(&relative, &source, language)?;
                                 resolution_context.apply(&mut facts);
                                 Ok(facts)
-                            });
+                            })();
                             if result_sender.send(facts).is_err() {
                                 return;
                             }
                         });
                     }
                     drop(result_sender);
-                    for work in changed.iter().cloned() {
+                    for work in changed {
                         work_sender
                             .send(work)
                             .map_err(|_| anyhow!("parser worker queue closed"))?;
@@ -749,6 +773,7 @@ fn parse_worker_count(configured: Option<&str>, available: usize, files: usize) 
 mod tests {
     use super::*;
     use crate::parser::parse_file;
+    use crate::source::MAX_SOURCE_BYTES;
 
     #[test]
     fn parse_worker_configuration_is_bounded_and_never_zero() {
@@ -910,19 +935,28 @@ mod tests {
     #[test]
     fn oversized_generated_sources_are_skipped_and_reported() {
         let temp = tempfile::tempdir().unwrap();
-        fs::write(
-            temp.path().join("generated.c"),
-            vec![b' '; MAX_SOURCE_BYTES as usize + 1],
-        )
-        .unwrap();
-        let (engine, report) = Engine::init(temp.path()).unwrap();
+        let source = temp.path().join("generated.c");
+        fs::write(&source, "void previously_indexed(void) {}\n").unwrap();
+        let (mut engine, initial) = Engine::init(temp.path()).unwrap();
+        assert_eq!(initial.files_changed, 1);
+        assert_eq!(engine.search("previously_indexed", 10).unwrap().len(), 1);
+
+        fs::write(&source, vec![b' '; MAX_SOURCE_BYTES as usize + 1]).unwrap();
+        let report = engine.sync().unwrap();
 
         assert_eq!(report.files_scanned, 0);
         assert_eq!(report.files_skipped, 1);
+        assert_eq!(report.files_deleted, 1);
+        assert!(engine.search("previously_indexed", 10).unwrap().is_empty());
         let status = engine.status().unwrap();
         assert_eq!(status.indexed_files, 0);
         assert_eq!(status.pending_files, 0);
         assert_eq!(status.skipped_files, 1);
+
+        fs::write(&source, "void indexed_again(void) {}\n").unwrap();
+        let recovered = engine.sync().unwrap();
+        assert_eq!(recovered.files_changed, 1);
+        assert_eq!(engine.search("indexed_again", 10).unwrap().len(), 1);
     }
 
     #[test]

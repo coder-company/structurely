@@ -1,8 +1,8 @@
 use crate::{
-    engine::{MAX_SOURCE_BYTES, PROJECT_DIR},
+    engine::PROJECT_DIR,
     model::Language,
     project_config::ProjectConfig,
-    source::read_source,
+    source::{read_source_snapshot, SourceRead},
 };
 use anyhow::Result;
 use ignore::WalkBuilder;
@@ -13,13 +13,61 @@ use std::{
     sync::Arc,
 };
 
+#[derive(Debug, thiserror::Error)]
+#[error("project inventory became stale while reading {path}: {reason}")]
+pub(crate) struct InventoryStale {
+    path: PathBuf,
+    reason: String,
+}
+
 #[derive(Debug)]
 pub(crate) struct ProjectDelta {
-    pub(crate) changed: Vec<(String, PathBuf, Language)>,
+    pub(crate) changed: Vec<SourceSnapshot>,
     pub(crate) deleted: Vec<String>,
     pub(crate) files_scanned: usize,
     pub(crate) files_skipped: usize,
 }
+
+#[derive(Debug)]
+pub(crate) struct SourceSnapshot {
+    pub(crate) relative: String,
+    path: PathBuf,
+    pub(crate) language: Language,
+    hash: String,
+    source: Option<String>,
+}
+
+impl SourceSnapshot {
+    pub(crate) fn into_parts(self) -> Result<(String, Language, String)> {
+        let source = if let Some(source) = self.source {
+            source
+        } else {
+            let snapshot = read_source_snapshot(&self.path).map_err(|error| InventoryStale {
+                path: self.path.clone(),
+                reason: error.to_string(),
+            })?;
+            let SourceRead::Snapshot(source) = snapshot else {
+                return Err(InventoryStale {
+                    path: self.path,
+                    reason: "source grew beyond the size limit".to_owned(),
+                }
+                .into());
+            };
+            let current_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+            if current_hash != self.hash {
+                return Err(InventoryStale {
+                    path: self.path,
+                    reason: "content hash changed".to_owned(),
+                }
+                .into());
+            }
+            source
+        };
+        Ok((self.relative, self.language, source))
+    }
+}
+
+const MAX_RETAINED_SNAPSHOT_BYTES: usize = 32 * 1024 * 1024;
 
 pub(crate) struct ProjectInventory<'a> {
     root: &'a Path,
@@ -40,9 +88,11 @@ impl<'a> ProjectInventory<'a> {
         force_reindex: bool,
     ) -> Result<ProjectDelta> {
         let mut seen = HashSet::new();
+        let mut unindexable = HashSet::new();
         let mut changed = Vec::new();
         let mut files_scanned = 0;
         let mut files_skipped = 0;
+        let mut retained_snapshot_bytes = 0usize;
 
         let mut walker = WalkBuilder::new(self.root);
         let root = self.root.to_owned();
@@ -65,9 +115,11 @@ impl<'a> ProjectInventory<'a> {
                 indexed,
                 force_reindex,
                 &mut seen,
+                &mut unindexable,
                 &mut changed,
                 &mut files_scanned,
                 &mut files_skipped,
+                &mut retained_snapshot_bytes,
             )?;
         }
 
@@ -97,16 +149,18 @@ impl<'a> ProjectInventory<'a> {
                     indexed,
                     force_reindex,
                     &mut seen,
+                    &mut unindexable,
                     &mut changed,
                     &mut files_scanned,
                     &mut files_skipped,
+                    &mut retained_snapshot_bytes,
                 )?;
             }
         }
 
         let deleted = indexed
             .keys()
-            .filter(|path| !seen.contains(*path))
+            .filter(|path| !seen.contains(*path) || unindexable.contains(*path))
             .cloned()
             .collect();
         Ok(ProjectDelta {
@@ -125,9 +179,11 @@ impl<'a> ProjectInventory<'a> {
         indexed: &HashMap<String, String>,
         force_reindex: bool,
         seen: &mut HashSet<String>,
-        changed: &mut Vec<(String, PathBuf, Language)>,
+        unindexable: &mut HashSet<String>,
+        changed: &mut Vec<SourceSnapshot>,
         files_scanned: &mut usize,
         files_skipped: &mut usize,
+        retained_snapshot_bytes: &mut usize,
     ) -> Result<()> {
         let Some(language) = self.config.language_for_path(relative_path) else {
             return Ok(());
@@ -139,15 +195,37 @@ impl<'a> ProjectInventory<'a> {
         if !seen.insert(relative.clone()) {
             return Ok(());
         }
-        if fs::metadata(path)?.len() > MAX_SOURCE_BYTES {
-            *files_skipped += 1;
-            return Ok(());
-        }
+        let snapshot = read_source_snapshot(path).map_err(|error| InventoryStale {
+            path: path.to_owned(),
+            reason: error.to_string(),
+        })?;
+        let source = match snapshot {
+            SourceRead::Snapshot(source) => source,
+            SourceRead::TooLarge => {
+                *files_skipped += 1;
+                unindexable.insert(relative);
+                return Ok(());
+            }
+        };
         *files_scanned += 1;
-        let source = read_source(path)?;
         let hash = blake3::hash(source.as_bytes()).to_hex().to_string();
         if force_reindex || indexed.get(&relative) != Some(&hash) {
-            changed.push((relative, path.to_owned(), language));
+            let retain = retained_snapshot_bytes
+                .checked_add(source.len())
+                .filter(|total| *total <= MAX_RETAINED_SNAPSHOT_BYTES);
+            let source = if let Some(total) = retain {
+                *retained_snapshot_bytes = total;
+                Some(source)
+            } else {
+                None
+            };
+            changed.push(SourceSnapshot {
+                relative,
+                path: path.to_owned(),
+                language,
+                hash,
+                source,
+            });
         }
         Ok(())
     }
@@ -248,6 +326,7 @@ fn normalize_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::MAX_SOURCE_BYTES;
     use std::fs;
     use tempfile::tempdir;
 
@@ -278,7 +357,7 @@ mod tests {
 
         assert_eq!(delta.files_scanned, 1);
         assert_eq!(delta.files_skipped, 1);
-        assert_eq!(delta.changed[0].0, "kept.ts");
+        assert_eq!(delta.changed[0].relative, "kept.ts");
         assert_eq!(delta.deleted, vec!["deleted.ts"]);
     }
 
@@ -337,7 +416,7 @@ mod tests {
         let mut paths = delta
             .changed
             .into_iter()
-            .map(|(path, _, _)| path)
+            .map(|snapshot| snapshot.relative)
             .collect::<Vec<_>>();
         paths.sort();
         assert_eq!(paths, vec!["Local/forced.ts", "repos/child/lib.rs"]);
@@ -383,8 +462,40 @@ mod tests {
         let paths = delta
             .changed
             .into_iter()
-            .map(|(path, _, _)| path)
+            .map(|snapshot| snapshot.relative)
             .collect::<Vec<_>>();
         assert_eq!(paths, ["nested/submodule/lib.rs"]);
+    }
+
+    #[test]
+    fn retained_and_deferred_snapshots_have_stable_content_semantics() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("main.rs");
+        fs::write(&path, "pub fn original() {}\n").unwrap();
+        let original = "pub fn original() {}\n".to_owned();
+        let hash = blake3::hash(original.as_bytes()).to_hex().to_string();
+
+        let retained = SourceSnapshot {
+            relative: "main.rs".to_owned(),
+            path: path.clone(),
+            language: Language::Rust,
+            hash: hash.clone(),
+            source: Some(original.clone()),
+        };
+        fs::write(&path, "pub fn replacement() {}\n").unwrap();
+        assert_eq!(retained.into_parts().unwrap().2, original);
+
+        let deferred = SourceSnapshot {
+            relative: "main.rs".to_owned(),
+            path,
+            language: Language::Rust,
+            hash,
+            source: None,
+        };
+        let error = deferred.into_parts().unwrap_err();
+        assert!(
+            error.downcast_ref::<InventoryStale>().is_some(),
+            "a deferred content change must request a bounded inventory retry"
+        );
     }
 }
