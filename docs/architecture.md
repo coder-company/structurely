@@ -122,15 +122,19 @@ chains must begin at an ArkUI component expression and contain contiguous
 leading-dot/parenthesized-argument pairs; orphan, interrupted, undecorated, and
 cross-component candidates fail closed.
 
-The same adapter records bounded direct `@BuilderParam` assignments between
-components in one file. A child component name must identify exactly one local
-component, the object key must name one of its declared `@BuilderParam` fields,
-and the value must be an exact noncomputed `this.member` identifying one
-decorated `@Builder` method owned by the caller's component. Undeclared keys,
-bare values, other receivers, undecorated or cross-owner methods, computed
-members, and ambiguous components fail closed. Imported builders, inline
-closures, trailing-closure syntax, and transitive consumer invocation remain
-outside this bounded layer.
+The project-aware BuilderParam flow module persists decorated Builder
+declarations, BuilderParam declarations, assignments, and consumer invocations
+as compact per-file Facts, then resolves them after verified import bindings.
+Object-pair and trailing-child syntax are separate resolver adapters over this
+seam. Object pairs support exact same-owner `this.member` values and verified
+imported bare decorated Builders. Trailing children receive stable synthetic
+Symbols and resolve only when the uniquely imported or local component declares
+exactly one BuilderParam. The module emits both registration and consumer
+dispatch relationships with separate provenance. Undeclared keys, undecorated
+targets, missing or ambiguous imports, multiple possible trailing parameters,
+computed members, and ambiguous components fail closed. Inline arrow adapters,
+cross-file `this.member` forwarding, declaration defaults, and deferred runtime
+assignments remain outside this bounded layer.
 
 Direct calls and registrations carry their own provenance, confidence, and
 explanation through one resolution path. Literal event dispatch joins only

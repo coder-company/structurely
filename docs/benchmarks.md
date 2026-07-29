@@ -215,3 +215,16 @@ query p95 while using 88.86% less peak memory. The
 passes 11/11 assertions and proves the exact
 `HeatHistogramContent.build → HeatHistogramContent.content` assignment with
 BuilderParam provenance.
+
+After project-aware BuilderParam Facts and trailing-child/imported-builder
+resolution, the
+[`post-builder-flow differential`](../benchmarks/differential-mcp-2026-07-29-post-builder-flow/README.md)
+keeps both engines at 22/22 shared compatibility and 1.0000 usefulness. The
+enforced
+[`performance run`](../benchmarks/codegraph-source-intersection-2026-07-29-post-builder-flow/README.md)
+is 3.080× faster to index, 9.411× faster at query p50, and 7.755× faster at
+query p95 while using 88.62% less peak memory. The
+[`real OpenHarmony gate`](../benchmarks/openharmony-builder-flow-2026-07-29/README.md)
+passes 13/13 assertions, indexes 48,370 symbols and 88,790 relationships, and
+proves both `CodeView.build →` its supplied trailing child and
+`TitleExpansionView.build → titleMenu/titleContent` through verified imports.
