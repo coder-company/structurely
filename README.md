@@ -96,6 +96,22 @@ feature. Query timing includes process startup. Review the
 [raw results and methodology](benchmarks/release-hardening-2026-07-29/README.md)
 and [comparison scope](docs/codegraph-parity.md).
 
+## Benchmarks against Perseus
+
+This local-versus-hosted comparison used the same clean 96-file Structurely
+snapshot with Structurely 0.2.0 and Perseus 0.1.196.
+
+| Metric | Structurely | Perseus | Result |
+|---|---:|---:|---:|
+| Clean index wall p50 | 0.58 s | 10.38 s | 17.90× faster |
+| Warm query-process wall p50 | 12.51 ms | 1,660 ms | 132.73× faster |
+| Expected file ranked first | 3/5 | 3/5 | tie |
+| Expected file within top 10 | 5/5 | 4/5 | Structurely +1 |
+
+Perseus performs work on its hosted service, while Structurely runs locally.
+The table compares end-to-end CLI wait, not server resource consumption. See
+the [full Perseus protocol and results](benchmarks/perseus-2026-07-29/README.md).
+
 ## Supported languages
 
 Structurely indexes TypeScript, TSX, JavaScript, JSX, Vue, Svelte, Astro,

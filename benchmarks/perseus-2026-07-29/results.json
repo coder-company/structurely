@@ -1,0 +1,85 @@
+{
+  "date": "2026-07-29",
+  "host": {
+    "os": "Linux 6.17.0-1019-aws x86_64",
+    "cpu": "AMD EPYC 7R13 Processor",
+    "logical_cpus": 8
+  },
+  "corpus": {
+    "repository": "coder-company/structurely",
+    "commit": "31d62da868ea345c59d3c26a85a75f05f860b551",
+    "tracked_files": 96
+  },
+  "structurely": {
+    "version": "0.2.0",
+    "commit": "31d62da868ea345c59d3c26a85a75f05f860b551",
+    "clean_index_wall_samples_s": [0.61, 0.57, 0.58],
+    "clean_index_wall_p50_s": 0.58,
+    "internal_index_duration_samples_ms": [588, 562, 565],
+    "indexed_source_files": 63,
+    "symbols": 1297,
+    "relationships": 4873,
+    "warm_query_process_samples": 50,
+    "warm_query_process_p50_ms": 12.506413,
+    "warm_query_process_min_ms": 11.775191,
+    "warm_query_process_max_ms": 17.110053
+  },
+  "perseus": {
+    "version": "0.1.196",
+    "commit": "f185e0cdb72c",
+    "mode": "hosted at perseus.computer",
+    "clean_index_wall_samples_s": [13.71, 10.32, 10.38],
+    "clean_index_wall_p50_s": 10.38,
+    "reported_index_wall_samples_s": [13.25, 9.88, 9.92],
+    "indexed_files": 96,
+    "chunks": 1411,
+    "warm_query_process_samples_ms": [1610, 1610, 1700, 1660, 1670],
+    "warm_query_process_p50_ms": 1660
+  },
+  "comparison": {
+    "structurely_index_speedup": 17.896551724137932,
+    "structurely_query_speedup": 132.73190322436977,
+    "rank_one": {
+      "structurely": 3,
+      "perseus": 3,
+      "queries": 5
+    },
+    "top_ten_expected_file_recall": {
+      "structurely": 5,
+      "perseus": 4,
+      "queries": 5
+    }
+  },
+  "relevance_queries": [
+    {
+      "query": "MCP tool dispatch",
+      "expected": "src/mcp.rs",
+      "structurely_rank": 1,
+      "perseus_rank": 1
+    },
+    {
+      "query": "Windows daemon process detachment",
+      "expected": "src/daemon.rs",
+      "structurely_rank": 1,
+      "perseus_rank": 1
+    },
+    {
+      "query": "project config custom extensions",
+      "expected": "src/project_config.rs",
+      "structurely_rank": 1,
+      "perseus_rank": 2
+    },
+    {
+      "query": "atomic file publication",
+      "expected": "src/atomic_file.rs",
+      "structurely_rank": 2,
+      "perseus_rank": 1
+    },
+    {
+      "query": "benchmark comparator regression gate",
+      "expected": "scripts/compare_benchmarks.py",
+      "structurely_rank": 2,
+      "perseus_rank": null
+    }
+  ]
+}
