@@ -2172,16 +2172,81 @@ fn declared_variable_type(node: Node<'_>, source: &[u8]) -> Option<String> {
 fn simple_receiver_type(annotation: Node<'_>, source: &[u8]) -> Option<String> {
     let raw = node_text(annotation, source);
     let annotation = raw.trim().strip_prefix(':').unwrap_or(raw.trim()).trim();
-    let mut nominal_members = annotation
-        .split('|')
-        .map(str::trim)
+    let mut nominal_members = top_level_type_union_members(annotation)?
+        .into_iter()
         .filter(|member| !matches!(*member, "null" | "undefined" | "void"))
         .collect::<Vec<_>>();
     if nominal_members.len() != 1 {
         return None;
     }
-    let name = nominal_members.remove(0);
-    simple_receiver_name(name).then(|| name.to_owned())
+    simple_receiver_nominal_name(nominal_members.remove(0))
+}
+
+fn top_level_type_union_members(annotation: &str) -> Option<Vec<&str>> {
+    let mut members = Vec::new();
+    let mut start = 0;
+    let mut delimiters = Vec::new();
+    for (offset, character) in annotation.char_indices() {
+        match character {
+            '<' => delimiters.push('>'),
+            '(' => delimiters.push(')'),
+            '[' => delimiters.push(']'),
+            '{' => delimiters.push('}'),
+            '>' | ')' | ']' | '}' => {
+                if delimiters.pop() != Some(character) {
+                    return None;
+                }
+            }
+            '|' if delimiters.is_empty() => {
+                let member = annotation[start..offset].trim();
+                if member.is_empty() {
+                    return None;
+                }
+                members.push(member);
+                start = offset + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if !delimiters.is_empty() {
+        return None;
+    }
+    let member = annotation[start..].trim();
+    if member.is_empty() {
+        return None;
+    }
+    members.push(member);
+    Some(members)
+}
+
+fn simple_receiver_nominal_name(annotation: &str) -> Option<String> {
+    if simple_receiver_name(annotation) {
+        return Some(annotation.to_owned());
+    }
+    let generic_start = annotation.find('<')?;
+    let outer = annotation[..generic_start].trim();
+    if !simple_receiver_name(outer) || !annotation.ends_with('>') {
+        return None;
+    }
+
+    let arguments = &annotation[generic_start + 1..annotation.len() - 1];
+    if arguments.trim().is_empty() {
+        return None;
+    }
+    let mut depth = 1usize;
+    for character in arguments.chars() {
+        match character {
+            '<' => depth = depth.checked_add(1)?,
+            '>' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+    (depth == 1).then(|| outer.to_owned())
 }
 
 fn simple_receiver_name(name: &str) -> bool {
@@ -2275,6 +2340,31 @@ fn span(node: Node<'_>) -> SourceSpan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalizes_only_simple_outer_generic_receiver_annotations() {
+        assert_eq!(
+            simple_receiver_nominal_name("LRUCache<string, ParseResult | null>"),
+            Some("LRUCache".to_owned())
+        );
+        assert_eq!(
+            simple_receiver_nominal_name("ParseWorkerPool<Array<ParseTask>>"),
+            Some("ParseWorkerPool".to_owned())
+        );
+        assert_eq!(simple_receiver_nominal_name("pkg.LRUCache<string>"), None);
+        assert_eq!(
+            simple_receiver_nominal_name("LRUCache<string> & Disposable"),
+            None
+        );
+        assert_eq!(
+            simple_receiver_nominal_name(
+                "T extends string ? LRUCache<string> : ParseWorkerPool<string>"
+            ),
+            None
+        );
+        assert_eq!(simple_receiver_nominal_name("LRUCache<>"), None);
+        assert_eq!(simple_receiver_nominal_name("LRUCache<string>>"), None);
+    }
 
     #[test]
     fn callback_argument_facts_preserve_exact_positions() {

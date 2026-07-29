@@ -65,7 +65,8 @@ fn collect_ohos_emitter_semantics(root: Node<'_>, source: &[u8], facts: &mut Fil
         .dynamic_events
         .retain(|event| !bindings.contains(&event.receiver));
     let imports = ohos_emitter_value_imports(facts);
-    let descriptors = ohos_emitter_descriptors(root, source, &imports);
+    let constructors = ohos_emitter_descriptor_constructors(root, source);
+    let descriptors = ohos_emitter_descriptors(root, source, &imports, &constructors);
     let mut callback_ordinal = 0usize;
     collect_ohos_emitter_calls(
         root,
@@ -74,6 +75,7 @@ fn collect_ohos_emitter_semantics(root: Node<'_>, source: &[u8], facts: &mut Fil
         &bindings,
         &descriptors,
         &imports,
+        &constructors,
         &mut callback_ordinal,
     );
 }
@@ -373,10 +375,18 @@ fn ohos_emitter_descriptors(
     node: Node<'_>,
     source: &[u8],
     imports: &std::collections::HashMap<String, ImportedEmitterValue>,
+    constructors: &HashSet<String>,
 ) -> std::collections::HashMap<String, EventChannel> {
     let mut candidates = std::collections::HashMap::<String, Vec<EventChannel>>::new();
     let mut reassigned = HashSet::new();
-    collect_ohos_emitter_descriptors(node, source, imports, &mut candidates, &mut reassigned);
+    collect_ohos_emitter_descriptors(
+        node,
+        source,
+        imports,
+        constructors,
+        &mut candidates,
+        &mut reassigned,
+    );
     candidates
         .into_iter()
         .filter_map(|(name, mut values)| {
@@ -396,6 +406,7 @@ fn collect_ohos_emitter_descriptors(
     node: Node<'_>,
     source: &[u8],
     imports: &std::collections::HashMap<String, ImportedEmitterValue>,
+    constructors: &HashSet<String>,
     output: &mut std::collections::HashMap<String, Vec<EventChannel>>,
     reassigned: &mut HashSet<String>,
 ) {
@@ -406,10 +417,20 @@ fn collect_ohos_emitter_descriptors(
                 .map(|name| text(name, source)),
             node.child_by_field_name("value"),
         ) {
-            if let Some(channel) =
-                canonical_ohos_emitter_channel(value, source, &Default::default(), imports)
-            {
-                output.entry(name).or_default().push(channel);
+            if let Some(channel) = canonical_ohos_emitter_channel(
+                value,
+                source,
+                &Default::default(),
+                imports,
+                constructors,
+            ) {
+                let constructor_built = value.kind() == "new_expression";
+                if !constructor_built || enclosing_const_declaration(node, source) {
+                    if output.contains_key(&name) {
+                        reassigned.insert(name.clone());
+                    }
+                    output.entry(name).or_default().push(channel);
+                }
             }
         }
     }
@@ -417,15 +438,228 @@ fn collect_ohos_emitter_descriptors(
         if let Some(name) = node
             .child_by_field_name("left")
             .or_else(|| node.child_by_field_name("name"))
-            .filter(|name| name.kind() == "identifier")
+            .and_then(|left| {
+                if left.kind() == "identifier" {
+                    Some(left)
+                } else if left.kind() == "member_expression" {
+                    left.child_by_field_name("object")
+                        .filter(|object| object.kind() == "identifier")
+                } else {
+                    None
+                }
+            })
         {
             reassigned.insert(text(name, source));
         }
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        collect_ohos_emitter_descriptors(child, source, imports, output, reassigned);
+        collect_ohos_emitter_descriptors(child, source, imports, constructors, output, reassigned);
     }
+}
+
+fn enclosing_const_declaration(node: Node<'_>, source: &[u8]) -> bool {
+    let mut ancestor = node.parent();
+    while let Some(candidate) = ancestor {
+        if matches!(
+            candidate.kind(),
+            "lexical_declaration" | "variable_declaration"
+        ) {
+            return text(candidate, source).trim_start().starts_with("const ");
+        }
+        if matches!(candidate.kind(), "statement_block" | "program") {
+            break;
+        }
+        ancestor = candidate.parent();
+    }
+    false
+}
+
+fn ohos_emitter_descriptor_constructors(node: Node<'_>, source: &[u8]) -> HashSet<String> {
+    const MAX_CLASSES: usize = 64;
+    let mut valid = std::collections::HashMap::<String, usize>::new();
+    let mut conflicting = HashSet::new();
+    let mut seen = 0usize;
+    let mut overflowed = false;
+    collect_ohos_emitter_descriptor_constructors(
+        node,
+        source,
+        &mut valid,
+        &mut conflicting,
+        &mut seen,
+        MAX_CLASSES,
+        &mut overflowed,
+    );
+    if overflowed {
+        return HashSet::new();
+    }
+    valid
+        .into_iter()
+        .filter_map(|(name, count)| (count == 1 && !conflicting.contains(&name)).then_some(name))
+        .collect()
+}
+
+fn collect_ohos_emitter_descriptor_constructors(
+    node: Node<'_>,
+    source: &[u8],
+    valid: &mut std::collections::HashMap<String, usize>,
+    conflicting: &mut HashSet<String>,
+    seen: &mut usize,
+    cap: usize,
+    overflowed: &mut bool,
+) {
+    if *overflowed {
+        return;
+    }
+    if node.kind() == "class_declaration" {
+        if !is_top_level_declaration(node) {
+            return;
+        }
+        *seen += 1;
+        if *seen > cap {
+            *overflowed = true;
+            return;
+        }
+        if let Some(name_node) = node.child_by_field_name("name") {
+            let name = text(name_node, source);
+            if exact_emitter_descriptor_constructor(node, source) {
+                *valid.entry(name).or_default() += 1;
+            } else {
+                conflicting.insert(name);
+            }
+        }
+        return;
+    }
+    if matches!(
+        node.kind(),
+        "variable_declarator" | "function_declaration" | "generator_function_declaration"
+    ) {
+        if let Some(name) = node.child_by_field_name("name") {
+            conflicting.insert(text(name, source));
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_ohos_emitter_descriptor_constructors(
+            child,
+            source,
+            valid,
+            conflicting,
+            seen,
+            cap,
+            overflowed,
+        );
+    }
+}
+
+fn is_top_level_declaration(node: Node<'_>) -> bool {
+    node.parent().is_some_and(|parent| {
+        parent.kind() == "program"
+            || (parent.kind() == "export_statement"
+                && parent
+                    .parent()
+                    .is_some_and(|grandparent| grandparent.kind() == "program"))
+    })
+}
+
+fn exact_emitter_descriptor_constructor(class: Node<'_>, source: &[u8]) -> bool {
+    if count_this_event_id_assignments(class, source) != 1 {
+        return false;
+    }
+    let Some(body) = class.child_by_field_name("body") else {
+        return false;
+    };
+    let mut cursor = body.walk();
+    let constructors = body
+        .named_children(&mut cursor)
+        .filter(|member| {
+            member.kind() == "method_definition"
+                && member
+                    .child_by_field_name("name")
+                    .is_some_and(|name| text(name, source) == "constructor")
+        })
+        .collect::<Vec<_>>();
+    let [constructor] = constructors.as_slice() else {
+        return false;
+    };
+    let Some(parameters) = constructor.child_by_field_name("parameters") else {
+        return false;
+    };
+    let mut cursor = parameters.walk();
+    let parameters = parameters.named_children(&mut cursor).collect::<Vec<_>>();
+    let [parameter] = parameters.as_slice() else {
+        return false;
+    };
+    let Some(parameter_name) = simple_parameter_name(*parameter, source) else {
+        return false;
+    };
+    let Some(constructor_body) = constructor.child_by_field_name("body") else {
+        return false;
+    };
+    let mut cursor = constructor_body.walk();
+    let statements = constructor_body
+        .named_children(&mut cursor)
+        .collect::<Vec<_>>();
+    let [statement] = statements.as_slice() else {
+        return false;
+    };
+    let Some(assignment) = statement
+        .named_child(0)
+        .filter(|child| matches!(child.kind(), "assignment_expression" | "assignment"))
+    else {
+        return false;
+    };
+    let Some(left) = assignment
+        .child_by_field_name("left")
+        .filter(|left| left.kind() == "member_expression")
+    else {
+        return false;
+    };
+    let is_event_id = left
+        .child_by_field_name("object")
+        .is_some_and(|object| object.kind() == "this")
+        && left
+            .child_by_field_name("property")
+            .is_some_and(|property| text(property, source) == "eventId");
+    let right_matches = assignment
+        .child_by_field_name("right")
+        .is_some_and(|right| right.kind() == "identifier" && text(right, source) == parameter_name);
+    is_event_id && right_matches
+}
+
+fn simple_parameter_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    if node.kind() == "identifier" {
+        return Some(text(node, source));
+    }
+    if node.kind() == "required_parameter" {
+        return node
+            .child_by_field_name("pattern")
+            .or_else(|| node.child_by_field_name("name"))
+            .or_else(|| node.named_child(0))
+            .filter(|name| name.kind() == "identifier")
+            .map(|name| text(name, source));
+    }
+    None
+}
+
+fn count_this_event_id_assignments(node: Node<'_>, source: &[u8]) -> usize {
+    let own = matches!(node.kind(), "assignment_expression" | "assignment")
+        && node
+            .child_by_field_name("left")
+            .filter(|left| left.kind() == "member_expression")
+            .is_some_and(|left| {
+                left.child_by_field_name("object")
+                    .is_some_and(|object| object.kind() == "this")
+                    && left
+                        .child_by_field_name("property")
+                        .is_some_and(|property| text(property, source) == "eventId")
+            });
+    let mut cursor = node.walk();
+    own as usize
+        + node
+            .named_children(&mut cursor)
+            .map(|child| count_this_event_id_assignments(child, source))
+            .sum::<usize>()
 }
 
 fn canonical_ohos_emitter_channel(
@@ -433,6 +667,7 @@ fn canonical_ohos_emitter_channel(
     source: &[u8],
     descriptors: &std::collections::HashMap<String, EventChannel>,
     imports: &std::collections::HashMap<String, ImportedEmitterValue>,
+    constructors: &HashSet<String>,
 ) -> Option<EventChannel> {
     if let Some(value) = string_literal(node, source) {
         return Some(EventChannel::Canonical(format!("s:{value}")));
@@ -477,6 +712,31 @@ fn canonical_ohos_emitter_channel(
             member_path,
         });
     }
+    if node.kind() == "new_expression" {
+        let constructor = node
+            .child_by_field_name("constructor")
+            .or_else(|| node.child_by_field_name("function"))
+            .filter(|constructor| constructor.kind() == "identifier")?;
+        let constructor_name = text(constructor, source);
+        if !constructors.contains(&constructor_name)
+            || parameter_shadows_binding(node, &constructor_name, source)
+        {
+            return None;
+        }
+        let arguments = node.child_by_field_name("arguments")?;
+        let mut cursor = arguments.walk();
+        let arguments = arguments.named_children(&mut cursor).collect::<Vec<_>>();
+        let [argument] = arguments.as_slice() else {
+            return None;
+        };
+        return canonical_ohos_emitter_channel(
+            *argument,
+            source,
+            descriptors,
+            imports,
+            constructors,
+        );
+    }
     if node.kind() != "object" {
         return None;
     }
@@ -494,7 +754,28 @@ fn canonical_ohos_emitter_channel(
     if event_ids.len() != 1 {
         return None;
     }
-    canonical_ohos_emitter_channel(event_ids.remove(0), source, descriptors, imports)
+    canonical_ohos_emitter_channel(
+        event_ids.remove(0),
+        source,
+        descriptors,
+        imports,
+        constructors,
+    )
+}
+
+fn parameter_shadows_binding(node: Node<'_>, binding: &str, source: &[u8]) -> bool {
+    let mut ancestor = node.parent();
+    while let Some(scope) = ancestor {
+        if let Some(parameters) = scope.child_by_field_name("parameters") {
+            let mut identifiers = Vec::new();
+            collect_identifier_texts(parameters, source, &mut identifiers);
+            if identifiers.iter().any(|identifier| identifier == binding) {
+                return true;
+            }
+        }
+        ancestor = scope.parent();
+    }
+    false
 }
 
 fn event_channel_sort_key(channel: &EventChannel) -> String {
@@ -515,6 +796,7 @@ fn event_channel_label(channel: &EventChannel) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_ohos_emitter_calls(
     node: Node<'_>,
     source: &[u8],
@@ -522,6 +804,7 @@ fn collect_ohos_emitter_calls(
     bindings: &HashSet<String>,
     descriptors: &std::collections::HashMap<String, EventChannel>,
     imports: &std::collections::HashMap<String, ImportedEmitterValue>,
+    constructors: &HashSet<String>,
     callback_ordinal: &mut usize,
 ) {
     if matches!(
@@ -535,6 +818,7 @@ fn collect_ohos_emitter_calls(
             bindings,
             descriptors,
             imports,
+            constructors,
             callback_ordinal,
         );
     } else if node.kind() == "statement_block" {
@@ -545,6 +829,7 @@ fn collect_ohos_emitter_calls(
             bindings,
             descriptors,
             imports,
+            constructors,
             callback_ordinal,
         );
     }
@@ -557,11 +842,13 @@ fn collect_ohos_emitter_calls(
             bindings,
             descriptors,
             imports,
+            constructors,
             callback_ordinal,
         );
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_recovered_ohos_emitter_calls(
     block: Node<'_>,
     source: &[u8],
@@ -569,6 +856,7 @@ fn collect_recovered_ohos_emitter_calls(
     bindings: &HashSet<String>,
     descriptors: &std::collections::HashMap<String, EventChannel>,
     imports: &std::collections::HashMap<String, ImportedEmitterValue>,
+    constructors: &HashSet<String>,
     callback_ordinal: &mut usize,
 ) {
     let children = direct_named_children(block);
@@ -613,11 +901,13 @@ fn collect_recovered_ohos_emitter_calls(
             facts,
             descriptors,
             imports,
+            constructors,
             callback_ordinal,
         );
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn enrich_ohos_emitter_call(
     call: Node<'_>,
     source: &[u8],
@@ -625,6 +915,7 @@ fn enrich_ohos_emitter_call(
     bindings: &HashSet<String>,
     descriptors: &std::collections::HashMap<String, EventChannel>,
     imports: &std::collections::HashMap<String, ImportedEmitterValue>,
+    constructors: &HashSet<String>,
     callback_ordinal: &mut usize,
 ) {
     let Some(function) = call
@@ -659,6 +950,7 @@ fn enrich_ohos_emitter_call(
         facts,
         descriptors,
         imports,
+        constructors,
         callback_ordinal,
     );
 }
@@ -673,13 +965,14 @@ fn enrich_ohos_emitter_parts(
     facts: &mut FileFacts,
     descriptors: &std::collections::HashMap<String, EventChannel>,
     imports: &std::collections::HashMap<String, ImportedEmitterValue>,
+    constructors: &HashSet<String>,
     callback_ordinal: &mut usize,
 ) {
     if arkui_router_binding_is_shadowed(observation, receiver, source) {
         return;
     }
     let Some(channel) = arguments.first().and_then(|argument| {
-        canonical_ohos_emitter_channel(*argument, source, descriptors, imports)
+        canonical_ohos_emitter_channel(*argument, source, descriptors, imports, constructors)
     }) else {
         return;
     };

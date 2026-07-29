@@ -1856,6 +1856,64 @@ mod tests {
     }
 
     #[test]
+    fn generic_receiver_annotations_use_only_the_simple_outer_nominal_type() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("workers.ts"),
+            "export class LRUCache<K, V> { get(_key: K): V { throw new Error() } }\n\
+             export class DecoyCache<K, V> { get(_key: K): V { throw new Error() } }\n\
+             export class ParseWorkerPool<T> { submit(_value: T) {} }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("caller.ts"),
+            "import { LRUCache, ParseWorkerPool } from './workers'\n\
+             export function run() {\n\
+               let cache: LRUCache<string, { value: number | null }> | null\n\
+               let workers: ParseWorkerPool<Array<string>>\n\
+               cache.get('entry')\n\
+               workers.submit(['source'])\n\
+             }\n\
+             export function rejected(\n\
+               qualified: workers.LRUCache<string, number>,\n\
+               intersection: LRUCache<string, number> & ParseWorkerPool<string>,\n\
+               conditional: true extends boolean ? LRUCache<string, number> : ParseWorkerPool<string>,\n\
+               union: LRUCache<string, number> | ParseWorkerPool<string>\n\
+             ) {\n\
+               qualified.get('entry')\n\
+               intersection.get('entry')\n\
+               conditional.get('entry')\n\
+               union.get('entry')\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let caller = |name: &str| {
+            engine
+                .search(name, 20)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.qualified_name == name)
+                .unwrap()
+                .symbol
+        };
+        let run = engine.callees(&caller("run").id).unwrap();
+        assert_eq!(run.len(), 2);
+        assert!(run
+            .iter()
+            .any(|(target, _)| target.qualified_name == "LRUCache.get"));
+        assert!(run
+            .iter()
+            .any(|(target, _)| target.qualified_name == "ParseWorkerPool.submit"));
+        assert!(run.iter().all(|(_, evidence)| evidence.confidence == 0.995));
+        let rejected = engine.callees(&caller("rejected").id).unwrap();
+        assert!(rejected
+            .iter()
+            .all(|(_, evidence)| evidence.confidence < 0.995));
+    }
+
+    #[test]
     fn exact_typed_receivers_do_not_fall_through_to_free_imported_functions() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("util.ts"), "export function send() {}\n").unwrap();
@@ -4868,6 +4926,106 @@ mod tests {
         assert_eq!(engine.sync().unwrap().files_deleted, 1);
         assert!(emitter_targets(&engine, "sendFive").is_empty());
         assert!(emitter_targets(&engine, "sendStringFive").is_empty());
+    }
+
+    #[test]
+    fn harmony_emitter_accepts_only_exact_immutable_constructor_descriptors() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("events.ets"),
+            "import emitter from '@ohos.events.emitter'\n\
+             class EventDescriptor {\n\
+               eventId: number\n\
+               constructor(id: number) { this.eventId = id }\n\
+             }\n\
+             class ExtraWork {\n\
+               eventId: number\n\
+               constructor(id: number) { this.eventId = id; console.info('side effect') }\n\
+             }\n\
+             class ExtraParameter {\n\
+               eventId: number\n\
+               constructor(id: number, other: number) { this.eventId = id }\n\
+             }\n\
+             class LaterMutation {\n\
+               eventId: number\n\
+               constructor(id: number) { this.eventId = id }\n\
+               replace(id: number) { this.eventId = id }\n\
+             }\n\
+             const fortyTwo = new EventDescriptor(42)\n\
+             let mutable = new EventDescriptor(42)\n\
+             const propertyMutated = new EventDescriptor(45)\n\
+             propertyMutated.eventId = 46\n\
+             function onDirect() {}\n\
+             function onBound() {}\n\
+             function onExtra() {}\n\
+             function onMutable() {}\n\
+             function onExtraParameter() {}\n\
+             function onUnknown() {}\n\
+             function onLaterMutation() {}\n\
+             function onPropertyMutated() {}\n\
+             function onNestedLeak() {}\n\
+             function defineNested() {\n\
+               class NestedDescriptor {\n\
+                 eventId: number\n\
+                 constructor(id: number) { this.eventId = id }\n\
+               }\n\
+             }\n\
+             export function register() {\n\
+               emitter.on(new EventDescriptor(41), onDirect)\n\
+               emitter.on(fortyTwo, onBound)\n\
+               emitter.on(new ExtraWork(43), onExtra)\n\
+               emitter.on(mutable, onMutable)\n\
+               emitter.on(new ExtraParameter(44, 1), onExtraParameter)\n\
+               emitter.on(new EventDescriptor(unknownId), onUnknown)\n\
+               emitter.on(new LaterMutation(45), onLaterMutation)\n\
+               emitter.on(propertyMutated, onPropertyMutated)\n\
+             }\n\
+             export function sendDirect() { emitter.emit(new EventDescriptor(41)) }\n\
+             export function sendBound() { emitter.emit(fortyTwo) }\n\
+             export function sendExtra() { emitter.emit(new ExtraWork(43)) }\n\
+             export function sendMutable() { emitter.emit(mutable) }\n\
+             export function sendExtraParameter() { emitter.emit(new ExtraParameter(44, 1)) }\n\
+             export function sendUnknown() { emitter.emit(new EventDescriptor(unknownId)) }\n\
+             export function sendLaterMutation() { emitter.emit(new LaterMutation(45)) }\n\
+             export function sendPropertyMutated() { emitter.emit(propertyMutated) }\n\
+             export function sendShadowed(EventDescriptor: LocalDescriptor) {\n\
+               emitter.emit(new EventDescriptor(41))\n\
+             }\n\
+             export function sendNestedLeak() {\n\
+               emitter.on(new NestedDescriptor(47), onNestedLeak)\n\
+               emitter.emit(new NestedDescriptor(47))\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let emitter_targets = |caller_name: &str| {
+            let caller = engine
+                .search(caller_name, 10)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.qualified_name == caller_name)
+                .unwrap()
+                .symbol;
+            engine
+                .callees(&caller.id)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, evidence)| evidence.provenance == "framework/ohos-emitter")
+                .map(|(target, _)| target.qualified_name)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(emitter_targets("sendDirect"), ["onDirect"]);
+        assert_eq!(emitter_targets("sendBound"), ["onBound"]);
+        assert!(emitter_targets("sendExtra").is_empty());
+        assert!(emitter_targets("sendMutable").is_empty());
+        assert!(emitter_targets("sendExtraParameter").is_empty());
+        assert!(emitter_targets("sendUnknown").is_empty());
+        assert!(emitter_targets("sendLaterMutation").is_empty());
+        assert!(emitter_targets("sendPropertyMutated").is_empty());
+        assert!(emitter_targets("sendShadowed").is_empty());
+        assert!(emitter_targets("sendNestedLeak").is_empty());
     }
 
     #[test]
