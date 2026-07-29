@@ -262,6 +262,21 @@ fn tool_definitions() -> Vec<Value> {
             },
             "annotations": read_only_annotations()
         }),
+        state_tool(
+            "structurely_workspace",
+            "Create, list, or rename durable team workspaces.",
+            &["create", "list", "rename"],
+        ),
+        state_tool(
+            "structurely_session",
+            "Start, list, update, inspect, complete, or recap durable sessions.",
+            &["start", "list", "add", "show", "end", "recap"],
+        ),
+        state_tool(
+            "structurely_memory",
+            "Remember, recall, or forget durable workspace knowledge.",
+            &["remember", "recall", "forget"],
+        ),
         json!({
             "name": "structurely_status",
             "description": "Index health check.",
@@ -375,6 +390,42 @@ fn relationship_tool(name: &str, description: &str) -> Value {
             "required": ["symbol"]
         },
         "annotations": read_only_annotations()
+    })
+}
+
+fn state_tool(name: &str, description: &str, actions: &[&str]) -> Value {
+    json!({
+        "name": name,
+        "description": description,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": { "type": "string", "enum": actions },
+                "id": { "type": "string" },
+                "workspace": { "type": "string" },
+                "session": { "type": "string" },
+                "name": { "type": "string" },
+                "title": { "type": "string" },
+                "kind": { "type": "string" },
+                "body": { "type": "string" },
+                "query": { "type": "string" },
+                "tags": { "type": "array", "items": { "type": "string" }, "maxItems": 32 },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": ResourceBudget::MAX_RESULTS,
+                    "default": 20
+                },
+                "projectPath": { "type": "string" }
+            },
+            "required": ["action"]
+        },
+        "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": name == "structurely_memory",
+            "idempotentHint": false,
+            "openWorldHint": false
+        }
     })
 }
 
@@ -575,6 +626,9 @@ fn dispatch_tool(engine: &Engine, name: &str, arguments: &Value) -> Result<Value
                 depth,
             )?)?
         }
+        "structurely_workspace" => dispatch_workspace(engine, arguments)?,
+        "structurely_session" => dispatch_session(engine, arguments)?,
+        "structurely_memory" => dispatch_memory(engine, arguments)?,
         "structurely_status" => serde_json::to_value(engine.status()?)?,
         "structurely_files" => {
             let path = optional_string(arguments, "path")?;
@@ -638,6 +692,102 @@ fn dispatch_tool(engine: &Engine, name: &str, arguments: &Value) -> Result<Value
         "structuredContent": payload,
         "isError": false
     }))
+}
+
+fn dispatch_workspace(engine: &Engine, arguments: &Value) -> Result<Value> {
+    let action = required_string(arguments, "action")?;
+    let store = crate::state::StateStore::open(engine.root())?;
+    Ok(match action {
+        "create" => {
+            serde_json::to_value(store.create_workspace(required_string(arguments, "name")?)?)?
+        }
+        "list" => serde_json::to_value(store.list_workspaces(number_argument(
+            arguments,
+            "limit",
+            20,
+            ResourceBudget::MAX_RESULTS,
+        )?)?)?,
+        "rename" => serde_json::to_value(store.rename_workspace(
+            required_string(arguments, "id")?,
+            required_string(arguments, "name")?,
+        )?)?,
+        _ => anyhow::bail!("unsupported workspace action: {action}"),
+    })
+}
+
+fn dispatch_session(engine: &Engine, arguments: &Value) -> Result<Value> {
+    let action = required_string(arguments, "action")?;
+    let mut store = crate::state::StateStore::open(engine.root())?;
+    let limit = || number_argument(arguments, "limit", 20, ResourceBudget::MAX_RESULTS);
+    Ok(match action {
+        "start" => serde_json::to_value(store.create_session(
+            required_string(arguments, "workspace")?,
+            required_string(arguments, "title")?,
+        )?)?,
+        "list" => serde_json::to_value(
+            store.list_sessions(optional_string(arguments, "workspace")?, limit()?)?,
+        )?,
+        "add" => serde_json::to_value(store.append_event(
+            required_string(arguments, "session")?,
+            required_string(arguments, "kind")?,
+            required_string(arguments, "body")?,
+        )?)?,
+        "show" => {
+            let session = required_string(arguments, "session")?;
+            json!({
+                "session": store.session(session)?,
+                "events": store.events(session, limit()?)?,
+                "recap": store.recap(session)?,
+            })
+        }
+        "end" => {
+            serde_json::to_value(store.complete_session(required_string(arguments, "session")?)?)?
+        }
+        "recap" => {
+            serde_json::to_value(store.generate_recap(required_string(arguments, "session")?)?)?
+        }
+        _ => anyhow::bail!("unsupported session action: {action}"),
+    })
+}
+
+fn dispatch_memory(engine: &Engine, arguments: &Value) -> Result<Value> {
+    let action = required_string(arguments, "action")?;
+    let mut store = crate::state::StateStore::open(engine.root())?;
+    Ok(match action {
+        "remember" => {
+            let tags = arguments
+                .get("tags")
+                .and_then(Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .map(|value| {
+                            value
+                                .as_str()
+                                .map(str::to_owned)
+                                .ok_or_else(|| anyhow::anyhow!("`tags` must contain strings"))
+                        })
+                        .collect::<Result<Vec<_>>>()
+                })
+                .transpose()?
+                .unwrap_or_default();
+            serde_json::to_value(store.remember(
+                required_string(arguments, "workspace")?,
+                required_string(arguments, "body")?,
+                &tags,
+            )?)?
+        }
+        "recall" => serde_json::to_value(store.search_memories(
+            required_string(arguments, "workspace")?,
+            required_string(arguments, "query")?,
+            number_argument(arguments, "limit", 10, ResourceBudget::MAX_RESULTS)?,
+        )?)?,
+        "forget" => {
+            let id = required_string(arguments, "id")?;
+            json!({ "id": id, "forgotten": store.forget(id)? })
+        }
+        _ => anyhow::bail!("unsupported memory action: {action}"),
+    })
 }
 
 pub fn format_explore_text(
