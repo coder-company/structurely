@@ -1,0 +1,109 @@
+{
+  "protocol": {
+    "trials": 5,
+    "query_processes": 20,
+    "query": "CodeGraph",
+    "corpus_files": 441
+  },
+  "structurely": {
+    "commit": "9e6968e",
+    "fresh_index_wall_samples_ms": [
+      2688.131693,
+      2675.052805,
+      2791.986933,
+      2780.41766,
+      2687.069076
+    ],
+    "fresh_index_wall_p50_ms": 2688.131693,
+    "reported_engine_samples_ms": [2651, 2641, 2748, 2736, 2646],
+    "reported_engine_p50_ms": 2651,
+    "query_samples_us": [
+      33584,
+      33263,
+      33594,
+      33502,
+      33395,
+      33708,
+      33233,
+      33302,
+      34052,
+      33010,
+      33089,
+      34202,
+      35519,
+      33666,
+      33209,
+      33960,
+      35038,
+      33441,
+      33097,
+      42060
+    ],
+    "query_p50_us": 33543.0,
+    "query_p95_us": 42060,
+    "database_bytes": 42426368,
+    "indexed_files": 441,
+    "symbols": 5177,
+    "relationships": 34341,
+    "max_rss_kb": 153460
+  },
+  "codegraph": {
+    "version": "1.5.0",
+    "commit": "572d22bfbe82602080e457bec655f72e3314f9ef",
+    "fresh_index_wall_samples_ms": [
+      6646.641803,
+      6615.07264,
+      6705.576039,
+      6625.15346,
+      6722.360854
+    ],
+    "fresh_index_wall_p50_ms": 6646.641803,
+    "reported_engine_samples_ms": [3200, 3200, 3300, 3200, 3200],
+    "reported_engine_p50_ms": 3200,
+    "query_samples_us": [
+      295135,
+      296409,
+      303996,
+      310057,
+      302026,
+      301118,
+      314545,
+      302390,
+      311993,
+      303847,
+      302579,
+      304150,
+      297501,
+      306187,
+      311360,
+      300229,
+      315416,
+      303310,
+      322020,
+      310265
+    ],
+    "query_p50_us": 303921.5,
+    "query_p95_us": 322020,
+    "database_bytes": 44453888,
+    "indexed_files": 441,
+    "nodes": 8957,
+    "edges": 35801,
+    "max_rss_kb": 1011268
+  },
+  "semantic_identity": {
+    "baseline_commit": "ab92dc7",
+    "hardened_commit": "9e6968e",
+    "files": 441,
+    "symbols": 5213,
+    "relationships": 38538,
+    "snapshots_byte_identical": true,
+    "snapshot_sha256": "ca6bc9d28ab05367a6e14509aecb4b7f4ac1a08bcddcec0b5aec70c697a806e9"
+  },
+  "acceptance": {
+    "index_speedup": 2.4725878647642583,
+    "query_speedup": 9.060653489550726,
+    "minimum_index_speedup": 2.0,
+    "minimum_query_speedup": 2.0,
+    "passed": true
+  }
+}

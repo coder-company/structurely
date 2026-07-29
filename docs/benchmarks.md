@@ -68,6 +68,15 @@ The enforced
 preserves both 2× gates: Structurely is 2.450× faster to index, 9.024× faster
 at query p50, and 7.375× faster at query p95 while using 86.44% less peak
 memory and a 4.59% smaller database.
+The subsequent
+[`production-hardening gate`](../benchmarks/hardening-2026-07-29/README.md)
+proves that bounded source snapshots, atomic concurrent epoch publication, and
+self-healing daemon reconciliation preserve the performance contract:
+Structurely is 2.473× faster to index, 9.061× faster at query p50, and 7.656×
+faster at query p95 while using 84.83% less peak memory and a 4.56% smaller
+database. Its graph-model-v68 snapshot is byte-identical to the independently
+built pre-hardening baseline across 441 files, 5,213 symbols, and 38,538
+relationships.
 The pinned
 [`OpenHarmony call-result gate`](../benchmarks/openharmony-call-result-2026-07-29/README.md)
 passes 16/16 correlated assertions across 6,995 ETS files. Its new assertion
