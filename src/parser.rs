@@ -921,17 +921,20 @@ fn invoked_parameter(
                 | "method_definition"
                 | "function_definition"
         ) {
-            let parameters = node.child_by_field_name("parameters")?;
-            let parameter_index = direct_parameter_names(parameters, source)
-                .iter()
-                .position(|parameter| parameter.as_deref() == Some(name))?;
-            let owner_id = symbol_owners
-                .get(&(node.start_byte(), node.end_byte()))
-                .cloned()?;
-            return Some(CallbackParameterInvocation {
-                owner_id,
-                parameter_index,
-            });
+            if let Some(parameters) = node.child_by_field_name("parameters") {
+                if let Some(parameter_index) = direct_parameter_names(parameters, source)
+                    .iter()
+                    .position(|parameter| parameter.as_deref() == Some(name))
+                {
+                    let owner_id = symbol_owners
+                        .get(&(node.start_byte(), node.end_byte()))
+                        .cloned()?;
+                    return Some(CallbackParameterInvocation {
+                        owner_id,
+                        parameter_index,
+                    });
+                }
+            }
         }
         ancestor = node.parent();
     }

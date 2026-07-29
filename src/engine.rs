@@ -1976,6 +1976,37 @@ mod tests {
     }
 
     #[test]
+    fn outer_callback_parameters_invoked_from_nested_closures_propagate() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("main.ts"),
+            "function selected() {}\n\
+             function invoke(callback: () => void) {\n\
+               [1].forEach((value: number) => callback())\n\
+             }\n\
+             function caller() { invoke(selected) }\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let invoke = engine
+            .search("invoke", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.name == "invoke")
+            .unwrap()
+            .symbol;
+        let callbacks = engine
+            .callees(&invoke.id)
+            .unwrap()
+            .into_iter()
+            .filter(|(_, evidence)| evidence.provenance == "dynamic/callback-argument")
+            .collect::<Vec<_>>();
+        assert_eq!(callbacks.len(), 1);
+        assert_eq!(callbacks[0].0.name, "selected");
+        assert_eq!(callbacks[0].1.line, 5);
+    }
+
+    #[test]
     fn callback_arguments_resolve_verified_imported_callables() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(
@@ -2104,10 +2135,14 @@ mod tests {
              function never(callback: () => void) {}\n\
              function defaulted(callback = selected) { callback(); }\n\
              function forwarding(callback: () => void) { invoke(callback); }\n\
+             function shadowed(callback: () => void) {\n\
+               [1].forEach((callback: () => void) => callback())\n\
+             }\n\
              function caller() {\n\
                never(selected);\n\
                defaulted(selected);\n\
                invoke(() => selected());\n\
+               shadowed(selected);\n\
              }\n\
              class First { ambiguous(callback: () => void) { callback(); } }\n\
              class Second { ambiguous(callback: () => void) { callback(); } }\n\
@@ -2115,7 +2150,7 @@ mod tests {
         )
         .unwrap();
         let (engine, _) = Engine::init(temp.path()).unwrap();
-        for name in ["invoke", "never", "defaulted", "ambiguous"] {
+        for name in ["invoke", "never", "defaulted", "shadowed", "ambiguous"] {
             for symbol in engine
                 .search(name, 20)
                 .unwrap()
