@@ -3450,6 +3450,64 @@ mod tests {
     }
 
     #[test]
+    fn python_positional_lambda_callbacks_are_exact_fail_closed_and_incremental() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("main.py");
+        let initial = "def selected():\n    pass\n\
+                       \n\
+                       def invoke(value, callback):\n    callback()\n\
+                       \n\
+                       def caller(values):\n    invoke(1, lambda: selected())\n    invoke(*values, lambda: selected())\n    invoke(callback=lambda: selected(), value=1)\n";
+        fs::write(&path, initial).unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let symbol = |engine: &Engine, qualified_name: &str| {
+            engine
+                .search(qualified_name, 20)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.qualified_name == qualified_name)
+                .unwrap()
+                .symbol
+        };
+        let invoke = symbol(&engine, "invoke");
+        let callbacks = engine
+            .callees(&invoke.id)
+            .unwrap()
+            .into_iter()
+            .filter(|(_, evidence)| evidence.provenance == "dynamic/callback-argument")
+            .collect::<Vec<_>>();
+        assert_eq!(callbacks.len(), 1);
+        assert_eq!(callbacks[0].0.name, "<callback invoke argument 2 #1>");
+        assert_eq!(callbacks[0].1.confidence, 0.96);
+        let callback = callbacks[0].0.clone();
+        assert!(engine
+            .callees(&callback.id)
+            .unwrap()
+            .iter()
+            .any(|(target, evidence)| {
+                target.qualified_name == "selected"
+                    && evidence.provenance == "tree-sitter/name-resolution"
+            }));
+
+        fs::write(
+            &path,
+            initial.replace("invoke(1, lambda: selected())", "selected()"),
+        )
+        .unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 1);
+        assert!(engine
+            .search("<callback invoke argument 2 #1>", 20)
+            .unwrap()
+            .into_iter()
+            .all(|hit| hit.symbol.id != callback.id));
+        assert!(engine
+            .callees(&invoke.id)
+            .unwrap()
+            .iter()
+            .all(|(_, evidence)| evidence.provenance != "dynamic/callback-argument"));
+    }
+
+    #[test]
     fn inline_callbacks_resolve_nested_and_delegated_flows_to_a_bounded_fixed_point() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("main.ts");

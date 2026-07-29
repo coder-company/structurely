@@ -960,12 +960,27 @@ impl InlineCallbackCollection<'_> {
                     (caller, node.child_by_field_name("arguments"))
                 {
                     let mut cursor = arguments.walk();
+                    let mut positional_mapping_unsafe = false;
                     for (argument_index, argument) in arguments
                         .named_children(&mut cursor)
                         .filter(|argument| !argument.is_extra())
                         .enumerate()
                     {
-                        if !matches!(argument.kind(), "arrow_function" | "function_expression") {
+                        if self.language == Language::Python
+                            && matches!(
+                                argument.kind(),
+                                "keyword_argument"
+                                    | "list_splat"
+                                    | "dictionary_splat"
+                                    | "generator_expression"
+                            )
+                        {
+                            positional_mapping_unsafe = true;
+                            continue;
+                        }
+                        if positional_mapping_unsafe
+                            || !is_inline_callback_argument(argument, self.language)
+                        {
                             continue;
                         }
                         let ordinal = self
@@ -1032,6 +1047,11 @@ fn collect_inline_callback_symbols(
     };
     collection.visit(root);
     collection.output
+}
+
+fn is_inline_callback_argument(argument: Node<'_>, language: Language) -> bool {
+    matches!(argument.kind(), "arrow_function" | "function_expression")
+        || (language == Language::Python && argument.kind() == "lambda")
 }
 
 fn collect_calls(
@@ -1220,6 +1240,7 @@ fn invoked_parameter(
             "function_declaration"
                 | "function_expression"
                 | "arrow_function"
+                | "lambda"
                 | "method_definition"
                 | "function_definition"
         ) {
@@ -1235,6 +1256,9 @@ fn invoked_parameter(
                         owner_id,
                         parameter_index,
                     });
+                }
+                if parameter_tree_declares_name(parameters, name, source) {
+                    return None;
                 }
             }
         }
@@ -1626,7 +1650,9 @@ fn direct_parameter_names(parameters: Node<'_>, source: &[u8]) -> Vec<Option<Str
         .filter(|parameter| !parameter.is_extra())
         .map(|parameter| {
             let raw = node_text(parameter, source);
-            if raw.contains("...")
+            if parameter_contains_variadic_form(parameter)
+                || raw.contains("...")
+                || raw.trim_start().starts_with('*')
                 || raw.replace("=>", "").contains('=')
                 || raw.trim_start().starts_with(['{', '['])
             {
@@ -1652,6 +1678,20 @@ fn direct_parameter_names(parameters: Node<'_>, source: &[u8]) -> Vec<Option<Str
         .collect()
 }
 
+fn parameter_contains_variadic_form(node: Node<'_>) -> bool {
+    if matches!(
+        node.kind(),
+        "list_splat" | "dictionary_splat" | "rest_pattern" | "variadic_parameter"
+    ) {
+        return true;
+    }
+    let mut cursor = node.walk();
+    let contains = node
+        .named_children(&mut cursor)
+        .any(parameter_contains_variadic_form);
+    contains
+}
+
 fn collect_callback_arguments(
     call: Node<'_>,
     callee_name: &str,
@@ -1664,11 +1704,24 @@ fn collect_callback_arguments(
         return;
     };
     let mut cursor = arguments.walk();
+    let mut positional_mapping_unsafe = false;
     for (argument_index, argument) in arguments
         .named_children(&mut cursor)
         .filter(|argument| !argument.is_extra())
         .enumerate()
     {
+        if context.language == Language::Python
+            && matches!(
+                argument.kind(),
+                "keyword_argument" | "list_splat" | "dictionary_splat" | "generator_expression"
+            )
+        {
+            positional_mapping_unsafe = true;
+            continue;
+        }
+        if positional_mapping_unsafe {
+            continue;
+        }
         match referenced_parameter(call, argument, context.source, context.symbol_owners) {
             ParameterReference::Exact {
                 owner_id,
@@ -1711,7 +1764,9 @@ fn collect_callback_arguments(
                     None,
                 )
             }
-            "arrow_function" | "function_expression" => {
+            "arrow_function" | "function_expression" | "lambda"
+                if is_inline_callback_argument(argument, context.language) =>
+            {
                 let Some(symbol) = context
                     .inline_callback_symbols
                     .get(&(argument.start_byte(), argument.end_byte()))
@@ -1796,6 +1851,7 @@ fn referenced_parameter(
             "function_declaration"
                 | "function_expression"
                 | "arrow_function"
+                | "lambda"
                 | "method_definition"
                 | "function_definition"
         ) {
@@ -1850,16 +1906,28 @@ fn parameter_tree_declares_name(node: Node<'_>, name: &str, source: &[u8]) -> bo
 }
 
 fn parameter_mutated_before(callable: Node<'_>, call: Node<'_>, name: &str, source: &[u8]) -> bool {
-    fn visit(node: Node<'_>, before: usize, name: &str, source: &[u8]) -> bool {
+    fn visit(
+        node: Node<'_>,
+        callable_start: usize,
+        before: usize,
+        name: &str,
+        source: &[u8],
+    ) -> bool {
         if node.start_byte() >= before {
             return false;
         }
         let mut cursor = node.walk();
         let children = node.named_children(&mut cursor).collect::<Vec<_>>();
         let assigned = match node.kind() {
-            "assignment_expression" | "augmented_assignment_expression" => node
+            "assignment_expression"
+            | "assignment"
+            | "augmented_assignment_expression"
+            | "augmented_assignment" => node
                 .child_by_field_name("left")
                 .or_else(|| node.child_by_field_name("target"))
+                .is_some_and(|target| target_contains_identifier(target, name, source)),
+            "named_expression" => node
+                .child_by_field_name("name")
                 .is_some_and(|target| target_contains_identifier(target, name, source)),
             "update_expression" => children
                 .iter()
@@ -1867,15 +1935,41 @@ fn parameter_mutated_before(callable: Node<'_>, call: Node<'_>, name: &str, sour
             "for_in_statement" | "for_of_statement" => node
                 .child_by_field_name("left")
                 .is_some_and(|target| target_contains_identifier(target, name, source)),
+            "for_statement" => node
+                .child_by_field_name("left")
+                .is_some_and(|target| target_contains_identifier(target, name, source)),
+            "with_item" | "except_clause" | "as_pattern" | "aliased_import" => node
+                .child_by_field_name("alias")
+                .or_else(|| node.child_by_field_name("name"))
+                .is_some_and(|target| target_contains_identifier(target, name, source)),
+            "case_pattern" | "except_group_clause" => {
+                target_contains_identifier(node, name, source)
+            }
+            "delete_statement" => children
+                .iter()
+                .any(|child| target_contains_identifier(*child, name, source)),
+            "import_statement" | "import_from_statement" => {
+                target_contains_identifier(node, name, source)
+            }
+            "function_definition" | "class_definition" if node.start_byte() != callable_start => {
+                node.child_by_field_name("name")
+                    .is_some_and(|target| target_contains_identifier(target, name, source))
+            }
             _ => false,
         };
         assigned
             || children
                 .into_iter()
-                .any(|child| visit(child, before, name, source))
+                .any(|child| visit(child, callable_start, before, name, source))
     }
 
-    visit(callable, call.start_byte(), name, source)
+    visit(
+        callable,
+        callable.start_byte(),
+        call.start_byte(),
+        name,
+        source,
+    )
 }
 
 fn target_contains_identifier(node: Node<'_>, name: &str, source: &[u8]) -> bool {
@@ -2822,6 +2916,102 @@ mod tests {
             .symbols
             .iter()
             .all(|symbol| symbol.id != inline_symbol.id));
+    }
+
+    #[test]
+    fn python_positional_lambdas_materialize_exact_callback_facts() {
+        let facts = parse_file(
+            "main.py",
+            "def selected():\n    pass\n\
+             def invoke(value, callback):\n    callback()\n\
+             def caller():\n    invoke(1, lambda: selected())\n",
+        )
+        .unwrap();
+        assert!(facts
+            .callback_parameter_invocations
+            .iter()
+            .any(|invocation| invocation.parameter_index == 1));
+        let argument = facts
+            .callback_arguments
+            .iter()
+            .find(|argument| argument.callee_name == "invoke")
+            .unwrap();
+        assert_eq!(argument.argument_index, 1);
+        assert_eq!(
+            argument.target_symbol.as_ref().unwrap().name,
+            "<callback invoke argument 2 #1>"
+        );
+    }
+
+    #[test]
+    fn python_lambda_callbacks_fail_closed_after_non_positional_arguments() {
+        for source in [
+            "def invoke(callback):\n    callback()\n\ndef caller():\n    invoke(callback=lambda: None)\n",
+            "def invoke(value, callback):\n    callback()\n\ndef caller(values):\n    invoke(*values, lambda: None)\n",
+            "def invoke(value, callback):\n    callback()\n\ndef caller(values):\n    invoke(**values, lambda: None)\n",
+            "def invoke(value, callback):\n    callback()\n\ndef caller(values):\n    invoke((value for value in values), lambda: None)\n",
+        ] {
+            let facts = parse_file("main.py", source).unwrap();
+            assert!(
+                facts
+                    .callback_arguments
+                    .iter()
+                    .all(|argument| argument.target_symbol.is_none()),
+                "unexpected Python lambda callback for {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn python_callback_parameters_stop_at_lambda_shadows_and_mutations() {
+        let facts = parse_file(
+            "main.py",
+            "def leaf(callback):\n    callback()\n\
+             def shadowed(callback):\n    (lambda callback: leaf(callback))(other)\n\
+             def assigned(callback):\n    callback = other\n    leaf(callback)\n\
+             def augmented(callback):\n    callback += other\n    leaf(callback)\n\
+             def named(callback):\n    (callback := other)\n    leaf(callback)\n",
+        )
+        .unwrap();
+        assert!(
+            facts.callback_parameter_delegations.is_empty(),
+            "{:?}",
+            facts.callback_parameter_delegations
+        );
+    }
+
+    #[test]
+    fn python_variadic_formals_and_loop_rebindings_do_not_delegate_callbacks() {
+        let facts = parse_file(
+            "main.py",
+            "def leaf(callback):\n    callback()\n\
+             def positional(*callback):\n    leaf(callback)\n\
+             def keywords(**callback):\n    leaf(callback)\n\
+             def wrapped(*callback: object):\n    leaf(callback)\n\
+             def looped(callback, values):\n    for callback in values:\n        pass\n    leaf(callback)\n",
+        )
+        .unwrap();
+        assert!(
+            facts.callback_parameter_delegations.is_empty(),
+            "{:?}",
+            facts.callback_parameter_delegations
+        );
+    }
+
+    #[test]
+    fn python_match_and_exception_group_captures_do_not_delegate_callbacks() {
+        let facts = parse_file(
+            "main.py",
+            "def leaf(callback):\n    callback()\n\
+             def matched(callback, value):\n    match value:\n        case callback:\n            leaf(callback)\n\
+             def grouped(callback):\n    try:\n        raise ExceptionGroup('errors', [ValueError()])\n    except* ValueError as callback:\n        leaf(callback)\n",
+        )
+        .unwrap();
+        assert!(
+            facts.callback_parameter_delegations.is_empty(),
+            "{:?}",
+            facts.callback_parameter_delegations
+        );
     }
 
     #[test]
