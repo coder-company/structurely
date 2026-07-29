@@ -801,14 +801,32 @@ struct ArkuiBuilder {
     owner: Option<String>,
 }
 
+#[derive(Clone)]
+struct ArkuiBuilderParam {
+    owner: String,
+    name: String,
+}
+
 fn collect_arkui_builder_registrations(root: Node<'_>, source: &[u8], facts: &mut FileFacts) {
     let mut builders = Vec::new();
     collect_arkui_builders(root, source, facts, &mut builders);
     if builders.is_empty() {
         return;
     }
+    let mut builder_params = Vec::new();
+    collect_arkui_builder_params(root, source, &mut builder_params);
     let mut emitted = HashSet::new();
     collect_arkui_builder_registration_calls(root, source, facts, &builders, &mut emitted);
+    if !builder_params.is_empty() {
+        collect_arkui_builder_param_assignments(
+            root,
+            source,
+            facts,
+            &builders,
+            &builder_params,
+            &mut emitted,
+        );
+    }
 }
 
 fn collect_arkui_builders(
@@ -864,6 +882,171 @@ fn enclosing_arkui_struct_name(node: Node<'_>, source: &[u8]) -> Option<String> 
         ancestor = candidate.parent();
     }
     None
+}
+
+fn collect_arkui_builder_params(
+    node: Node<'_>,
+    source: &[u8],
+    output: &mut Vec<ArkuiBuilderParam>,
+) {
+    if node.kind() == "public_field_definition" && has_decorator(node, "BuilderParam", source) {
+        if let (Some(owner), Some(name)) = (
+            enclosing_arkui_struct_name(node, source),
+            node.child_by_field_name("name")
+                .map(|name| text(name, source)),
+        ) {
+            output.push(ArkuiBuilderParam { owner, name });
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_arkui_builder_params(child, source, output);
+    }
+}
+
+fn collect_arkui_builder_param_assignments(
+    node: Node<'_>,
+    source: &[u8],
+    facts: &mut FileFacts,
+    builders: &[ArkuiBuilder],
+    builder_params: &[ArkuiBuilderParam],
+    emitted: &mut HashSet<(String, String, usize)>,
+) {
+    if node.kind() == "arkui_component_expression" {
+        enrich_arkui_builder_param_assignment(
+            node,
+            source,
+            facts,
+            builders,
+            builder_params,
+            emitted,
+        );
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_arkui_builder_param_assignments(
+            child,
+            source,
+            facts,
+            builders,
+            builder_params,
+            emitted,
+        );
+    }
+}
+
+fn enrich_arkui_builder_param_assignment(
+    component: Node<'_>,
+    source: &[u8],
+    facts: &mut FileFacts,
+    builders: &[ArkuiBuilder],
+    builder_params: &[ArkuiBuilderParam],
+    emitted: &mut HashSet<(String, String, usize)>,
+) {
+    let Some(component_name) = component
+        .child_by_field_name("function")
+        .filter(|function| matches!(function.kind(), "identifier" | "type_identifier"))
+        .map(|function| text(function, source))
+    else {
+        return;
+    };
+    let component_candidates = facts
+        .symbols
+        .iter()
+        .filter(|symbol| {
+            symbol.name == component_name
+                && symbol.qualified_name == component_name
+                && matches!(symbol.kind, SymbolKind::Struct | SymbolKind::Component)
+        })
+        .count();
+    if component_candidates != 1 {
+        return;
+    }
+    let params = builder_params
+        .iter()
+        .filter(|param| param.owner == component_name)
+        .collect::<Vec<_>>();
+    if params.is_empty() {
+        return;
+    }
+    let Some(arguments) = component.child_by_field_name("arguments") else {
+        return;
+    };
+    let caller = match owning_callable_symbol(component, &facts.symbols) {
+        Some(caller) => caller.clone(),
+        None => return,
+    };
+    let caller_owner = caller
+        .qualified_name
+        .rsplit_once('.')
+        .map(|(owner, _)| owner);
+    let mut argument_cursor = arguments.walk();
+    for object in arguments
+        .named_children(&mut argument_cursor)
+        .filter(|argument| argument.kind() == "object")
+    {
+        let mut pair_cursor = object.walk();
+        for pair in object
+            .named_children(&mut pair_cursor)
+            .filter(|child| child.kind() == "pair")
+        {
+            let Some(key) = pair.child_by_field_name("key") else {
+                continue;
+            };
+            let param_name = text(key, source).trim_matches(['\'', '"']).to_owned();
+            if !params.iter().any(|param| param.name == param_name) {
+                continue;
+            }
+            let Some(value) = pair.child_by_field_name("value") else {
+                continue;
+            };
+            let Some(builder_name) = exact_this_member_name(value, source) else {
+                continue;
+            };
+            let candidates = builders
+                .iter()
+                .filter(|builder| {
+                    builder.target.name == builder_name && builder.owner.as_deref() == caller_owner
+                })
+                .collect::<Vec<_>>();
+            if candidates.len() != 1 {
+                continue;
+            }
+            let target = &candidates[0].target;
+            if !emitted.insert((caller.id.clone(), target.id.clone(), pair.start_byte())) {
+                continue;
+            }
+            facts.relationships.push(Relationship {
+                source_id: caller.id.clone(),
+                target_id: target.id.clone(),
+                kind: RelationshipKind::Calls,
+                evidence: Evidence::new(
+                    "framework/arkui-builder-param",
+                    0.97,
+                    format!(
+                        "{} assigns decorated ArkUI builder {} to \
+                         {component_name}.{param_name}",
+                        caller.qualified_name, target.qualified_name
+                    ),
+                    &facts.path,
+                    pair.start_position().row + 1,
+                ),
+            });
+        }
+    }
+}
+
+fn exact_this_member_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    if node.kind() != "member_expression"
+        || node
+            .child_by_field_name("object")
+            .is_none_or(|object| text(object, source) != "this")
+    {
+        return None;
+    }
+    node.child_by_field_name("property")
+        .filter(|property| matches!(property.kind(), "property_identifier" | "identifier"))
+        .map(|property| text(property, source))
 }
 
 fn collect_arkui_builder_registration_calls(
@@ -1009,22 +1192,10 @@ fn enrich_arkui_builder_registration_arguments(
             if text(key, source).trim_matches(['\'', '"']) != "builder" {
                 continue;
             }
-            let Some(value) = pair
-                .child_by_field_name("value")
-                .filter(|value| value.kind() == "member_expression")
-            else {
+            let Some(value) = pair.child_by_field_name("value") else {
                 continue;
             };
-            if value
-                .child_by_field_name("object")
-                .is_none_or(|object| text(object, source) != "this")
-            {
-                continue;
-            }
-            let Some(name) = value
-                .child_by_field_name("property")
-                .map(|property| text(property, source))
-            else {
+            let Some(name) = exact_this_member_name(value, source) else {
                 continue;
             };
             let candidates = builders

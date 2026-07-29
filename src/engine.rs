@@ -3524,6 +3524,86 @@ mod tests {
     }
 
     #[test]
+    fn arkui_builder_params_require_exact_fields_and_same_owner_decorated_members() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("BuilderParam.ets");
+        fs::write(
+            &source,
+            "@Component\n\
+             struct Slot {\n\
+               @BuilderParam content: any\n\
+               @BuilderParam legend: any\n\
+               build() { Column() { this.content(); this.legend() } }\n\
+             }\n\
+             @Component\n\
+             struct Host {\n\
+               @Builder content() { Text('content') }\n\
+               @Builder legend() { Text('legend') }\n\
+               plain() { Text('plain') }\n\
+               build() {\n\
+                 Slot({ content: this.content, 'legend': this.legend })\n\
+                 Slot({ content: this.plain })\n\
+                 Slot({ missing: this.content })\n\
+                 Slot({ content: other.content })\n\
+                 Slot({ content })\n\
+               }\n\
+             }\n\
+             @Component\n\
+             struct Other {\n\
+               @Builder content() { Text('other') }\n\
+               build() { Column() }\n\
+             }\n",
+        )
+        .unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let targets = |engine: &Engine| {
+            let build = engine
+                .search("Host.build", 10)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.qualified_name == "Host.build")
+                .unwrap()
+                .symbol;
+            engine
+                .callees(&build.id)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, evidence)| evidence.provenance == "framework/arkui-builder-param")
+                .collect::<Vec<_>>()
+        };
+        let assigned = targets(&engine);
+        assert_eq!(assigned.len(), 2);
+        assert_eq!(
+            assigned
+                .iter()
+                .map(|(target, evidence)| (
+                    target.qualified_name.as_str(),
+                    evidence.confidence,
+                    evidence.line
+                ))
+                .collect::<Vec<_>>(),
+            vec![("Host.content", 0.97, 13), ("Host.legend", 0.97, 13)]
+        );
+
+        fs::write(
+            &source,
+            "@Component\n\
+             struct Slot {\n\
+               @BuilderParam content: any\n\
+               build() { this.content() }\n\
+             }\n\
+             @Component\n\
+             struct Host {\n\
+               @Builder content() { Text('content') }\n\
+               build() { Slot({ missing: this.content }) }\n\
+             }\n",
+        )
+        .unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 1);
+        assert!(targets(&engine).is_empty());
+    }
+
+    #[test]
     fn harmony_emitter_resolves_imported_exported_descriptors_and_literals() {
         let temp = tempfile::tempdir().unwrap();
         fs::create_dir_all(temp.path().join("app/AppScope")).unwrap();

@@ -388,6 +388,22 @@
             "\"confidence\": 0.96",
             "\"line\": 401"
           ]
+        },
+        {
+          "command": "callees",
+          "query": "HeatHistogramContent.build",
+          "file": "code/SuperFeature/MultiDeviceAppDev/HealthyDiet/entry/src/main/ets/pages/components/DietRecord.ets",
+          "contains": [
+            "\"qualified_name\": \"HeatHistogramContent.content\"",
+            "\"provenance\": \"framework/arkui-builder-param\""
+          ],
+          "recordContains": [
+            "\"qualified_name\": \"HeatHistogramContent.content\"",
+            "code/SuperFeature/MultiDeviceAppDev/HealthyDiet/entry/src/main/ets/pages/components/DietRecord.ets",
+            "\"provenance\": \"framework/arkui-builder-param\"",
+            "\"confidence\": 0.97",
+            "\"line\": 179"
+          ]
         }
       ]
     }
