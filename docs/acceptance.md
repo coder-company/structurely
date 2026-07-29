@@ -161,6 +161,11 @@ to v59 and the relationship schema to v2. It resolves exactly 36 LightRAG and
 `get_graphiti` → `get_settings` paths, with distinct evidence-site identity,
 exact callable/file provenance, and bounded fail-closed alias and factory
 resolution.
+The `benchmarks/c-function-pointer-2026-07-29/` gate advances the graph model
+to v60 and resolves two exact OpenHarmony player callback flows plus 23
+libsamplerate table-dispatch relationships. The pinned 16-file corpus includes
+14 `src_process` may-call edges to seven exact implementations and proves
+incremental removal, rebinding, and restoration without stale edges.
 
 The authoritative capability inventory is
 [`codegraph-parity.md`](codegraph-parity.md). A matching command name or schema

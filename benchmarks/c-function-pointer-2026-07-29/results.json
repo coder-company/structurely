@@ -1,0 +1,119 @@
+{
+  "passed": true,
+  "checks": {
+    "pinnedOpenHarmonyRepository": true,
+    "exactAudioToVideoSyncReleaseDispatch": true,
+    "exactAvCodecReleaseDispatch": true,
+    "exactLibsamplerateProcessDispatch": true,
+    "incrementalCleanupRebindingAndRestore": true,
+    "ownedProvenanceAndEvidenceSites": true,
+    "noLeakageOrDuplicateEvidence": true
+  },
+  "structurelyBinarySha256": "43302a11e9fced4bb092c2ee351c7b6a7f06c98a7397a351620fbb6361712853",
+  "repository": {
+    "name": "openharmony",
+    "commit": "a826ab0e75fe51d028c1c5af58188e908736b53b",
+    "selectedFiles": 16
+  },
+  "corpora": {
+    "audioToVideoSync": {
+      "checks": {
+        "exactReleaseToCallbackEdge": true,
+        "qualifiedSourceAndTarget": true,
+        "sourceAndTargetFiles": true,
+        "callsWithOwnedInvocationEvidence": true,
+        "stableNonzeroEvidenceSite": true,
+        "noLeakageOrDuplicates": true
+      },
+      "directEdges": 1,
+      "edge": {
+        "source": "Release",
+        "target": "Callback",
+        "sourceFile": "code/BasicFeature/Media/AudioToVideoSync/entry/src/main/cpp/player/Player.cpp",
+        "targetFile": "code/BasicFeature/Media/AudioToVideoSync/entry/src/main/cpp/player/PlayerNative.cpp",
+        "evidenceLine": 243,
+        "evidenceSite": 9405,
+        "provenance": "dynamic/c-function-pointer-dispatch"
+      },
+      "files": 5,
+      "symbols": 32,
+      "relationships": 47,
+      "freshIndexWallMs": 53.859,
+      "engineDurationMs": 31,
+      "incremental": {
+        "checks": {
+          "removedBindingCleansDispatch": true,
+          "reboundBindingChangesTarget": true,
+          "restoredBindingRestoresTarget": true,
+          "syncUsesSamePersistentIndex": true
+        },
+        "cleanup": {
+          "wallMs": 22.956,
+          "engineDurationMs": 19,
+          "dispatchEdges": 0
+        },
+        "rebind": {
+          "wallMs": 24.352,
+          "engineDurationMs": 21,
+          "target": "ReplacementCallback"
+        },
+        "restore": {
+          "wallMs": 22.393,
+          "engineDurationMs": 19,
+          "target": "Callback"
+        }
+      }
+    },
+    "avCodec": {
+      "checks": {
+        "exactReleaseToCallbackEdge": true,
+        "qualifiedSourceAndTarget": true,
+        "sourceAndTargetFiles": true,
+        "callsWithOwnedInvocationEvidence": true,
+        "stableNonzeroEvidenceSite": true,
+        "noLeakageOrDuplicates": true
+      },
+      "directEdges": 1,
+      "edge": {
+        "source": "Release",
+        "target": "Callback",
+        "sourceFile": "code/BasicFeature/Media/AVCodec/entry/src/main/cpp/sample/player/Player.cpp",
+        "targetFile": "code/BasicFeature/Media/AVCodec/entry/src/main/cpp/sample/player/PlayerNative.cpp",
+        "evidenceLine": 366,
+        "evidenceSite": 12558,
+        "provenance": "dynamic/c-function-pointer-dispatch"
+      },
+      "files": 5,
+      "symbols": 44,
+      "relationships": 80,
+      "freshIndexWallMs": 56.159,
+      "engineDurationMs": 38
+    },
+    "libsamplerate": {
+      "checks": {
+        "exactSevenProcessTargetFunctions": true,
+        "exactFourteenProcessEdges": true,
+        "exactConstAndVariableDispatchSites": true,
+        "qualifiedSourceAndTargetFiles": true,
+        "stableNonzeroEvidenceSites": true,
+        "noDuplicateEvidenceIdentities": true
+      },
+      "srcProcessEdges": 14,
+      "srcProcessTargets": [
+        "linear_vari_process",
+        "sinc_hex_vari_process",
+        "sinc_mono_vari_process",
+        "sinc_multichan_vari_process",
+        "sinc_quad_vari_process",
+        "sinc_stereo_vari_process",
+        "zoh_vari_process"
+      ],
+      "allCorpusDispatchEdges": 23,
+      "files": 6,
+      "symbols": 74,
+      "relationships": 91,
+      "freshIndexWallMs": 62.066,
+      "engineDurationMs": 42
+    }
+  }
+}

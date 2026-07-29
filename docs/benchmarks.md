@@ -350,3 +350,10 @@ resolves exactly 49 production dependency sites across the same pinned
 repositories: 36 in LightRAG and 13 in Graphiti. Graphiti's direct edges form
 exactly ten endpoint → `get_graphiti` → `get_settings` paths. Every edge has
 exact target-file provenance and a distinct nonzero evidence-site identity.
+
+The
+[`C/C++ function-pointer gate`](../benchmarks/c-function-pointer-2026-07-29/README.md)
+resolves exact `Release → Callback` flows in two pinned OpenHarmony players and
+23 libsamplerate table-dispatch relationships. Its 14 `src_process` edges cover
+both dispatch sites and seven exact implementations. Incremental mutation
+proves stale-edge removal and exact callback rebinding.
