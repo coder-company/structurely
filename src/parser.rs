@@ -3,7 +3,7 @@ use crate::model::{
     CallbackParameterInvocation, Evidence, FileFacts, Language, Relationship, RelationshipKind,
     SourceSpan, Symbol, SymbolKind, UnresolvedCall, UnresolvedReference,
 };
-use crate::semantic::enrich_file_facts;
+use crate::semantic::{enrich_file_facts, is_arkui_intrinsic_name};
 use anyhow::{anyhow, Context, Result};
 use std::collections::HashMap;
 #[cfg(test)]
@@ -114,12 +114,20 @@ pub(crate) fn parse_file_as(
     let mut receiver_bindings = HashMap::<String, Vec<(usize, String)>>::new();
     collect_receiver_bindings(tree.root_node(), source_bytes, &mut receiver_bindings);
     let module_bindings = collect_module_bindings(tree.root_node(), source_bytes, language);
+    let project_names = symbols
+        .iter()
+        .skip(1)
+        .map(|symbol| symbol.name.as_str())
+        .chain(module_bindings.keys().map(String::as_str))
+        .collect::<std::collections::HashSet<_>>();
     let call_context = CallCollectionContext {
         source: source_bytes,
+        language,
         file: relative_path,
         symbol_owners: &symbol_owners,
         receiver_bindings: &receiver_bindings,
         module_bindings: &module_bindings,
+        project_names: &project_names,
         inline_callback_symbols: &inline_callback_symbols,
         inline_callback_ids: &inline_callback_ids,
         file_symbol_id: &file_symbol.id,
@@ -855,10 +863,12 @@ fn rust_impl_container(node: Node<'_>, source: &[u8], parent: Option<&str>) -> O
 
 struct CallCollectionContext<'a> {
     source: &'a [u8],
+    language: Language,
     file: &'a str,
     symbol_owners: &'a HashMap<(usize, usize), String>,
     receiver_bindings: &'a HashMap<String, Vec<(usize, String)>>,
     module_bindings: &'a HashMap<String, String>,
+    project_names: &'a std::collections::HashSet<&'a str>,
     inline_callback_symbols: &'a HashMap<(usize, usize), Symbol>,
     inline_callback_ids: &'a std::collections::HashSet<String>,
     file_symbol_id: &'a str,
@@ -1042,7 +1052,7 @@ fn collect_calls(
                         context.source,
                         context.receiver_bindings,
                     ),
-                    receiver_call_start_byte: call_result_receiver(function),
+                    receiver_call_start_byte: call_result_receiver(function, context),
                     target_file_hint: call_receiver_name(function, context.source)
                         .and_then(|receiver| context.module_bindings.get(&receiver).cloned()),
                     provenance: "tree-sitter/name-resolution".to_owned(),
@@ -1086,16 +1096,28 @@ fn collect_calls(
     }
 }
 
-fn call_result_receiver(function: Node<'_>) -> Option<usize> {
+fn call_result_receiver(function: Node<'_>, context: &CallCollectionContext<'_>) -> Option<usize> {
     let receiver = function
         .child_by_field_name("object")
         .or_else(|| function.child_by_field_name("operand"))
         .or_else(|| function.child_by_field_name("value"))?;
-    matches!(
-        receiver.kind(),
-        "call_expression" | "arkui_component_expression"
-    )
-    .then(|| receiver.start_byte())
+    if receiver.kind() != "call_expression" {
+        return None;
+    }
+    if context.language == Language::ArkTs {
+        let receiver_name =
+            call_target_node(receiver).and_then(|target| call_name(target, context.source));
+        if receiver_name
+            .as_deref()
+            .is_some_and(is_arkui_intrinsic_name)
+            && receiver_name
+                .as_deref()
+                .is_none_or(|name| !context.project_names.contains(name))
+        {
+            return None;
+        }
+    }
+    Some(receiver.start_byte())
 }
 
 fn collect_module_bindings(
@@ -2258,5 +2280,38 @@ mod tests {
         assert!(names.contains(&"helper"));
         assert!(names.contains(&"run"));
         assert_eq!(facts.unresolved_calls[0].callee_name, "helper");
+    }
+
+    #[test]
+    fn arkui_component_extensions_are_not_factory_call_results() {
+        let facts = parse_file(
+            "Sample.ets",
+            "@Extend(Circle) function colorPicker(item: number, callback: () => void) {\n\
+               callback()\n\
+             }\n\
+             @Entry @Component struct Sample {\n\
+               colorArray: Color[] = [Color.Red]\n\
+               mColor: Color = Color.Red\n\
+               build() {\n\
+                 ForEach(this.colorArray, (item: Color, index) => {\n\
+                   Circle({ width: 20, height: 20 })\n\
+                     .colorPicker(item, () => {\n\
+                       this.mColor = item\n\
+                     }).id('circle' + index)\n\
+                 })\n\
+               }\n\
+             }\n",
+        )
+        .unwrap();
+        let color_picker = facts
+            .unresolved_calls
+            .iter()
+            .find(|call| call.callee_name == "colorPicker")
+            .unwrap();
+        assert_eq!(color_picker.receiver_call_start_byte, None);
+        assert!(facts
+            .callback_arguments
+            .iter()
+            .any(|argument| argument.callee_name == "colorPicker"));
     }
 }
