@@ -3611,7 +3611,7 @@ mod tests {
             "@Component\n\
              export struct Slot {\n\
                @BuilderParam content: () => void\n\
-               build() { this.content() }\n\
+               build() { Column() { this.content() } }\n\
              }\n\
              @Component\n\
              export struct MultiSlot {\n\

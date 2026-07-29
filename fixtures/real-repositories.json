@@ -407,7 +407,7 @@
         },
         {
           "command": "callees",
-          "query": "CodeView.codeView",
+          "query": "CodeView.build",
           "file": "code/UI/ArkTsComponentCollection/StateManagement/entry/src/main/ets/commoncomponents/CodeView.ets",
           "contains": [
             "\"qualified_name\": \"BrotherComponentSync.build.<BuilderParam child CodeView>\"",
@@ -423,7 +423,7 @@
         },
         {
           "command": "callees",
-          "query": "Index.build",
+          "query": "TitleExpansionView.build",
           "file": "code/UI/ExpandTitle/entry/src/main/ets/pages/Index.ets",
           "contains": [
             "\"qualified_name\": \"titleMenu\"",

@@ -524,7 +524,10 @@ fn collect_ohos_emitter_calls(
     imports: &std::collections::HashMap<String, ImportedEmitterValue>,
     callback_ordinal: &mut usize,
 ) {
-    if node.kind() == "call_expression" {
+    if matches!(
+        node.kind(),
+        "call_expression" | "arkui_component_expression"
+    ) {
         enrich_ohos_emitter_call(
             node,
             source,
