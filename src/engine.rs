@@ -6777,6 +6777,227 @@ mod tests {
     }
 
     #[test]
+    fn fastapi_resolves_bounded_immutable_string_route_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("api.py"),
+            r#"from fastapi import FastAPI
+ROOT = "/webui"
+API = "/api"
+VERSION = "/v1"
+
+def create_app():
+    webui_path = ROOT
+    combined = API + VERSION
+    app = FastAPI()
+
+    @app.get(webui_path)
+    def webui(): return True
+
+    @app.get(f"{webui_path}/")
+    def webui_slash(): return True
+
+    @app.get(combined + "/items")
+    def items(): return True
+
+    return app
+"#,
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let mut routes = engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .into_iter()
+            .filter(|symbol| symbol.kind == crate::model::SymbolKind::Route)
+            .map(|symbol| symbol.name)
+            .collect::<Vec<_>>();
+        routes.sort();
+        assert_eq!(routes, ["GET /api/v1/items", "GET /webui", "GET /webui/"]);
+    }
+
+    #[test]
+    fn fastapi_string_route_paths_fail_closed_on_mutation_shadowing_and_dynamic_expressions() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("api.py"),
+            r#"from fastapi import FastAPI
+from settings import IMPORTED
+
+ROOT = "/real"
+REASSIGNED = "/first"
+REASSIGNED = "/second"
+CYCLIC_A = CYCLIC_B
+CYCLIC_B = CYCLIC_A
+app = FastAPI()
+
+@app.get(ROOT)
+def real(): return True
+
+@app.get(REASSIGNED)
+def reassigned(): return False
+
+@app.get(IMPORTED)
+def imported(): return False
+
+@app.get(settings.PATH)
+def attribute(): return False
+
+@app.get(make_path())
+def called(): return False
+
+@app.get(f"{ROOT!r}")
+def converted(): return False
+
+@app.get(f"{ROOT:>20}")
+def formatted(): return False
+
+@app.get(CYCLIC_A)
+def cyclic(): return False
+
+def parameter_shadow(ROOT):
+    @app.get(ROOT)
+    def parameter(): return False
+
+def unresolved_nearer_shadow():
+    ROOT = make_path()
+    @app.get(ROOT)
+    def nearer(): return False
+
+def conditional_binding(flag):
+    if flag:
+        PATH = "/conditional"
+    @app.get(PATH)
+    def conditional(): return False
+
+def loop_binding():
+    for PATH in ["/loop"]:
+        pass
+    @app.get(PATH)
+    def looped(): return False
+
+def import_shadow():
+    from settings import ROOT
+    @app.get(ROOT)
+    def imported_shadow(): return False
+
+class Fake:
+    def get(self, path): return lambda function: function
+
+fake = Fake()
+@fake.get(ROOT)
+def spoof(): return False
+"#,
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let routes = engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .into_iter()
+            .filter(|symbol| symbol.kind == crate::model::SymbolKind::Route)
+            .map(|symbol| symbol.name)
+            .collect::<Vec<_>>();
+        assert_eq!(routes, ["GET /real"]);
+    }
+
+    #[test]
+    fn fastapi_string_paths_respect_python_order_scope_and_literal_semantics() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("api.py"),
+            r#"from fastapi import FastAPI
+
+GLOBAL = "/global"
+UNICODE = "/café"
+RAW = r"/raw\segment"
+TRIPLE = """/triple"""
+ESCAPED = "/\u0061"
+BYTES = b"/bytes"
+STALE = "/stale"
+del STALE
+MATCHED = "/outer-match"
+app = FastAPI()
+
+@app.get(path=GLOBAL)
+def keyword_path(): return True
+
+@app.get(UNICODE)
+def unicode_path(): return True
+
+@app.get(RAW)
+def raw_path(): return True
+
+@app.get(TRIPLE)
+def triple_path(): return True
+
+@app.get(ESCAPED)
+def escaped_path(): return False
+
+@app.get(BYTES)
+def bytes_path(): return False
+
+@app.get(STALE)
+def deleted_path(): return False
+
+@app.get(LATER)
+def defined_later(): return False
+
+LATER = "/later"
+
+class Scope:
+    GLOBAL = "/wrong-class-value"
+
+    def register(self):
+        @app.get(GLOBAL)
+        def class_scope_is_not_a_closure(): return True
+
+def match_shadow(value):
+    match value:
+        case MATCHED:
+            pass
+    @app.get(MATCHED)
+    def captured(): return False
+
+def declared_global():
+    global GLOBAL
+    @app.get(GLOBAL)
+    def global_declaration_is_conservative(): return False
+
+def outer():
+    NONLOCAL = "/nonlocal"
+    def inner():
+        nonlocal NONLOCAL
+        @app.get(NONLOCAL)
+        def nonlocal_declaration_is_conservative(): return False
+"#,
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let mut routes = engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .into_iter()
+            .filter(|symbol| symbol.kind == crate::model::SymbolKind::Route)
+            .map(|symbol| symbol.name)
+            .collect::<Vec<_>>();
+        routes.sort();
+        assert_eq!(
+            routes,
+            [
+                "GET /café",
+                "GET /global",
+                "GET /global",
+                r"GET /raw\segment",
+                "GET /triple",
+            ]
+        );
+    }
+
+    #[test]
     fn fastapi_materialization_is_stable_and_cleans_up_incrementally() {
         let temp = tempfile::tempdir().unwrap();
         let router_path = temp.path().join("router.py");

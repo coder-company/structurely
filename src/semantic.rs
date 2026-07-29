@@ -4698,6 +4698,10 @@ fn collect_fastapi_routes(root: Node<'_>, source: &[u8], facts: &mut FileFacts) 
     let imports = fastapi_imports(root, source);
     let mut assignment_counts = HashMap::new();
     collect_python_assignment_counts(root, source, None, None, &mut assignment_counts);
+    let mut string_binding_counts = assignment_counts.clone();
+    collect_python_import_binding_counts(root, source, None, &mut string_binding_counts);
+    let mut class_scopes = HashSet::new();
+    collect_python_class_scopes(root, source, None, &mut class_scopes);
     facts.fastapi.aliases.extend(
         imports
             .iter()
@@ -4737,6 +4741,8 @@ fn collect_fastapi_routes(root: Node<'_>, source: &[u8], facts: &mut FileFacts) 
         !assignment_counts.contains_key(root_binding)
     });
     let mut instances = HashMap::new();
+    let string_bindings =
+        collect_proven_python_string_bindings(root, source, &string_binding_counts, &class_scopes);
     collect_fastapi_declarations(
         root,
         source,
@@ -4775,7 +4781,10 @@ fn collect_fastapi_routes(root: Node<'_>, source: &[u8], facts: &mut FileFacts) 
         source,
         &imports,
         &instances,
+        &string_bindings,
         &assignment_counts,
+        &string_binding_counts,
+        &class_scopes,
         None,
         None,
         facts,
@@ -4867,6 +4876,20 @@ fn collect_python_assignment_counts(
             );
         }
     }
+    if matches!(node.kind(), "global_statement" | "nonlocal_statement") {
+        let mut cursor = node.walk();
+        for binding in node
+            .named_children(&mut cursor)
+            .filter(|child| child.kind() == "identifier")
+        {
+            *counts
+                .entry(python_scoped_binding(
+                    next_scope.as_deref(),
+                    &text(binding, source),
+                ))
+                .or_default() += 1;
+        }
+    }
     let target = match node.kind() {
         "assignment" | "augmented_assignment" | "annotated_assignment" => {
             node.child_by_field_name("left")
@@ -4874,6 +4897,8 @@ fn collect_python_assignment_counts(
         "named_expression" => node.child_by_field_name("name"),
         "for_statement" => node.child_by_field_name("left"),
         "with_item" | "except_clause" => node.child_by_field_name("alias"),
+        "delete_statement" => node.named_child(0),
+        "case_pattern" => Some(node),
         _ => None,
     };
     if let Some(target) = target {
@@ -4894,6 +4919,83 @@ fn collect_python_assignment_counts(
             next_class.as_deref(),
             counts,
         );
+    }
+}
+
+fn collect_python_class_scopes(
+    node: Node<'_>,
+    source: &[u8],
+    scope: Option<&str>,
+    scopes: &mut HashSet<String>,
+) {
+    let next_scope = python_lexical_scope(node, source, scope);
+    if node.kind() == "class_definition" {
+        if let Some(scope) = &next_scope {
+            scopes.insert(scope.clone());
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_python_class_scopes(child, source, next_scope.as_deref(), scopes);
+    }
+}
+
+fn collect_python_import_binding_counts(
+    node: Node<'_>,
+    source: &[u8],
+    scope: Option<&str>,
+    counts: &mut HashMap<String, usize>,
+) {
+    let next_scope = python_lexical_scope(node, source, scope);
+    let statement = text(node, source);
+    let bindings = if node.kind() == "import_from_statement" {
+        statement
+            .trim()
+            .strip_prefix("from ")
+            .and_then(|body| body.split_once(" import "))
+            .map(|(_, names)| {
+                names
+                    .trim_matches(['(', ')'])
+                    .split(',')
+                    .filter_map(|item| {
+                        let words = item.split_whitespace().collect::<Vec<_>>();
+                        match words.as_slice() {
+                            [name] if *name != "*" => Some((*name).to_owned()),
+                            [_, "as", binding] => Some((*binding).to_owned()),
+                            _ => None,
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    } else if node.kind() == "import_statement" {
+        statement
+            .trim()
+            .strip_prefix("import ")
+            .map(|body| {
+                body.split(',')
+                    .filter_map(|item| {
+                        let words = item.split_whitespace().collect::<Vec<_>>();
+                        match words.as_slice() {
+                            [module] => module.split('.').next().map(str::to_owned),
+                            [_, "as", binding] => Some((*binding).to_owned()),
+                            _ => None,
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    for binding in bindings {
+        *counts
+            .entry(python_scoped_binding(next_scope.as_deref(), &binding))
+            .or_default() += 1;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_python_import_binding_counts(child, source, next_scope.as_deref(), counts);
     }
 }
 
@@ -5176,13 +5278,298 @@ fn collect_python_returns(node: Node<'_>, source: &[u8], returns: &mut Vec<Strin
     }
 }
 
+fn collect_proven_python_string_bindings(
+    root: Node<'_>,
+    source: &[u8],
+    assignment_counts: &HashMap<String, usize>,
+    class_scopes: &HashSet<String>,
+) -> HashMap<String, PythonStringBinding> {
+    let mut candidates = Vec::new();
+    collect_python_string_binding_candidates(root, source, None, &mut candidates);
+    let mut values = HashMap::new();
+    for _ in 0..=candidates.len() {
+        let mut changed = false;
+        for (key, scope, definition_end_byte, value) in &candidates {
+            if values.contains_key(key) || assignment_counts.get(key) != Some(&1) {
+                continue;
+            }
+            let mut work = 0;
+            if let Some(value) = evaluate_python_string(
+                *value,
+                source,
+                scope.as_deref(),
+                &values,
+                assignment_counts,
+                class_scopes,
+                value.start_byte(),
+                &mut work,
+            ) {
+                values.insert(
+                    key.clone(),
+                    PythonStringBinding {
+                        value,
+                        definition_end_byte: *definition_end_byte,
+                    },
+                );
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    values
+}
+
+#[derive(Clone)]
+struct PythonStringBinding {
+    value: String,
+    definition_end_byte: usize,
+}
+
+fn collect_python_string_binding_candidates<'tree>(
+    node: Node<'tree>,
+    source: &[u8],
+    scope: Option<&str>,
+    candidates: &mut Vec<(String, Option<String>, usize, Node<'tree>)>,
+) {
+    let next_scope = python_lexical_scope(node, source, scope);
+    if node.kind() == "assignment" && python_is_direct_scope_assignment(node) {
+        if let (Some(left), Some(right)) = (
+            node.child_by_field_name("left"),
+            node.child_by_field_name("right"),
+        ) {
+            if left.kind() == "identifier" {
+                candidates.push((
+                    python_scoped_binding(next_scope.as_deref(), &text(left, source)),
+                    next_scope.clone(),
+                    node.end_byte(),
+                    right,
+                ));
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_python_string_binding_candidates(child, source, next_scope.as_deref(), candidates);
+    }
+}
+
+fn python_is_direct_scope_assignment(node: Node<'_>) -> bool {
+    let Some(mut parent) = node.parent() else {
+        return false;
+    };
+    if parent.kind() == "expression_statement" {
+        let Some(container) = parent.parent() else {
+            return false;
+        };
+        parent = container;
+    }
+    if parent.kind() == "module" {
+        return true;
+    }
+    parent.kind() == "block"
+        && parent.parent().is_some_and(|owner| {
+            owner.kind() == "function_definition"
+                && owner.child_by_field_name("body") == Some(parent)
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_python_string(
+    node: Node<'_>,
+    source: &[u8],
+    scope: Option<&str>,
+    values: &HashMap<String, PythonStringBinding>,
+    assignment_counts: &HashMap<String, usize>,
+    class_scopes: &HashSet<String>,
+    use_byte: usize,
+    work: &mut usize,
+) -> Option<String> {
+    const NODE_CAP: usize = 32;
+    const OUTPUT_CAP: usize = 2 * 1024;
+    *work += 1;
+    if *work > NODE_CAP {
+        return None;
+    }
+    let value = match node.kind() {
+        "string" | "string_literal" => string_literal(node, source).or_else(|| {
+            evaluate_python_interpolation(
+                node,
+                source,
+                scope,
+                values,
+                assignment_counts,
+                class_scopes,
+                use_byte,
+                work,
+            )
+        })?,
+        "identifier" => resolve_python_string_name(
+            &text(node, source),
+            scope,
+            values,
+            assignment_counts,
+            class_scopes,
+            use_byte,
+        )?,
+        "binary_operator" => {
+            let left = node.child_by_field_name("left")?;
+            let right = node.child_by_field_name("right")?;
+            if source
+                .get(left.end_byte()..right.start_byte())?
+                .trim_ascii()
+                != b"+"
+            {
+                return None;
+            }
+            let mut value = evaluate_python_string(
+                left,
+                source,
+                scope,
+                values,
+                assignment_counts,
+                class_scopes,
+                use_byte,
+                work,
+            )?;
+            value.push_str(&evaluate_python_string(
+                right,
+                source,
+                scope,
+                values,
+                assignment_counts,
+                class_scopes,
+                use_byte,
+                work,
+            )?);
+            value
+        }
+        _ => return None,
+    };
+    (value.len() <= OUTPUT_CAP).then_some(value)
+}
+
+fn resolve_python_string_name(
+    name: &str,
+    scope: Option<&str>,
+    values: &HashMap<String, PythonStringBinding>,
+    assignment_counts: &HashMap<String, usize>,
+    class_scopes: &HashSet<String>,
+    use_byte: usize,
+) -> Option<String> {
+    let mut candidate_scope = scope;
+    while let Some(current) = candidate_scope {
+        let key = python_scoped_binding(Some(current), name);
+        if assignment_counts.contains_key(&key) && !class_scopes.contains(current) {
+            return values
+                .get(&key)
+                .filter(|binding| binding.definition_end_byte <= use_byte)
+                .map(|binding| binding.value.clone());
+        }
+        candidate_scope = current.rsplit_once('.').map(|(parent, _)| parent);
+    }
+    if assignment_counts.contains_key(name) {
+        return values
+            .get(name)
+            .filter(|binding| binding.definition_end_byte <= use_byte)
+            .map(|binding| binding.value.clone());
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_python_interpolation(
+    node: Node<'_>,
+    source: &[u8],
+    scope: Option<&str>,
+    values: &HashMap<String, PythonStringBinding>,
+    assignment_counts: &HashMap<String, usize>,
+    class_scopes: &HashSet<String>,
+    use_byte: usize,
+    work: &mut usize,
+) -> Option<String> {
+    let raw = source.get(node.byte_range())?;
+    let quote_index = raw.iter().position(|byte| matches!(byte, b'\'' | b'"'))?;
+    if !matches!(&raw[..quote_index], b"f" | b"F")
+        || raw.last() != raw.get(quote_index)
+        || raw.get(quote_index + 1) == raw.get(quote_index)
+    {
+        return None;
+    }
+    let content_start = node.start_byte() + quote_index + 1;
+    let content_end = node.end_byte().checked_sub(1)?;
+    let mut interpolations = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() == "interpolation" {
+            interpolations.push(child);
+        } else if !matches!(
+            child.kind(),
+            "string_start" | "string_content" | "string_end"
+        ) {
+            return None;
+        }
+    }
+    if interpolations.is_empty() {
+        return None;
+    }
+    let mut value = String::new();
+    let mut offset = content_start;
+    for interpolation in interpolations {
+        let literal = source.get(offset..interpolation.start_byte())?;
+        if literal.contains(&b'{') || literal.contains(&b'}') || literal.contains(&b'\\') {
+            return None;
+        }
+        value.push_str(std::str::from_utf8(literal).ok()?);
+        let mut interpolation_cursor = interpolation.walk();
+        let expressions = interpolation
+            .named_children(&mut interpolation_cursor)
+            .collect::<Vec<_>>();
+        let [expression] = expressions.as_slice() else {
+            return None;
+        };
+        if expression.kind() != "identifier" {
+            return None;
+        }
+        let raw_interpolation = source.get(interpolation.byte_range())?;
+        let inner = raw_interpolation
+            .strip_prefix(b"{")?
+            .strip_suffix(b"}")?
+            .trim_ascii();
+        if inner != source.get(expression.byte_range())? {
+            return None;
+        }
+        value.push_str(&evaluate_python_string(
+            *expression,
+            source,
+            scope,
+            values,
+            assignment_counts,
+            class_scopes,
+            use_byte,
+            work,
+        )?);
+        offset = interpolation.end_byte();
+    }
+    let literal = source.get(offset..content_end)?;
+    if literal.contains(&b'{') || literal.contains(&b'}') || literal.contains(&b'\\') {
+        return None;
+    }
+    value.push_str(std::str::from_utf8(literal).ok()?);
+    Some(value)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn collect_fastapi_mounts_and_routes(
     node: Node<'_>,
     source: &[u8],
     imports: &PythonImports,
     instances: &HashMap<String, FastApiRouterRef>,
+    string_bindings: &HashMap<String, PythonStringBinding>,
     assignment_counts: &HashMap<String, usize>,
+    string_binding_counts: &HashMap<String, usize>,
+    class_scopes: &HashSet<String>,
     class_name: Option<&str>,
     scope: Option<&str>,
     facts: &mut FileFacts,
@@ -5298,17 +5685,23 @@ fn collect_fastapi_mounts_and_routes(
                     ) else {
                         continue;
                     };
-                    let Some(arguments) = call.child_by_field_name("arguments") else {
-                        continue;
-                    };
                     let Some(handler_id) = handler_id.clone() else {
                         continue;
                     };
-                    let mut argument_cursor = arguments.walk();
-                    let Some(path) = arguments
-                        .named_children(&mut argument_cursor)
-                        .next()
-                        .and_then(|argument| string_literal(argument, source))
+                    let Some(path) =
+                        python_call_argument(call, "path", source).and_then(|argument| {
+                            let mut work = 0;
+                            evaluate_python_string(
+                                argument,
+                                source,
+                                next_scope.as_deref(),
+                                string_bindings,
+                                string_binding_counts,
+                                class_scopes,
+                                argument.start_byte(),
+                                &mut work,
+                            )
+                        })
                     else {
                         continue;
                     };
@@ -5342,7 +5735,10 @@ fn collect_fastapi_mounts_and_routes(
             source,
             imports,
             instances,
+            string_bindings,
             assignment_counts,
+            string_binding_counts,
+            class_scopes,
             next_class.as_deref(),
             next_scope.as_deref(),
             facts,
@@ -6302,15 +6698,50 @@ fn string_literal(node: Node<'_>, source: &[u8]) -> Option<String> {
     }
     let literal = text(node, source);
     let quote_index = literal.find(['\'', '"'])?;
-    if !literal[..quote_index]
+    let prefix = &literal[..quote_index];
+    if prefix
         .chars()
-        .all(|character| matches!(character, 'r' | 'R' | 'b' | 'B' | 'u' | 'U'))
+        .any(|character| !matches!(character, 'r' | 'R' | 'u' | 'U'))
+        || prefix
+            .chars()
+            .filter(|character| matches!(character, 'r' | 'R'))
+            .count()
+            > 1
+        || prefix
+            .chars()
+            .filter(|character| matches!(character, 'u' | 'U'))
+            .count()
+            > 1
     {
         return None;
     }
     let quote = literal.as_bytes()[quote_index];
-    (literal.len() > quote_index + 1 && literal.as_bytes().last() == Some(&quote))
-        .then(|| literal[quote_index + 1..literal.len() - 1].to_owned())
+    let delimiter_len = if literal
+        .as_bytes()
+        .get(quote_index..quote_index + 3)
+        .is_some_and(|delimiter| delimiter == [quote; 3])
+    {
+        3
+    } else {
+        1
+    };
+    let content_start = quote_index + delimiter_len;
+    let content_end = literal.len().checked_sub(delimiter_len)?;
+    if content_end < content_start
+        || literal
+            .as_bytes()
+            .get(content_end..)
+            .is_none_or(|delimiter| {
+                delimiter.len() != delimiter_len || delimiter.iter().any(|byte| *byte != quote)
+            })
+    {
+        return None;
+    }
+    let content = &literal[content_start..content_end];
+    // Raw strings preserve their source spelling. For ordinary strings, escape
+    // decoding is intentionally fail-closed until a complete Python decoder is
+    // available; emitting the source spelling would publish a wrong runtime path.
+    (prefix.contains(['r', 'R']) || !content.contains('\\')).then(|| content.to_owned())
 }
 
 fn owning_symbol<'a>(node: Node<'_>, symbols: &'a [Symbol]) -> Option<&'a Symbol> {

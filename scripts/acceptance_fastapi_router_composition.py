@@ -27,10 +27,21 @@ GRAPHITI_FILES = (
     "server/graph_service/routers/retrieve.py",
 )
 
-# These tuples are an executable inventory of every production router decorator in
-# the pinned files. Keeping file and handler provenance here prevents a coincidental
-# count match from hiding cross-router leakage.
+# These tuples are an executable inventory of every deployed production HTTP
+# decorator in the pinned files, including routes declared directly on the
+# FastAPI applications. Keeping file and handler provenance here prevents a
+# coincidental count match from hiding cross-router leakage.
 LIGHTRAG_ROUTES = (
+    ("GET", "/docs", "custom_swagger_ui_html", LIGHTRAG_FILES[0]),
+    ("GET", "/docs/oauth2-redirect", "swagger_ui_redirect", LIGHTRAG_FILES[0]),
+    ("GET", "/", "redirect_to_webui", LIGHTRAG_FILES[0]),
+    ("GET", "/auth-status", "get_auth_status", LIGHTRAG_FILES[0]),
+    ("POST", "/login", "login", LIGHTRAG_FILES[0]),
+    ("GET", "/health", "get_status", LIGHTRAG_FILES[0]),
+    # WEBUI_PATH is pinned to "/webui"; both constant-backed decorators must
+    # resolve to their deployed paths rather than leaking expression text.
+    ("GET", "/webui", "webui_redirect_to_docs", LIGHTRAG_FILES[0]),
+    ("GET", "/webui/", "webui_redirect_to_docs", LIGHTRAG_FILES[0]),
     ("POST", "/documents/scan", "scan_for_new_documents", LIGHTRAG_FILES[1]),
     ("POST", "/documents/upload", "upload_to_input_dir", LIGHTRAG_FILES[1]),
     ("POST", "/documents/text", "insert_text", LIGHTRAG_FILES[1]),
@@ -67,6 +78,7 @@ LIGHTRAG_ROUTES = (
     ("POST", "/query/data", "query_data", LIGHTRAG_FILES[4]),
 )
 GRAPHITI_ROUTES = (
+    ("GET", "/healthcheck", "healthcheck", GRAPHITI_FILES[0]),
     ("POST", "/messages", "add_messages", GRAPHITI_FILES[1]),
     ("POST", "/entity-node", "add_entity_node", GRAPHITI_FILES[1]),
     ("DELETE", "/entity-edge/{uuid}", "delete_entity_edge", GRAPHITI_FILES[1]),
@@ -302,13 +314,13 @@ def main() -> None:
         evaluate_repository(mounted_snapshot, mounted_expected)
 
     total_routes = sum(result["routes"] for result in results.values())
-    if total_routes != 44:
-        raise RuntimeError(f"expected 44 mounted production routes, got {total_routes}")
+    if total_routes != 53:
+        raise RuntimeError(f"expected 53 deployed production routes, got {total_routes}")
     output = {
         "passed": True,
         "checks": {
             "pinnedRepositories": True,
-            "exact44MountedProductionRoutes": True,
+            "exact53DeployedProductionRoutes": True,
             "unmountedRoutersPublishZeroRoutes": unmounted_results,
             "factoryMountPrefixPropagates": True,
         },
