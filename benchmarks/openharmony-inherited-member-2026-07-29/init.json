@@ -1,0 +1,13 @@
+{
+  "epoch": 1,
+  "files_scanned": 6995,
+  "files_skipped": 0,
+  "files_changed": 6995,
+  "files_deleted": 0,
+  "symbols_changed": 47955,
+  "relationships_resolved": 83270,
+  "parse_workers": 8,
+  "staging_ms": 111772,
+  "resolution_ms": 4207,
+  "duration_ms": 120209
+}

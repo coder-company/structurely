@@ -1,0 +1,336 @@
+{
+  "baseline": "benchmarks/openharmony-call-result-2026-07-29",
+  "baselineDatabasePath": "/tmp/structurely-oh-callresult-8bce9ac-run/.structurely/graph.db",
+  "currentDatabasePath": "/tmp/structurely-oh-inherited-d28838f-final/.structurely/graph.db",
+  "baselineRelationships": 125655,
+  "currentRelationships": 124727,
+  "net": -928,
+  "removed": 1667,
+  "added": 739,
+  "removedByProvenance": [
+    {
+      "provenance": "tree-sitter/name-resolution",
+      "count": 1667
+    }
+  ],
+  "removedByScope": [
+    {
+      "scope": "receiver type",
+      "count": 1038
+    },
+    {
+      "scope": "language-wide fallback",
+      "count": 468
+    },
+    {
+      "scope": "same-file lexical scope",
+      "count": 155
+    },
+    {
+      "scope": "explicit-return call-result",
+      "count": 5
+    },
+    {
+      "scope": "explicit import scope",
+      "count": 1
+    }
+  ],
+  "removedTopTargets": [
+    {
+      "qualifiedName": "ToastReport.showResult",
+      "file": "code/DocsSample/ConnectivityKit/Bluetooth/SerialCommunication/entry/src/main/ets/common/ToastReport.ets",
+      "count": 62
+    },
+    {
+      "qualifiedName": "ToastReport.showResult",
+      "file": "code/DocsSample/bluetoothSample/entry/src/main/ets/common/ToastReport.ets",
+      "count": 62
+    },
+    {
+      "qualifiedName": "InputHandler.addLog",
+      "file": "code/Solutions/InputMethod/KikaInputMethod/entry/src/main/ets/model/KeyboardController.ets",
+      "count": 38
+    },
+    {
+      "qualifiedName": "BreakpointType.GetValue",
+      "file": "code/SuperFeature/MultiDeviceAppDev/MultiNavBar/entry/src/main/ets/common/BreakpointSystem.ets",
+      "count": 34
+    },
+    {
+      "qualifiedName": "BreakpointType.GetValue",
+      "file": "code/SuperFeature/MultiDeviceAppDev/MultiMusic/entry/src/main/ets/common/BreakpointSystem.ets",
+      "count": 34
+    },
+    {
+      "qualifiedName": "BreakpointType.GetValue",
+      "file": "code/SuperFeature/MultiDeviceAppDev/MultiColumns/entry/src/main/ets/common/BreakpointSystem.ets",
+      "count": 34
+    },
+    {
+      "qualifiedName": "InputHandler.addLog",
+      "file": "code/Solutions/InputMethod/KikaInput/entry/src/main/ets/model/KeyboardController.ets",
+      "count": 34
+    },
+    {
+      "qualifiedName": "MyNodeController.setDrawIndex",
+      "file": "code/DocsSample/Drawing/ArkTSGraphicsDraw/entry/src/main/ets/drawing/pages/TextBlockDrawing.ets",
+      "count": 27
+    },
+    {
+      "qualifiedName": "MyNodeController.setDrawIndex",
+      "file": "code/DocsSample/Drawing/ArkTSGraphicsDraw/entry/src/main/ets/drawing/pages/PixelMapDrawing.ets",
+      "count": 27
+    },
+    {
+      "qualifiedName": "MyNodeController.setDrawIndex",
+      "file": "code/DocsSample/Drawing/ArkTSGraphicsDraw/entry/src/main/ets/drawing/pages/CanvasOperationState.ets",
+      "count": 27
+    },
+    {
+      "qualifiedName": "MyNodeController.setDrawIndex",
+      "file": "code/DocsSample/Drawing/ArkTSGraphicsDraw/entry/src/main/ets/drawing/pages/ComplexEffect.ets",
+      "count": 27
+    },
+    {
+      "qualifiedName": "MyNodeController.setDrawIndex",
+      "file": "code/DocsSample/Drawing/ArkTSGraphicsDraw/entry/src/main/ets/drawing/pages/ShapeDrawing.ets",
+      "count": 27
+    },
+    {
+      "qualifiedName": "MyNodeController.setDrawIndex",
+      "file": "code/DocsSample/Drawing/ArkTSGraphicsDraw/entry/src/main/ets/drawing/pages/BasicEffect.ets",
+      "count": 27
+    },
+    {
+      "qualifiedName": "MyRenderNode.addDrawFunction",
+      "file": "code/DocsSample/Drawing/ArkTSGraphicsDraw/entry/src/main/ets/drawing/pages/ComplexEffect.ets",
+      "count": 27
+    },
+    {
+      "qualifiedName": "MyRenderNode.addDrawFunction",
+      "file": "code/DocsSample/Drawing/ArkTSGraphicsDraw/entry/src/main/ets/drawing/pages/CanvasOperationState.ets",
+      "count": 27
+    },
+    {
+      "qualifiedName": "MyRenderNode.addDrawFunction",
+      "file": "code/DocsSample/Drawing/ArkTSGraphicsDraw/entry/src/main/ets/drawing/pages/BasicEffect.ets",
+      "count": 27
+    },
+    {
+      "qualifiedName": "MyRenderNode.addDrawFunction",
+      "file": "code/DocsSample/Drawing/ArkTSGraphicsDraw/entry/src/main/ets/drawing/pages/ShapeDrawing.ets",
+      "count": 27
+    },
+    {
+      "qualifiedName": "MyRenderNode.addDrawFunction",
+      "file": "code/DocsSample/Drawing/ArkTSGraphicsDraw/entry/src/main/ets/drawing/pages/PixelMapDrawing.ets",
+      "count": 27
+    },
+    {
+      "qualifiedName": "MyRenderNode.addDrawFunction",
+      "file": "code/DocsSample/Drawing/ArkTSGraphicsDraw/entry/src/main/ets/drawing/pages/TextBlockDrawing.ets",
+      "count": 27
+    },
+    {
+      "qualifiedName": "BreakPointType.getValue",
+      "file": "code/SuperFeature/MultiDeviceAppDev/AdaptiveCapabilities/entry/src/main/ets/common/BreakpointSystem.ets",
+      "count": 22
+    },
+    {
+      "qualifiedName": "BreakPointType.getValue",
+      "file": "code/SuperFeature/MultiDeviceAppDev/HealthyDiet/entry/src/main/ets/common/BreakpointSystem.ets",
+      "count": 22
+    },
+    {
+      "qualifiedName": "NativeNodeController.invalidate",
+      "file": "code/BasicFeature/Graphics/Graphics2d/PaintVerbatim/entry/src/ohosTest/ets/testability/pages/NativeRender.ets",
+      "count": 13
+    },
+    {
+      "qualifiedName": "NativeNodeController.invalidate",
+      "file": "code/BasicFeature/Graphics/Graphics2d/PaintVerbatim/entry/src/main/ets/pages/NativeRender.ets",
+      "count": 13
+    },
+    {
+      "qualifiedName": "KvStoreModel.put",
+      "file": "code/SuperFeature/DistributedAppDev/ArkTSDistributedCalc/entry/src/main/ets/model/KvStoreModel.ets",
+      "count": 12
+    },
+    {
+      "qualifiedName": "KvStoreModel.put",
+      "file": "code/SuperFeature/DistributedAppDev/Kvstore/entry/src/main/ets/model/KvStoreModel.ets",
+      "count": 12
+    }
+  ],
+  "addedByProvenance": [
+    {
+      "provenance": "tree-sitter/name-resolution",
+      "count": 729
+    },
+    {
+      "provenance": "dynamic/callback-inline",
+      "count": 5
+    },
+    {
+      "provenance": "dynamic/callback-argument",
+      "count": 3
+    },
+    {
+      "provenance": "dynamic/callback-delegation",
+      "count": 2
+    }
+  ],
+  "addedByScope": [
+    {
+      "scope": "receiver type",
+      "count": 657
+    },
+    {
+      "scope": "language-wide fallback",
+      "count": 34
+    },
+    {
+      "scope": "nearest inherited receiver type",
+      "count": 23
+    },
+    {
+      "scope": "same-file lexical scope",
+      "count": 14
+    },
+    {
+      "scope": "other",
+      "count": 10
+    },
+    {
+      "scope": "explicit import scope",
+      "count": 1
+    }
+  ],
+  "addedTopTargets": [
+    {
+      "qualifiedName": "ToastReport.showResult",
+      "file": "code/DocsSample/bluetoothSample/entry/src/main/ets/common/ToastReport.ets",
+      "count": 41
+    },
+    {
+      "qualifiedName": "InputHandler.addLog",
+      "file": "code/Solutions/InputMethod/KikaInputMethod/entry/src/main/ets/model/KeyboardController.ets",
+      "count": 38
+    },
+    {
+      "qualifiedName": "InputHandler.addLog",
+      "file": "code/Solutions/InputMethod/KikaInput/entry/src/main/ets/model/KeyboardController.ets",
+      "count": 34
+    },
+    {
+      "qualifiedName": "ToastReport.showResult",
+      "file": "code/DocsSample/ConnectivityKit/Bluetooth/SerialCommunication/entry/src/main/ets/common/ToastReport.ets",
+      "count": 21
+    },
+    {
+      "qualifiedName": "Logger.info",
+      "file": "code/BasicFeature/DeviceManagement/Sensor/SensorJsSamples/entry/src/main/ets/pages/Index.ets",
+      "count": 20
+    },
+    {
+      "qualifiedName": "BreakpointType.GetValue",
+      "file": "code/SuperFeature/MultiDeviceAppDev/MultiNavBar/entry/src/main/ets/common/BreakpointSystem.ets",
+      "count": 19
+    },
+    {
+      "qualifiedName": "Logger.info",
+      "file": "code/BasicFeature/DeviceManagement/Vibrator/VibratorJsSamples/entry/src/main/ets/pages/Index.ets",
+      "count": 16
+    },
+    {
+      "qualifiedName": "BreakpointType.GetValue",
+      "file": "code/SuperFeature/MultiDeviceAppDev/MultiMusic/entry/src/main/ets/common/BreakpointSystem.ets",
+      "count": 14
+    },
+    {
+      "qualifiedName": "Logger.error",
+      "file": "code/BasicFeature/DeviceManagement/Vibrator/VibratorJsSamples/entry/src/main/ets/pages/Index.ets",
+      "count": 13
+    },
+    {
+      "qualifiedName": "MyNodeController.addNode",
+      "file": "code/BasicFeature/Graphics/Graphics2d/TsDrawingSample/entry/src/main/ets/pages/Index.ets",
+      "count": 13
+    },
+    {
+      "qualifiedName": "BreakPointType.getValue",
+      "file": "code/SuperFeature/MultiDeviceAppDev/AdaptiveCapabilities/entry/src/main/ets/common/BreakpointSystem.ets",
+      "count": 11
+    },
+    {
+      "qualifiedName": "BreakPointType.getValue",
+      "file": "code/SuperFeature/MultiDeviceAppDev/HealthyDiet/entry/src/main/ets/common/BreakpointSystem.ets",
+      "count": 11
+    },
+    {
+      "qualifiedName": "Logger.error",
+      "file": "code/BasicFeature/DeviceManagement/Sensor/SensorJsSamples/entry/src/main/ets/pages/Index.ets",
+      "count": 10
+    },
+    {
+      "qualifiedName": "MaterialData.getResource",
+      "file": "code/BasicFeature/Media/Image/photomodify/src/main/ets/components/model/MaterialData.ets",
+      "count": 8
+    },
+    {
+      "qualifiedName": "MyNodeController.setDrawIndex",
+      "file": "code/DocsSample/Drawing/ArkTSGraphicsDraw/entry/src/main/ets/drawing/pages/ComplexEffect.ets",
+      "count": 8
+    },
+    {
+      "qualifiedName": "MyRenderNode.addDrawFunction",
+      "file": "code/DocsSample/Drawing/ArkTSGraphicsDraw/entry/src/main/ets/drawing/pages/ComplexEffect.ets",
+      "count": 8
+    },
+    {
+      "qualifiedName": "AVPlayer.getCurrentTime",
+      "file": "code/SystemFeature/FileManagement/MediaCollections/entry/src/main/ets/model/AVPlayer.ets",
+      "count": 7
+    },
+    {
+      "qualifiedName": "CommentData.pushData",
+      "file": "code/Solutions/Social/PublishMultimediaUpdate/publishmultimediaupdate/src/main/ets/model/BasicDataSource.ets",
+      "count": 7
+    },
+    {
+      "qualifiedName": "MyNodeController.setDrawIndex",
+      "file": "code/DocsSample/Drawing/ArkTSGraphicsDraw/entry/src/main/ets/drawing/pages/ShapeDrawing.ets",
+      "count": 7
+    },
+    {
+      "qualifiedName": "MyRenderNode.addDrawFunction",
+      "file": "code/DocsSample/Drawing/ArkTSGraphicsDraw/entry/src/main/ets/drawing/pages/ShapeDrawing.ets",
+      "count": 7
+    },
+    {
+      "qualifiedName": "BreakpointSystem.register",
+      "file": "code/SuperFeature/MultiDeviceAppDev/AdaptiveCapabilities/entry/src/main/ets/common/BreakpointSystem.ets",
+      "count": 6
+    },
+    {
+      "qualifiedName": "BreakpointSystem.unregister",
+      "file": "code/SuperFeature/MultiDeviceAppDev/AdaptiveCapabilities/entry/src/main/ets/common/BreakpointSystem.ets",
+      "count": 6
+    },
+    {
+      "qualifiedName": "MultiplexModel.getId",
+      "file": "code/UI/ArkTsComponentCollection/ComponentCollection/entry/src/main/ets/pages/animations/TransitionAnimations/multiplexSample/MultiplexModel.ets",
+      "count": 6
+    },
+    {
+      "qualifiedName": "BasicDataSource.notifyDataReload",
+      "file": "code/SuperFeature/DistributedAppDev/DistributedNote/entry/src/main/ets/common/BasicDataSource.ets",
+      "count": 5
+    },
+    {
+      "qualifiedName": "MyNodeController.clearNodes",
+      "file": "code/BasicFeature/Graphics/Graphics2d/TsDrawingSample/entry/src/main/ets/pages/Index.ets",
+      "count": 5
+    }
+  ]
+}

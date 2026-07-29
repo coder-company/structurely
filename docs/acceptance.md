@@ -104,6 +104,14 @@ the explicit nominal return on imported singleton factory
 `InputHandler.getInstance`. Matching differential and performance artifacts pin
 clean commit `8bce9ac`; they retain 22/22 shared compatibility and exceed both
 enforced 2× speed thresholds.
+The `benchmarks/openharmony-inherited-member-2026-07-29/` gate adds the
+seventeenth correlated assertion:
+`AlbumPage.btnAction → BasicDataSource.notifyDataReload` through bounded,
+verified nearest-ancestor member lookup. It passes 17/17 on 6,995 files and
+records 23 inherited relationships across 19 sources and 11 targets. Matching
+differential and performance artifacts pin clean commit `d28838f`, retain
+22/22 compatibility and 1.0000 usefulness, pass both enforced 2× thresholds,
+and audit zero removed callback relationships.
 
 The authoritative capability inventory is
 [`codegraph-parity.md`](codegraph-parity.md). A matching command name or schema

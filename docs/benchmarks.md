@@ -270,3 +270,22 @@ The
 retains 14/14 prior assertions and records 3,412 delegation observations but
 zero complete delegated registrations. This negative result is why inline
 callback identities, rather than broader speculative forwarding, are next.
+
+After accepted inline callback identities and explicit call-result receiver
+resolution, the pinned gates advance through
+[`OpenHarmony inline callbacks`](../benchmarks/openharmony-inline-callback-2026-07-29/README.md)
+and
+[`OpenHarmony call results`](../benchmarks/openharmony-call-result-2026-07-29/README.md),
+reaching 16/16 correlated assertions while retaining 22/22 MCP compatibility
+and both enforced 2× performance thresholds.
+
+After scope-aware receiver typing and bounded inherited-member lookup, the
+[`final differential`](../benchmarks/differential-mcp-2026-07-29-post-inherited-member/README.md)
+passes 22/22 with 1.0000 usefulness and an exact pinned baseline match. The
+[`final performance run`](../benchmarks/codegraph-source-intersection-2026-07-29-post-inherited-member/README.md)
+is 2.668× faster to index and 9.627× faster at query p50 while using 87.20%
+less peak memory and a 12.76% smaller database. Its semantic audit finds zero
+0.995 removals and zero callback losses. The
+[`OpenHarmony inherited-member gate`](../benchmarks/openharmony-inherited-member-2026-07-29/README.md)
+passes 17/17 across 6,995 files and records 23 exact inherited relationships
+without losing the VoiceCallDemo nullable-receiver callback flows.
