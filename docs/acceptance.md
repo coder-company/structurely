@@ -125,6 +125,11 @@ graph model to v52 and records two exact 0.96 DistributedRdb callback-argument
 relationships through callable-typed same-class fields. The 6,995-file
 snapshot adds two callback flows and two inline identities with zero callback
 removals; strict class/work caps and adversarial escape fixtures remain green.
+The `benchmarks/lightrag-python-lambda-2026-07-29/` gate advances the graph
+model to v53 and materializes 30 exact positional Python lambda callback flows
+on pinned LightRAG: 24 production and six test relationships, each paired with
+a stable inline identity. Keyword actuals remain fail-closed and explicitly
+deferred.
 
 The authoritative capability inventory is
 [`codegraph-parity.md`](codegraph-parity.md). A matching command name or schema

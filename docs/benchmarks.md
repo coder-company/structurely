@@ -302,3 +302,9 @@ adds two exact 0.96 DistributedRdb callback-argument relationships and their
 two inline identities on the same OpenHarmony pin, with zero callback
 relationship removals. The underlying inventory contains 48 exact shapes, 36
 of which meet the conservative single-assignment/no-escape screen.
+
+The
+[`LightRAG Python lambda gate`](../benchmarks/lightrag-python-lambda-2026-07-29/README.md)
+materializes 30 exact positional lambda callback flows: 24 production and six
+test relationships. The clean 515-file index takes 3.070 seconds wall time and
+105,848 KiB peak RSS; keyword callback actuals remain explicitly deferred.
