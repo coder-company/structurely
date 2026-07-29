@@ -70,6 +70,18 @@ enum Command {
         #[arg(long, default_value_t = 20, value_parser = parse_result_limit)]
         limit: usize,
     },
+    /// Combine semantic graph context with repository-wide content.
+    Research {
+        /// Task, question, or search terms.
+        #[arg(value_parser = parse_query)]
+        query: String,
+        /// Initialized project root.
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        /// Maximum number of distinct files (1-100).
+        #[arg(long, default_value_t = 12, value_parser = parse_result_limit)]
+        max_files: usize,
+    },
     /// List symbols that call a named symbol.
     Callers {
         /// Exact symbol name.
@@ -308,6 +320,16 @@ fn main() -> Result<()> {
             let engine = Engine::open_read_only(path)?;
             let hits = engine.explore(&query, limit)?;
             print!("{}", mcp::format_explore_text(&engine, &query, &hits)?);
+        }
+        Command::Research {
+            query,
+            path,
+            max_files,
+        } => {
+            let engine = Engine::open_read_only(path)?;
+            let report =
+                structurely::workflow::WorkflowService::new(&engine).research(&query, max_files)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::Callers {
             symbol,

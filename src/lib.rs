@@ -15,6 +15,7 @@ mod semantic;
 pub mod setup;
 mod source;
 pub mod store;
+pub mod workflow;
 
 pub use engine::{
     BenchmarkReport, Engine, ExploreHit, ImpactHit, IndexReport, NodeFile, NodeResult,

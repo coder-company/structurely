@@ -179,6 +179,29 @@ fn tool_definitions() -> Vec<Value> {
             },
             "annotations": read_only_annotations()
         }),
+        json!({
+            "name": "structurely_research",
+            "description": "Research a topic across code symbols and repository-wide content.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": ResourceBudget::MAX_QUERY_BYTES
+                    },
+                    "maxFiles": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": ResourceBudget::MAX_RESULTS,
+                        "default": 12
+                    },
+                    "projectPath": { "type": "string" }
+                },
+                "required": ["query"]
+            },
+            "annotations": read_only_annotations()
+        }),
         relationship_tool("structurely_callers", "List functions that call a symbol."),
         relationship_tool("structurely_callees", "List functions that a symbol calls."),
         json!({
@@ -479,6 +502,14 @@ fn dispatch_tool(engine: &Engine, name: &str, arguments: &Value) -> Result<Value
             let hits = engine.explore(query, max_files)?;
             text_override = Some(format_explore_text(engine, query, &hits)?);
             serde_json::to_value(hits)?
+        }
+        "structurely_research" => {
+            let query = required_string(arguments, "query")?;
+            let max_files =
+                number_argument(arguments, "maxFiles", 12, ResourceBudget::MAX_RESULTS)?;
+            serde_json::to_value(
+                crate::workflow::WorkflowService::new(engine).research(query, max_files)?,
+            )?
         }
         "structurely_callers" => {
             let symbol = required_string(arguments, "symbol")?;
@@ -825,6 +856,7 @@ mod tests {
             "structurely_files",
             "structurely_node",
             "structurely_explore",
+            "structurely_research",
             "structurely_impact",
         ] {
             assert!(names.contains(&expected.to_owned()));
@@ -851,6 +883,17 @@ mod tests {
         assert!(text.contains("**Source Code**"));
         assert!(text.contains("2\tfunction callee()"));
         assert!(text.contains("**Coverage:**"));
+
+        let researched = call_tool(
+            &mut engine,
+            &json!({ "name": "structurely_research", "arguments": { "query": "callee" } }),
+        )
+        .unwrap();
+        assert_eq!(researched["structuredContent"]["query"], "callee");
+        assert_eq!(
+            researched["structuredContent"]["symbol_findings"][0]["symbol"]["name"],
+            "callee"
+        );
     }
 
     #[test]
