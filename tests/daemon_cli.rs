@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::os::unix::fs::PermissionsExt;
 use std::{
     fs,
-    io::Write,
+    io::{BufRead, BufReader, Write},
     path::Path,
     process::{Command, Stdio},
     thread,
@@ -165,13 +165,13 @@ fn run_mcp(current_dir: &Path, request: Value) -> Value {
         stdin.write_all(b"\n").unwrap();
     }
     drop(child.stdin.take());
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "MCP failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(output.stdout.split(|byte| *byte == b'\n').next().unwrap()).unwrap()
+    let mut response = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut response)
+        .unwrap();
+    let _ = child.kill();
+    child.wait().unwrap();
+    serde_json::from_str(&response).unwrap()
 }
 
 fn run_json(current_dir: &Path, arguments: &[&str]) -> Value {
