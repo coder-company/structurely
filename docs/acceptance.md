@@ -139,6 +139,11 @@ The `benchmarks/nestjs-transport-2026-07-29/` gate advances the graph model to
 v55 and materializes all 101 inventoried production Nest websocket,
 microservice, and gRPC handlers across 32 files. With two maintained test
 handlers, 103 route symbols produce 206 exact framework relationships.
+The `benchmarks/nestjs-graphql-2026-07-29/` gate advances the graph model to
+v56 and materializes all 42 pinned Nest GraphQL resolver handlers across 13
+production files: 18 queries, 11 mutations, six subscriptions, five fields,
+and two federation references. Their route and handler edges add 84 exact
+framework relationships.
 
 The authoritative capability inventory is
 [`codegraph-parity.md`](codegraph-parity.md). A matching command name or schema

@@ -321,3 +321,10 @@ materializes all 101 inventoried production websocket, microservice, and gRPC
 handlers across 32 pinned Nest files. Including two maintained test handlers,
 103 route symbols produce 206 exact framework relationships in a 4.400-second
 clean index.
+
+The
+[`NestJS GraphQL gate`](../benchmarks/nestjs-graphql-2026-07-29/README.md)
+materializes all 42 pinned production resolver handlers across 13 files:
+18 queries, 11 mutations, six subscriptions, five fields, and two federation
+references. Their route and exact handler edges produce 84 framework
+relationships in a 4.350-second clean index.

@@ -1,0 +1,39 @@
+{
+  "structurely_commit": "d9188d1",
+  "graph_model_version": 56,
+  "release_binary_sha256": "be80ec338f257d50b8b8520f03140412d471ae0987f4d0b98720ff65c2376047",
+  "repository": "nestjs/nest",
+  "repository_commit": "fafe503bd8ca073f2fdd41ed7138081af84c478e",
+  "verification": {
+    "rust_unit_tests": 196,
+    "daemon_integration_tests": 1,
+    "mcp_integration_tests": 1,
+    "clippy_all_targets_all_features": "pass",
+    "independent_review_blockers_remaining": 0
+  },
+  "fresh_index": {
+    "files_scanned": 1727,
+    "files_skipped": 0,
+    "wall_ms": 4350,
+    "reported_engine_ms": 4319,
+    "max_rss_kib": 67280,
+    "source_symbols": 8313,
+    "resolver_reported_relationships": 24764,
+    "persisted_symbols": 8340,
+    "persisted_relationships": 31307,
+    "database_bytes": 36786176,
+    "database_sha256": "ec53ad732048aa59bf477d80c1196789751eda9835d4a4599a8a6b77166d76ee"
+  },
+  "graphql_acceptance": {
+    "production_resolver_files": 13,
+    "route_symbols": 42,
+    "handler_call_edges": 42,
+    "file_contains_edges": 42,
+    "total_framework_relationships": 84,
+    "query": 18,
+    "mutation": 11,
+    "resolve_field": 5,
+    "subscription": 6,
+    "resolve_reference": 2
+  }
+}
