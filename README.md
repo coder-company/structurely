@@ -1,24 +1,18 @@
 # Structurely
 
-Structurely is a Rust-first, local semantic code intelligence engine for coding
-agents. It indexes source into a transactional SQLite graph and exposes
-CodeGraph-compatible CLI and MCP tools with additional relationship confidence,
-provenance, and explanations.
+Structurely gives coding agents a local semantic map of your codebase. It
+indexes symbols, calls, routes, callbacks, UI flows, and framework relationships
+into a transactional SQLite graph. Your source code stays on your machine.
 
-Structurely 0.1 supports TypeScript (`.ts`, `.mts`, `.cts`), TSX, JavaScript,
-JSX, Vue, Svelte, Astro, ArkTS, Python, Rust, Go, Java, C#, C, C++, Dart, Ruby,
-PHP, Swift, Lua, Kotlin, Scala, and R. Its production contract and reproducible evidence are listed in the
-[acceptance gates](docs/acceptance.md).
+Structurely is written in Rust and exposes CodeGraph-compatible CLI and MCP
+tools. On the pinned 441-file acceptance corpus, it matches all 25 shared
+compatibility checks while indexing 2.37× faster, querying 10.54× faster, and
+using 84.60% less peak memory than CodeGraph 1.5.0. See the
+[reproducible results](benchmarks/release-hardening-2026-07-29/README.md).
 
-## Build
+## Install Structurely
 
-```bash
-cargo build --release
-```
-
-The repository pins its Rust toolchain through `rust-toolchain.toml`.
-
-## Install
+You need Rust 1.88 or newer.
 
 macOS and Linux:
 
@@ -32,116 +26,93 @@ Windows PowerShell:
 irm https://raw.githubusercontent.com/coder-company/structurely/main/install.ps1 | iex
 ```
 
-The installers use `cargo install --locked` from the public Structurely
-repository. Set `STRUCTURELY_VERSION` to a release tag to install a pinned
-version. Native standalone archives, SHA-256 checksums, and build attestations
-are attached to tagged GitHub Releases.
+Confirm the installation:
 
-## Quick start
+```bash
+structurely --version
+```
+
+Tagged GitHub releases also provide standalone archives, SHA-256 checksums, and
+build-provenance attestations.
+
+## Index your first project
 
 ```bash
 structurely init /path/to/project
-structurely status /path/to/project
-structurely search UserController --path /path/to/project
-structurely explore authentication --path /path/to/project
+structurely explore "authentication flow" --path /path/to/project
+```
+
+`init` creates `/path/to/project/.structurely/graph.db`. Add `.structurely/` to
+the project's ignore file if your global Git configuration does not already
+ignore it.
+
+Use the background indexer to keep the graph current:
+
+```bash
 structurely daemon start --path /path/to/project
-structurely integrations install codex --path /path/to/project
+structurely daemon status --path /path/to/project
 ```
 
-Indexes are stored in `/path/to/project/.structurely/graph.db`. Source code and
-graph data stay local.
+## Connect your coding agent
 
-`structurely daemon start` keeps the graph synchronized through native
-recursive filesystem notifications and one exclusive project lock. Use
-`structurely daemon status` and `structurely daemon stop`; repeated start and
-stop operations are safe. MCP tools use the shared daemon epoch when healthy
-and disclose bounded foreground fallback when it is unavailable.
-
-Project-scoped coding-agent integration is available for `codex`, `claude`, and
-`cursor`:
+Structurely configures project-local MCP settings without changing unrelated
+entries:
 
 ```bash
 structurely integrations install codex --path /path/to/project
-structurely integrations status codex --path /path/to/project
-structurely integrations uninstall codex --path /path/to/project
+structurely integrations install claude --path /path/to/project
+structurely integrations install cursor --path /path/to/project
 ```
 
-Install and uninstall preserve unrelated TOML/JSON settings and change only the
-`structurely` MCP server entry.
-
-## MCP
-
-Configure an MCP client to execute:
+Restart the agent after installation. To configure another MCP client manually,
+run this command as a standard-input/standard-output server:
 
 ```bash
-structurely serve --mcp --path /path/to/project
+structurely serve --mcp --path /absolute/path/to/project
 ```
 
-The current compatibility surface implements:
+Structurely implements `codegraph_explore`, `codegraph_search`,
+`codegraph_callers`, `codegraph_callees`, `codegraph_impact`,
+`codegraph_status`, `codegraph_files`, and `codegraph_node`. It advertises only
+`codegraph_explore` by default for CodeGraph compatibility. Set
+`CODEGRAPH_MCP_TOOLS` to a comma-separated list to advertise more tools:
 
-- `codegraph_search`
-- `codegraph_explore`
-- `codegraph_callers`
-- `codegraph_callees`
-- `codegraph_impact`
-- `codegraph_status`
-- `codegraph_files`
-- `codegraph_node`
-
-Only `codegraph_explore` is advertised to MCP clients by default, matching
-CodeGraph 1.5.0. Set `CODEGRAPH_MCP_TOOLS=explore,node,search,callers` (or
-another comma-separated selection) to advertise narrower tools.
-
-Every relationship result includes its confidence, provenance, source location,
-and explanation. Tool inputs are validated and collection sizes are bounded so
-malformed or unexpectedly broad agent requests fail predictably.
-
-## Design
-
-- [Architecture and invariants](docs/architecture.md)
-- [CodeGraph compatibility contract](docs/compatibility.md)
-- [Production acceptance gates](docs/acceptance.md)
-- [Reproducible benchmark protocol](docs/benchmarks.md)
-- [CodeGraph feature-parity matrix](docs/codegraph-parity.md)
-
-## Project configuration
-
-Structurely reads `structurely.json`, falling back to a compatible
-`codegraph.json` when the Structurely-specific file is absent. Custom source
-extensions and explicit exclusions are supported:
-
-```json
-{
-  "extensions": {
-    ".view": "typescript"
-  },
-  "exclude": [
-    "vendor/**",
-    "generated/**"
-  ]
-}
+```bash
+CODEGRAPH_MCP_TOOLS=explore,node,search,callers \
+  structurely serve --mcp --path /path/to/project
 ```
 
-Invalid extension entries and malformed JSON degrade to the zero-config
-defaults. `structurely.json` takes precedence when both files exist.
-- [Release and artifact verification](docs/releases.md)
-- [Changelog](CHANGELOG.md)
-- [Installation, privacy, and troubleshooting](docs/operations.md)
-- [Domain language](CONTEXT.md)
-- [Contributing](CONTRIBUTING.md)
-- [Security policy](SECURITY.md)
+## Supported languages
 
-## Development
+Structurely indexes TypeScript, TSX, JavaScript, JSX, Vue, Svelte, Astro,
+ArkTS, Python, Rust, Go, Java, C#, C, C++, Dart, Ruby, PHP, Swift, Lua, Kotlin,
+Scala, and R.
+
+It also resolves selected framework behavior for React, Express, React Router,
+FastAPI, Django, Django REST Framework, NestJS, Vue, Svelte, Astro, ArkUI, and
+OpenHarmony. The [compatibility matrix](docs/codegraph-parity.md) states the
+tested scope and intentional limits.
+
+## Read the documentation
+
+- [Get command syntax and examples](docs/cli-reference.md)
+- [Configure files and indexing](docs/configuration.md)
+- [Install, operate, and troubleshoot Structurely](docs/operations.md)
+- [Connect through MCP](docs/compatibility.md)
+- [Understand the architecture](docs/architecture.md)
+- [Review release verification](docs/releases.md)
+- [Reproduce acceptance tests](docs/acceptance.md)
+- [Contribute](CONTRIBUTING.md)
+- [Report a security issue](SECURITY.md)
+
+## Develop Structurely
 
 ```bash
 cargo fmt --check
-cargo test
-cargo clippy --all-targets -- -D warnings
+cargo test --all-targets --locked
+cargo clippy --all-targets --all-features -- -D warnings
+cargo build --release --locked
 ```
 
-Structurely is not affiliated with CodeGraph. CodeGraph compatibility describes
-the agent-facing protocol supported by Structurely.
-
-## License
-
-Structurely is available under the [MIT License](LICENSE).
+Structurely is available under the [MIT License](LICENSE). Structurely is not
+affiliated with CodeGraph.

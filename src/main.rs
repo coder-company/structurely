@@ -17,99 +17,145 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Create or rebuild the project index.
     Init {
+        /// Project root to index.
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// Index files that changed since the last graph epoch.
     Sync {
+        /// Initialized project root.
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// Show index freshness, size, and storage health.
     Status {
+        /// Initialized project root.
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// Find symbols by name or natural-language terms.
     Search {
+        /// Symbol name or search terms.
         #[arg(value_parser = parse_query)]
         query: String,
+        /// Initialized project root.
         #[arg(long, default_value = ".")]
         path: PathBuf,
+        /// Maximum number of results (1-100).
         #[arg(long, default_value_t = 20, value_parser = parse_result_limit)]
         limit: usize,
     },
+    /// Build bounded, source-backed context for a coding task.
     Explore {
+        /// Task, symbol name, or search terms.
         #[arg(value_parser = parse_query)]
         query: String,
+        /// Initialized project root.
         #[arg(long, default_value = ".")]
         path: PathBuf,
+        /// Maximum number of starting symbols (1-100).
         #[arg(long, default_value_t = 20, value_parser = parse_result_limit)]
         limit: usize,
     },
+    /// List symbols that call a named symbol.
     Callers {
+        /// Exact symbol name.
         #[arg(value_parser = parse_identifier)]
         symbol: String,
+        /// Optional project-relative file used to disambiguate the symbol.
         #[arg(long, value_parser = parse_identifier)]
         file: Option<String>,
+        /// Initialized project root.
         #[arg(long, default_value = ".")]
         path: PathBuf,
+        /// Maximum number of results (1-100).
         #[arg(long, default_value_t = 20, value_parser = parse_result_limit)]
         limit: usize,
     },
+    /// List symbols called by a named symbol.
     Callees {
+        /// Exact symbol name.
         #[arg(value_parser = parse_identifier)]
         symbol: String,
+        /// Optional project-relative file used to disambiguate the symbol.
         #[arg(long, value_parser = parse_identifier)]
         file: Option<String>,
+        /// Initialized project root.
         #[arg(long, default_value = ".")]
         path: PathBuf,
+        /// Maximum number of results (1-100).
         #[arg(long, default_value_t = 20, value_parser = parse_result_limit)]
         limit: usize,
     },
+    /// Traverse callers to estimate the impact of changing a symbol.
     Impact {
+        /// Exact symbol name.
         #[arg(value_parser = parse_identifier)]
         symbol: String,
+        /// Optional project-relative file used to disambiguate the symbol.
         #[arg(long, value_parser = parse_identifier)]
         file: Option<String>,
+        /// Initialized project root.
         #[arg(long, default_value = ".")]
         path: PathBuf,
+        /// Maximum traversal depth (1-20).
         #[arg(long, default_value_t = 2, value_parser = parse_traversal_depth)]
         depth: usize,
     },
+    /// Export a deterministic JSON snapshot of the graph.
     Snapshot {
+        /// Initialized project root.
         #[arg(long, default_value = ".")]
         path: PathBuf,
     },
+    /// Measure indexing and query latency.
     Benchmark {
+        /// Project root.
         #[arg(long, default_value = ".")]
         path: PathBuf,
+        /// Search query used for the query benchmark.
         #[arg(long, default_value = "main", value_parser = parse_query)]
         query: String,
+        /// Query iterations (1-1000).
         #[arg(long, default_value_t = 20, value_parser = parse_benchmark_iterations)]
         iterations: usize,
     },
+    /// Compare the graph with an expected semantic manifest.
     Quality {
+        /// Initialized project root.
         #[arg(long, default_value = ".")]
         path: PathBuf,
+        /// Path to the quality manifest.
         #[arg(long, default_value = "quality.json")]
         manifest: PathBuf,
     },
+    /// Watch a project and publish incremental graph epochs.
     Watch {
+        /// Initialized project root.
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Filesystem event debounce in milliseconds.
         #[arg(long, default_value_t = 250)]
         debounce_ms: u64,
     },
+    /// Manage the background project indexer.
     Daemon {
         #[command(subcommand)]
         command: DaemonCommand,
     },
+    /// Configure a coding agent to use Structurely over MCP.
     Integrations {
         #[command(subcommand)]
         command: IntegrationCommand,
     },
+    /// Run a protocol server.
     Serve {
+        /// Serve newline-delimited MCP over standard input and output.
         #[arg(long)]
         mcp: bool,
+        /// Initialized project root.
         #[arg(long, default_value = ".")]
         path: PathBuf,
     },
@@ -150,17 +196,24 @@ fn parse_benchmark_iterations(value: &str) -> std::result::Result<usize, String>
 
 #[derive(Subcommand)]
 enum DaemonCommand {
+    /// Start the background indexer.
     Start {
+        /// Initialized project root.
         #[arg(long, default_value = ".")]
         path: PathBuf,
+        /// Filesystem event debounce in milliseconds.
         #[arg(long, default_value_t = 250)]
         debounce_ms: u64,
     },
+    /// Show background indexer health and freshness.
     Status {
+        /// Initialized project root.
         #[arg(long, default_value = ".")]
         path: PathBuf,
     },
+    /// Stop the background indexer.
     Stop {
+        /// Initialized project root.
         #[arg(long, default_value = ".")]
         path: PathBuf,
     },
@@ -175,18 +228,27 @@ enum DaemonCommand {
 
 #[derive(Subcommand)]
 enum IntegrationCommand {
+    /// Add Structurely to a project-local agent configuration.
     Install {
+        /// Agent name: codex, claude, or cursor.
         client: String,
+        /// Project root whose agent configuration to update.
         #[arg(long, default_value = ".")]
         path: PathBuf,
     },
+    /// Check a project-local agent configuration.
     Status {
+        /// Agent name: codex, claude, or cursor.
         client: String,
+        /// Project root whose agent configuration to inspect.
         #[arg(long, default_value = ".")]
         path: PathBuf,
     },
+    /// Remove only Structurely's project-local agent entry.
     Uninstall {
+        /// Agent name: codex, claude, or cursor.
         client: String,
+        /// Project root whose agent configuration to update.
         #[arg(long, default_value = ".")]
         path: PathBuf,
     },
