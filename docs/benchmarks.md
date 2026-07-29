@@ -55,6 +55,14 @@ less peak memory, and produces an 11.66% smaller database. The
 matching
 [`MCP differential`](../benchmarks/differential-mcp-2026-07-29-post-call-result/README.md)
 retains 22/22 shared compatibility and 1.0000 usefulness for both engines.
+
+The pinned
+[`C macro callback-table gate`](../benchmarks/c-macros-2026-07-29/README.md)
+records a semantic superiority result rather than a general speed claim:
+Structurely resolves all 14 intended targets while CodeGraph 1.5.0 resolves
+one. Structurely also rejects every deliberately impossible target, updates
+both source- and header-defined aliases incrementally, and converges on a
+zero-change sync.
 The pinned
 [`OpenHarmony call-result gate`](../benchmarks/openharmony-call-result-2026-07-29/README.md)
 passes 16/16 correlated assertions across 6,995 ETS files. Its new assertion

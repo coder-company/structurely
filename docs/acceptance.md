@@ -22,6 +22,9 @@ Structurely is complete only when all gates are evidenced on pinned fixtures.
   fallbacks.
 - TypeScript aliases and workspace packages pass wildcard, ambiguity,
   traversal, scoped-package, and cross-package fixtures.
+- C/C++ macro callback tables pass source-order, include-context, mutually
+  exclusive branch, constant-condition, invalid-expansion, state-convergence,
+  incremental cleanup, and pinned CodeGraph differential fixtures.
 
 ## Performance
 

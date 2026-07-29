@@ -25,6 +25,18 @@ representative repository gate is `scripts/acceptance_repositories.py`.
 Checked-in results remain evidence for their exact pinned revisions, not a
 claim that every framework pattern is supported.
 
+Graph model v67 supersedes the callbacks-row gap text for
+“macro/conditional table construction.” Structurely now resolves bounded,
+source-ordered object and non-variadic function macros in C/C++ callback
+tables, including nested substitution, designated/positional whole tables,
+pointer and struct arrays, include-context reevaluation, correlated
+`#if`/`#ifdef`/`#undef` state, constant boolean conditions, incremental
+cleanup, and fail-closed limits. The pinned
+[`c-macros-2026-07-29`](../benchmarks/c-macros-2026-07-29/README.md) gate
+resolves 14/14 intended targets versus 1/14 for CodeGraph 1.5.0. Compiler
+`-D`/`-U`, response files, variadics, stringification/token pasting, and
+external or generated non-indexed headers remain intentionally unsupported.
+
 ## Delivery order
 
 1. Deep project inventory and project-resolution context.
