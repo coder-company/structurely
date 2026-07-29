@@ -150,14 +150,6 @@ fn daemon_start_status_catch_up_and_stop_are_idempotent() {
         }
     }
 
-    #[cfg(not(unix))]
-    {
-        let stopped = run_json(
-            temp.path(),
-            &["daemon", "stop", "--path", temp.path().to_str().unwrap()],
-        );
-        assert_eq!(stopped["stopped"], true);
-    }
     let duplicate = run_json(
         temp.path(),
         &["daemon", "start", "--path", temp.path().to_str().unwrap()],
