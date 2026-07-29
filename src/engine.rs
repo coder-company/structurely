@@ -7719,6 +7719,125 @@ def outer():
     }
 
     #[test]
+    fn c_function_pointer_dispatch_resolves_tables_chains_and_evidence_sites() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("ops.h"),
+            "typedef int (*handler_t)(int);\n\
+             typedef struct Inner { handler_t run; } Inner;\n\
+             typedef struct Outer { int tag; Inner *inner; } Outer;\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("dispatch.c"),
+            "#include \"ops.h\"\n\
+             static int alpha(int value) { return value + 1; }\n\
+             static int beta(int value) { return value + 2; }\n\
+             static Inner table[] = { { alpha }, { .run = beta } };\n\
+             void install(Inner *ops) { ops->run = &alpha; }\n\
+             int direct(Inner *ops, int value) { return ops->run(value); }\n\
+             int chained(Outer *outer, int value) { return outer->inner->run(value); }\n\
+             int twice(Inner *ops, int value) { return ops->run(value) + ops->run(value); }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let snapshot = engine.snapshot().unwrap();
+        let symbols = snapshot
+            .symbols
+            .iter()
+            .map(|symbol| (symbol.id.as_str(), symbol))
+            .collect::<std::collections::HashMap<_, _>>();
+        let edges = snapshot
+            .relationships
+            .iter()
+            .filter(|edge| edge.evidence.provenance == "dynamic/c-function-pointer-dispatch")
+            .map(|edge| {
+                (
+                    symbols[edge.source_id.as_str()].name.as_str(),
+                    symbols[edge.target_id.as_str()].name.as_str(),
+                    edge.evidence.site,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        for source in ["direct", "chained"] {
+            assert_eq!(
+                edges
+                    .iter()
+                    .filter(|(actual, _, _)| *actual == source)
+                    .map(|(_, target, _)| *target)
+                    .collect::<std::collections::HashSet<_>>(),
+                std::collections::HashSet::from(["alpha", "beta"])
+            );
+        }
+        let twice = edges
+            .iter()
+            .filter(|(source, _, _)| *source == "twice")
+            .collect::<Vec<_>>();
+        assert_eq!(twice.len(), 4);
+        assert_eq!(
+            twice
+                .iter()
+                .map(|(_, _, site)| site.unwrap())
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn c_function_pointer_dispatch_fails_closed_and_cleans_up_incrementally() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("one.h"),
+            "typedef struct Ops { int (*run)(int); } Ops;\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("two.h"),
+            "typedef struct Ops { int (*run)(int); } Ops;\n",
+        )
+        .unwrap();
+        let source = temp.path().join("dispatch.c");
+        fs::write(
+            &source,
+            "#include \"one.h\"\n\
+             #include \"two.h\"\n\
+             static int alpha(int value) { return value; }\n\
+             void install(Ops *ops) { ops->run = alpha; }\n\
+             int dispatch(Ops *ops, int value) { return ops->run(value); }\n",
+        )
+        .unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let edge_count = |engine: &Engine| {
+            engine
+                .snapshot()
+                .unwrap()
+                .relationships
+                .iter()
+                .filter(|edge| edge.evidence.provenance == "dynamic/c-function-pointer-dispatch")
+                .count()
+        };
+        assert_eq!(edge_count(&engine), 0);
+
+        fs::remove_file(temp.path().join("two.h")).unwrap();
+        assert_eq!(engine.sync().unwrap().files_deleted, 1);
+        assert_eq!(edge_count(&engine), 1);
+
+        fs::write(
+            &source,
+            "#include \"one.h\"\n\
+             static int alpha(int value) { return value; }\n\
+             void install(Ops *ops) { ops->run = alpha; }\n\
+             int dispatch(Ops *ops, int value) { return value; }\n",
+        )
+        .unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 1);
+        assert_eq!(edge_count(&engine), 0);
+    }
+
+    #[test]
     fn watcher_makes_saved_symbols_query_visible() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("main.ts"), "function before() {}\n").unwrap();

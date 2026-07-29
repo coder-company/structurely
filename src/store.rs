@@ -1,6 +1,7 @@
 use crate::model::{
-    ArkuiBuilderFlowFacts, EventChannel, Evidence, FastApiFacts, FastApiRouterRef, FileFacts,
-    Language, Relationship, RelationshipKind, SourceSpan, Symbol, SymbolKind, GRAPH_MODEL_VERSION,
+    ArkuiBuilderFlowFacts, CFunctionPointerFacts, EventChannel, Evidence, FastApiFacts,
+    FastApiRouterRef, FileFacts, Language, Relationship, RelationshipKind, SourceSpan, Symbol,
+    SymbolKind, GRAPH_MODEL_VERSION,
 };
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -243,6 +244,10 @@ impl Store {
                 payload TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS fastapi_fact_batches (
+                file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+                payload TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS c_function_pointer_fact_batches (
                 file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
                 payload TEXT NOT NULL
             );
@@ -711,6 +716,7 @@ impl Store {
         relationships_resolved += Self::resolve_arkui_builder_flows(tx)?;
         relationships_resolved += Self::resolve_interface_dispatch(tx)?;
         relationships_resolved += Self::resolve_dynamic_events(tx)?;
+        relationships_resolved += Self::resolve_c_function_pointer_dispatch(tx)?;
         relationships_resolved += Self::materialize_fastapi_routes(tx)?;
         tx.execute(
             "UPDATE metadata SET value = ?1 WHERE key = 'graph_epoch'",
@@ -995,6 +1001,18 @@ impl Store {
             let payload = serde_json::to_string(&file.fastapi)?;
             tx.prepare_cached("INSERT INTO fastapi_fact_batches(file_id,payload) VALUES (?1,?2)")?
                 .execute(params![file_id, payload])?;
+        }
+        if !file.c_function_pointers.typedefs.is_empty()
+            || !file.c_function_pointers.layouts.is_empty()
+            || !file.c_function_pointers.bindings.is_empty()
+            || !file.c_function_pointers.dispatches.is_empty()
+            || !file.c_function_pointers.includes.is_empty()
+        {
+            let payload = serde_json::to_string(&file.c_function_pointers)?;
+            tx.prepare_cached(
+                "INSERT INTO c_function_pointer_fact_batches(file_id,payload) VALUES (?1,?2)",
+            )?
+            .execute(params![file_id, payload])?;
         }
         for event in &file.dynamic_events {
             let (channel, target_file_hint, export_name, member_path) = match &event.channel {
@@ -1856,6 +1874,284 @@ impl Store {
                     },
                 )?;
                 resolved += 1;
+            }
+        }
+        Ok(resolved)
+    }
+
+    fn resolve_c_function_pointer_dispatch(tx: &Transaction<'_>) -> Result<usize> {
+        const PROVENANCE: &str = "dynamic/c-function-pointer-dispatch";
+        const INCLUDE_DEPTH_CAP: usize = 16;
+        const WORK_CAP: usize = 100_000;
+        const TARGET_FANOUT_CAP: usize = 300;
+        type LayoutKey = (String, String);
+        type FieldKey = (String, String, String);
+
+        tx.execute(
+            "DELETE FROM relationships WHERE provenance=?1",
+            [PROVENANCE],
+        )?;
+
+        let mut statement = tx.prepare(
+            "SELECT f.path,b.payload
+             FROM c_function_pointer_fact_batches b
+             JOIN files f ON f.id=b.file_id
+             ORDER BY f.path",
+        )?;
+        let batches = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        if batches.is_empty() {
+            return Ok(0);
+        }
+
+        let mut files = HashMap::<String, CFunctionPointerFacts>::new();
+        for (path, payload) in batches {
+            files.insert(path, serde_json::from_str(&payload)?);
+        }
+        let all_paths = files.keys().cloned().collect::<HashSet<_>>();
+        let mut include_edges = HashMap::<String, Vec<String>>::new();
+        for (path, facts) in &files {
+            let mut targets = Vec::new();
+            for include in &facts.includes {
+                if let Some(target) = resolve_c_quoted_include(path, &include.path, &all_paths) {
+                    targets.push(target);
+                }
+            }
+            targets.sort();
+            targets.dedup();
+            include_edges.insert(path.clone(), targets);
+        }
+
+        let mut layouts = HashMap::<LayoutKey, Vec<crate::model::CStructLayoutFact>>::new();
+        for (path, facts) in &files {
+            for layout in &facts.layouts {
+                layouts
+                    .entry((path.clone(), layout.type_name.clone()))
+                    .or_default()
+                    .push(layout.clone());
+            }
+        }
+        let resolve_layout = |source_file: &str, type_name: &str| -> Option<LayoutKey> {
+            let normalized_type = normalize_c_type_name(type_name);
+            let accepted_types = [normalized_type.clone(), format!("{normalized_type}_tag")];
+            let visible = c_visible_files(source_file, &include_edges, INCLUDE_DEPTH_CAP, WORK_CAP);
+            let mut candidates = Vec::new();
+            for path in visible {
+                for candidate_type in &accepted_types {
+                    let key = (path.clone(), candidate_type.clone());
+                    if layouts.get(&key).is_some_and(|items| items.len() == 1) {
+                        candidates.push(key);
+                    }
+                }
+            }
+            candidates.sort();
+            candidates.dedup();
+            if candidates.len() == 1 {
+                return Some(candidates.remove(0));
+            }
+            if !candidates.is_empty() {
+                return None;
+            }
+            None
+        };
+        let resolve_layout_by_field = |source_file: &str, field_name: &str| -> Option<LayoutKey> {
+            let visible = c_visible_files(source_file, &include_edges, INCLUDE_DEPTH_CAP, WORK_CAP);
+            let visible = visible.into_iter().collect::<HashSet<_>>();
+            let mut candidates = layouts
+                .iter()
+                .filter(|((path, _), items)| {
+                    visible.contains(path)
+                        && items.len() == 1
+                        && items[0]
+                            .fields
+                            .iter()
+                            .any(|field| field.name == field_name && field.function_pointer)
+                })
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>();
+            candidates.sort();
+            candidates.dedup();
+            if candidates.len() == 1 {
+                return Some(candidates.remove(0));
+            }
+            if !candidates.is_empty() {
+                return None;
+            }
+            None
+        };
+
+        let mut symbols_by_file_name = HashMap::<(String, String), Vec<String>>::new();
+        let mut symbol_statement = tx.prepare(
+            "SELECT f.path,s.name,s.public_id
+             FROM symbols s JOIN files f ON f.id=s.file_id
+             WHERE s.kind IN ('function','method')
+             ORDER BY f.path,s.name,s.public_id",
+        )?;
+        for row in symbol_statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })? {
+            let (file, name, id) = row?;
+            symbols_by_file_name
+                .entry((file, name))
+                .or_default()
+                .push(id);
+        }
+        drop(symbol_statement);
+        for candidates in symbols_by_file_name.values_mut() {
+            candidates.sort();
+            candidates.dedup();
+        }
+
+        let mut registered = HashMap::<FieldKey, HashSet<String>>::new();
+        let mut work = 0usize;
+        let mut paths = files.keys().cloned().collect::<Vec<_>>();
+        paths.sort();
+        for path in &paths {
+            let facts = &files[path];
+            for binding in &facts.bindings {
+                if work >= WORK_CAP {
+                    break;
+                }
+                work += 1;
+                let Some(receiver_type) = binding.receiver_type.as_deref() else {
+                    continue;
+                };
+                let Some(layout_key) = resolve_layout(path, receiver_type) else {
+                    continue;
+                };
+                let Some(layout) = layouts.get(&layout_key).and_then(|items| items.first()) else {
+                    continue;
+                };
+                let field = if let Some(name) = binding.field_name.as_deref() {
+                    layout.fields.iter().find(|field| field.name == name)
+                } else if let Some(index) = binding.field_index {
+                    layout.fields.iter().find(|field| field.index == index)
+                } else {
+                    None
+                };
+                let Some(field) = field.filter(|field| field.function_pointer) else {
+                    continue;
+                };
+                let candidates = symbols_by_file_name
+                    .get(&(path.clone(), binding.target_name.clone()))
+                    .cloned()
+                    .unwrap_or_default();
+                if candidates.len() != 1 {
+                    continue;
+                }
+                registered
+                    .entry((layout_key.0, layout_key.1, field.name.clone()))
+                    .or_default()
+                    .insert(candidates[0].clone());
+            }
+        }
+
+        let mut resolved = 0usize;
+        for path in &paths {
+            let facts = &files[path];
+            for dispatch in &facts.dispatches {
+                if work >= WORK_CAP {
+                    break;
+                }
+                work += 1;
+                let owner_exists = tx
+                    .query_row(
+                        "SELECT 1 FROM symbols
+                         WHERE public_id=?1 AND kind IN ('function','method')",
+                        [&dispatch.owner_id],
+                        |_| Ok(()),
+                    )
+                    .optional()?
+                    .is_some();
+                if !owner_exists {
+                    continue;
+                }
+                let layout_key = dispatch
+                    .receiver_type
+                    .as_deref()
+                    .and_then(|receiver_type| resolve_layout(path, receiver_type))
+                    .or_else(|| resolve_layout_by_field(path, &dispatch.field_name));
+                let Some(mut layout_key) = layout_key else {
+                    continue;
+                };
+                let mut chain_valid = true;
+                for member in dispatch.receiver_path.iter().skip(1) {
+                    let Some(layout) = layouts.get(&layout_key).and_then(|items| items.first())
+                    else {
+                        chain_valid = false;
+                        break;
+                    };
+                    let Some(next_type) = layout
+                        .fields
+                        .iter()
+                        .find(|field| field.name == *member)
+                        .and_then(|field| field.value_type.as_deref())
+                    else {
+                        chain_valid = false;
+                        break;
+                    };
+                    let Some(next_layout) = resolve_layout(path, next_type) else {
+                        chain_valid = false;
+                        break;
+                    };
+                    layout_key = next_layout;
+                }
+                if !chain_valid {
+                    continue;
+                }
+                let Some(layout) = layouts.get(&layout_key).and_then(|items| items.first()) else {
+                    continue;
+                };
+                let field_is_pointer = layout
+                    .fields
+                    .iter()
+                    .any(|field| field.name == dispatch.field_name && field.function_pointer);
+                if !field_is_pointer {
+                    continue;
+                }
+                let key = (
+                    layout_key.0.clone(),
+                    layout_key.1.clone(),
+                    dispatch.field_name.clone(),
+                );
+                let mut targets = registered
+                    .get(&key)
+                    .map(|targets| targets.iter().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                targets.sort();
+                if targets.is_empty() || targets.len() > TARGET_FANOUT_CAP {
+                    continue;
+                }
+                for target_id in targets {
+                    Self::insert_relationship(
+                        tx,
+                        &Relationship {
+                            source_id: dispatch.owner_id.clone(),
+                            target_id,
+                            kind: RelationshipKind::Calls,
+                            evidence: Evidence::new(
+                                PROVENANCE,
+                                0.97,
+                                format!(
+                                    "proven C/C++ function-pointer may-dispatch through {}.{}",
+                                    layout_key.1, dispatch.field_name
+                                ),
+                                path,
+                                dispatch.line,
+                            )
+                            .at_site(dispatch.site_start_byte),
+                        },
+                    )?;
+                    resolved += 1;
+                }
             }
         }
         Ok(resolved)
@@ -3945,6 +4241,85 @@ impl Store {
             end_line: row.get::<_, i64>(10)? as usize,
         })
     }
+}
+
+fn normalize_c_type_name(type_name: &str) -> String {
+    type_name
+        .split_whitespace()
+        .filter(|part| !matches!(*part, "const" | "volatile" | "struct" | "class"))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_matches(|character| character == '*' || character == '&' || character == ' ')
+        .to_owned()
+}
+
+fn resolve_c_quoted_include(
+    source_file: &str,
+    include: &str,
+    all_paths: &HashSet<String>,
+) -> Option<String> {
+    let include = include.replace('\\', "/");
+    let parent = source_file
+        .rsplit_once('/')
+        .map_or("", |(parent, _)| parent);
+    let joined = if parent.is_empty() {
+        include.clone()
+    } else {
+        format!("{parent}/{include}")
+    };
+    if let Some(normalized) = normalize_project_relative_path(&joined) {
+        if all_paths.contains(&normalized) {
+            return Some(normalized);
+        }
+    }
+    let suffix = format!("/{include}");
+    let mut suffix_matches = all_paths
+        .iter()
+        .filter(|path| path.as_str() == include || path.ends_with(&suffix))
+        .cloned()
+        .collect::<Vec<_>>();
+    suffix_matches.sort();
+    suffix_matches.dedup();
+    (suffix_matches.len() == 1).then(|| suffix_matches.remove(0))
+}
+
+fn normalize_project_relative_path(path: &str) -> Option<String> {
+    let mut components = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop()?;
+            }
+            value => components.push(value),
+        }
+    }
+    (!components.is_empty()).then(|| components.join("/"))
+}
+
+fn c_visible_files(
+    source_file: &str,
+    include_edges: &HashMap<String, Vec<String>>,
+    depth_cap: usize,
+    work_cap: usize,
+) -> Vec<String> {
+    let mut visible = HashSet::new();
+    let mut queue = VecDeque::from([(source_file.to_owned(), 0usize)]);
+    let mut work = 0usize;
+    while let Some((file, depth)) = queue.pop_front() {
+        if work >= work_cap || depth > depth_cap || !visible.insert(file.clone()) {
+            continue;
+        }
+        work += 1;
+        if let Some(includes) = include_edges.get(&file) {
+            for include in includes {
+                queue.push_back((include.clone(), depth + 1));
+            }
+        }
+    }
+    let mut visible = visible.into_iter().collect::<Vec<_>>();
+    visible.sort();
+    visible
 }
 
 fn normalized_module_key(path: &str) -> String {

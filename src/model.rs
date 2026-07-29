@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path};
 
-pub const GRAPH_MODEL_VERSION: u32 = 59;
+pub const GRAPH_MODEL_VERSION: u32 = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -425,6 +425,69 @@ pub(crate) struct ModuleExportFact {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct CFunctionPointerFacts {
+    pub typedefs: Vec<CFunctionPointerTypedefFact>,
+    pub layouts: Vec<CStructLayoutFact>,
+    pub bindings: Vec<CFunctionPointerBindingFact>,
+    pub dispatches: Vec<CFunctionPointerDispatchFact>,
+    pub includes: Vec<CIncludeFact>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CFunctionPointerTypedefFact {
+    pub name: String,
+    pub pointer: bool,
+    pub line: usize,
+    pub site_start_byte: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CStructLayoutFact {
+    pub type_name: String,
+    pub fields: Vec<CStructFieldFact>,
+    pub line: usize,
+    pub site_start_byte: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CStructFieldFact {
+    pub name: String,
+    pub index: usize,
+    pub value_type: Option<String>,
+    pub function_pointer: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CFunctionPointerBindingFact {
+    pub owner_id: String,
+    pub receiver_type: Option<String>,
+    pub receiver_path: Vec<String>,
+    pub field_name: Option<String>,
+    pub field_index: Option<usize>,
+    pub target_name: String,
+    pub line: usize,
+    pub site_start_byte: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CFunctionPointerDispatchFact {
+    pub owner_id: String,
+    pub receiver_type: Option<String>,
+    pub receiver_path: Vec<String>,
+    pub field_name: String,
+    pub proven_function_pointer: bool,
+    pub line: usize,
+    pub site_start_byte: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CIncludeFact {
+    pub path: String,
+    pub line: usize,
+    pub site_start_byte: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct FastApiFacts {
     pub routers: Vec<FastApiRouterFact>,
     pub aliases: Vec<FastApiAliasFact>,
@@ -528,6 +591,7 @@ pub(crate) struct FileFacts {
     pub dynamic_events: Vec<DynamicEventFact>,
     pub literal_bindings: Vec<LiteralBindingFact>,
     pub module_exports: Vec<ModuleExportFact>,
+    pub c_function_pointers: CFunctionPointerFacts,
     pub fastapi: FastApiFacts,
 }
 

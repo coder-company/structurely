@@ -1,4 +1,6 @@
 use crate::model::{
+    CFunctionPointerBindingFact, CFunctionPointerDispatchFact, CFunctionPointerFacts,
+    CFunctionPointerTypedefFact, CIncludeFact, CStructFieldFact, CStructLayoutFact,
     CallableReturnFact, CallbackArgumentFact, CallbackParameterDelegationFact,
     CallbackParameterInvocation, Evidence, FileFacts, Language, PythonCallbackFormalFact,
     Relationship, RelationshipKind, SourceSpan, Symbol, SymbolKind, UnresolvedCall,
@@ -108,6 +110,24 @@ pub(crate) fn parse_file_as(
     if language == Language::Dart {
         collect_dart_body_owners(tree.root_node(), &symbols, &mut symbol_owners);
     }
+    let c_function_pointers = if matches!(language, Language::C | Language::Cpp) {
+        collect_c_function_pointer_facts(
+            tree.root_node(),
+            source_bytes,
+            language,
+            &symbols,
+            &symbol_owners,
+            &file_symbol.id,
+        )
+    } else {
+        CFunctionPointerFacts::default()
+    };
+    let indirect_call_sites = c_function_pointers
+        .dispatches
+        .iter()
+        .filter(|dispatch| dispatch.proven_function_pointer)
+        .map(|dispatch| dispatch.site_start_byte)
+        .collect::<std::collections::HashSet<_>>();
     let inline_callback_symbols = collect_inline_callback_symbols(
         tree.root_node(),
         source_bytes,
@@ -165,6 +185,7 @@ pub(crate) fn parse_file_as(
         project_names: &project_names,
         inline_callback_symbols: &inline_callback_symbols,
         inline_callback_ids: &inline_callback_ids,
+        indirect_call_sites: &indirect_call_sites,
         file_symbol_id: &file_symbol.id,
     };
     collect_calls(
@@ -207,6 +228,7 @@ pub(crate) fn parse_file_as(
         dynamic_events: Vec::new(),
         literal_bindings: Vec::new(),
         module_exports: Vec::new(),
+        c_function_pointers,
         fastapi: Default::default(),
     };
     enrich_file_facts(tree.root_node(), source_bytes, &mut facts);
@@ -1179,6 +1201,519 @@ fn rust_impl_container(node: Node<'_>, source: &[u8], parent: Option<&str>) -> O
     )
 }
 
+const MAX_C_FUNCTION_POINTER_FACTS_PER_FILE: usize = 16_384;
+const MAX_C_RECEIVER_PATH_DEPTH: usize = 8;
+
+fn collect_c_function_pointer_facts(
+    root: Node<'_>,
+    source: &[u8],
+    language: Language,
+    symbols: &[Symbol],
+    owners: &HashMap<(usize, usize), String>,
+    file_symbol_id: &str,
+) -> CFunctionPointerFacts {
+    let callable_names = symbols
+        .iter()
+        .filter(|symbol| matches!(symbol.kind, SymbolKind::Function | SymbolKind::Method))
+        .map(|symbol| symbol.name.clone())
+        .collect::<std::collections::HashSet<_>>();
+    let mut facts = CFunctionPointerFacts::default();
+    collect_c_function_pointer_typedefs(root, source, &mut facts.typedefs);
+    let function_types = facts
+        .typedefs
+        .iter()
+        .map(|fact| fact.name.clone())
+        .collect::<std::collections::HashSet<_>>();
+    collect_c_struct_layouts(root, source, &function_types, &mut facts.layouts);
+    let function_fields = facts
+        .layouts
+        .iter()
+        .flat_map(|layout| {
+            layout
+                .fields
+                .iter()
+                .filter(|field| field.function_pointer)
+                .map(|field| field.name.clone())
+        })
+        .collect::<std::collections::HashSet<_>>();
+    collect_c_function_pointer_observations(
+        root,
+        source,
+        language,
+        owners,
+        file_symbol_id,
+        &callable_names,
+        &function_fields,
+        &mut facts,
+    );
+    if facts.typedefs.len() > MAX_C_FUNCTION_POINTER_FACTS_PER_FILE {
+        facts.typedefs.clear();
+    }
+    if facts.layouts.len() > MAX_C_FUNCTION_POINTER_FACTS_PER_FILE {
+        facts.layouts.clear();
+    }
+    if facts.bindings.len() > MAX_C_FUNCTION_POINTER_FACTS_PER_FILE {
+        facts.bindings.clear();
+    }
+    if facts.dispatches.len() > MAX_C_FUNCTION_POINTER_FACTS_PER_FILE {
+        facts.dispatches.clear();
+    }
+    if facts.includes.len() > MAX_C_FUNCTION_POINTER_FACTS_PER_FILE {
+        facts.includes.clear();
+    }
+    facts
+}
+
+fn collect_c_function_pointer_typedefs(
+    node: Node<'_>,
+    source: &[u8],
+    output: &mut Vec<CFunctionPointerTypedefFact>,
+) {
+    if node.kind() == "type_definition" {
+        if let Some(declarator) = node.child_by_field_name("declarator") {
+            let function = first_descendant_or_self(declarator, "function_declarator");
+            if let (Some(function), Some(name)) = (function, c_declarator_name(declarator)) {
+                let pointer = first_descendant_or_self(function, "pointer_declarator").is_some();
+                output.push(CFunctionPointerTypedefFact {
+                    name: node_text(name, source),
+                    pointer,
+                    line: node.start_position().row + 1,
+                    site_start_byte: node.start_byte(),
+                });
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_c_function_pointer_typedefs(child, source, output);
+    }
+}
+
+fn collect_c_struct_layouts(
+    node: Node<'_>,
+    source: &[u8],
+    function_types: &std::collections::HashSet<String>,
+    output: &mut Vec<CStructLayoutFact>,
+) {
+    if matches!(node.kind(), "struct_specifier" | "class_specifier") {
+        if let (Some(type_name), Some(body)) = (
+            c_struct_type_name(node, source),
+            node.child_by_field_name("body"),
+        ) {
+            let mut fields = Vec::new();
+            let mut cursor = body.walk();
+            for declaration in body
+                .named_children(&mut cursor)
+                .filter(|child| child.kind() == "field_declaration")
+            {
+                let declared_type = declaration
+                    .child_by_field_name("type")
+                    .and_then(|type_node| c_type_name(type_node, source));
+                let mut declaration_cursor = declaration.walk();
+                for declarator in
+                    declaration
+                        .named_children(&mut declaration_cursor)
+                        .filter(|child| {
+                            child.id()
+                                != declaration
+                                    .child_by_field_name("type")
+                                    .map(|n| n.id())
+                                    .unwrap_or(usize::MAX)
+                        })
+                {
+                    let Some(name) = declarator_name(declarator) else {
+                        continue;
+                    };
+                    let explicit_pointer =
+                        first_descendant_or_self(declarator, "function_declarator").is_some_and(
+                            |function| {
+                                first_descendant_or_self(function, "pointer_declarator").is_some()
+                            },
+                        );
+                    let typed_pointer = declared_type
+                        .as_ref()
+                        .is_some_and(|name| function_types.contains(name));
+                    fields.push(CStructFieldFact {
+                        name: node_text(name, source),
+                        index: fields.len(),
+                        value_type: (!explicit_pointer && !typed_pointer)
+                            .then_some(declared_type.clone())
+                            .flatten(),
+                        function_pointer: explicit_pointer || typed_pointer,
+                    });
+                }
+            }
+            if !fields.is_empty() {
+                output.push(CStructLayoutFact {
+                    type_name,
+                    fields,
+                    line: node.start_position().row + 1,
+                    site_start_byte: node.start_byte(),
+                });
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_c_struct_layouts(child, source, function_types, output);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_c_function_pointer_observations(
+    node: Node<'_>,
+    source: &[u8],
+    language: Language,
+    owners: &HashMap<(usize, usize), String>,
+    file_symbol_id: &str,
+    callable_names: &std::collections::HashSet<String>,
+    function_fields: &std::collections::HashSet<String>,
+    facts: &mut CFunctionPointerFacts,
+) {
+    if node.kind() == "preproc_include" {
+        if let Some(path) = node
+            .child_by_field_name("path")
+            .filter(|path| path.kind() == "string_literal")
+            .map(|path| node_text(path, source))
+            .and_then(|path| {
+                path.strip_prefix('"')
+                    .and_then(|path| path.strip_suffix('"'))
+                    .map(str::to_owned)
+            })
+        {
+            facts.includes.push(CIncludeFact {
+                path,
+                line: node.start_position().row + 1,
+                site_start_byte: node.start_byte(),
+            });
+        }
+    } else if node.kind() == "assignment_expression" {
+        if let (Some(left), Some(right)) = (
+            node.child_by_field_name("left"),
+            node.child_by_field_name("right"),
+        ) {
+            if let (Some(mut path), Some(target_name)) = (
+                c_field_path(left, source),
+                c_callable_reference(right, source, callable_names),
+            ) {
+                if let Some(field_name) = path.pop() {
+                    let receiver_type =
+                        c_receiver_type(node, path.first().map(String::as_str), source);
+                    facts.bindings.push(CFunctionPointerBindingFact {
+                        owner_id: owning_symbol_id(node, owners)
+                            .cloned()
+                            .unwrap_or_else(|| file_symbol_id.to_owned()),
+                        receiver_type,
+                        receiver_path: path,
+                        field_name: Some(field_name),
+                        field_index: None,
+                        target_name,
+                        line: node.start_position().row + 1,
+                        site_start_byte: node.start_byte(),
+                    });
+                }
+            }
+        }
+    } else if node.kind() == "declaration" {
+        collect_c_initializer_bindings(
+            node,
+            source,
+            owners,
+            file_symbol_id,
+            callable_names,
+            &mut facts.bindings,
+        );
+    } else if node.kind() == "call_expression" {
+        if let Some(function) = node.child_by_field_name("function") {
+            if let Some(mut path) = c_field_path(function, source) {
+                if let Some(field_name) = path.pop() {
+                    let receiver_type =
+                        c_receiver_type(node, path.first().map(String::as_str), source);
+                    facts.dispatches.push(CFunctionPointerDispatchFact {
+                        owner_id: owning_symbol_id(node, owners)
+                            .cloned()
+                            .unwrap_or_else(|| file_symbol_id.to_owned()),
+                        receiver_type,
+                        receiver_path: path,
+                        proven_function_pointer: language == Language::C
+                            || function_fields.contains(&field_name),
+                        field_name,
+                        line: node.start_position().row + 1,
+                        site_start_byte: node.start_byte(),
+                    });
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_c_function_pointer_observations(
+            child,
+            source,
+            language,
+            owners,
+            file_symbol_id,
+            callable_names,
+            function_fields,
+            facts,
+        );
+    }
+}
+
+fn collect_c_initializer_bindings(
+    declaration: Node<'_>,
+    source: &[u8],
+    owners: &HashMap<(usize, usize), String>,
+    file_symbol_id: &str,
+    callable_names: &std::collections::HashSet<String>,
+    output: &mut Vec<CFunctionPointerBindingFact>,
+) {
+    let receiver_type = declaration
+        .child_by_field_name("type")
+        .and_then(|node| c_type_name(node, source));
+    let mut cursor = declaration.walk();
+    for initializer in declaration
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() == "init_declarator")
+    {
+        let (Some(declarator), Some(value)) = (
+            initializer.child_by_field_name("declarator"),
+            initializer.child_by_field_name("value"),
+        ) else {
+            continue;
+        };
+        let Some(binding_name) = declarator_name(declarator).map(|name| node_text(name, source))
+        else {
+            continue;
+        };
+        if value.kind() != "initializer_list" {
+            continue;
+        }
+        let array = first_descendant_or_self(declarator, "array_declarator").is_some();
+        if array {
+            let mut value_cursor = value.walk();
+            for element in value
+                .named_children(&mut value_cursor)
+                .filter(|element| element.kind() == "initializer_list")
+            {
+                collect_c_initializer_element(
+                    element,
+                    &binding_name,
+                    receiver_type.as_deref(),
+                    source,
+                    owners,
+                    file_symbol_id,
+                    callable_names,
+                    output,
+                );
+            }
+        } else {
+            collect_c_initializer_element(
+                value,
+                &binding_name,
+                receiver_type.as_deref(),
+                source,
+                owners,
+                file_symbol_id,
+                callable_names,
+                output,
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_c_initializer_element(
+    element: Node<'_>,
+    binding_name: &str,
+    receiver_type: Option<&str>,
+    source: &[u8],
+    owners: &HashMap<(usize, usize), String>,
+    file_symbol_id: &str,
+    callable_names: &std::collections::HashSet<String>,
+    output: &mut Vec<CFunctionPointerBindingFact>,
+) {
+    let mut cursor = element.walk();
+    for (index, value) in element
+        .named_children(&mut cursor)
+        .filter(|child| !child.is_extra())
+        .enumerate()
+    {
+        let (field_name, target) = if value.kind() == "initializer_pair" {
+            let field_name = value
+                .child_by_field_name("designator")
+                .and_then(|designator| declarator_name(designator))
+                .map(|name| node_text(name, source));
+            (field_name, value.child_by_field_name("value"))
+        } else {
+            (None, Some(value))
+        };
+        let Some(target_name) =
+            target.and_then(|target| c_callable_reference(target, source, callable_names))
+        else {
+            continue;
+        };
+        output.push(CFunctionPointerBindingFact {
+            owner_id: owning_symbol_id(element, owners)
+                .cloned()
+                .unwrap_or_else(|| file_symbol_id.to_owned()),
+            receiver_type: receiver_type.map(str::to_owned),
+            receiver_path: vec![binding_name.to_owned()],
+            field_name: field_name.clone(),
+            field_index: field_name.is_none().then_some(index),
+            target_name,
+            line: value.start_position().row + 1,
+            site_start_byte: value.start_byte(),
+        });
+    }
+}
+
+fn c_callable_reference(
+    mut node: Node<'_>,
+    source: &[u8],
+    callable_names: &std::collections::HashSet<String>,
+) -> Option<String> {
+    while matches!(
+        node.kind(),
+        "pointer_expression" | "parenthesized_expression" | "cast_expression"
+    ) {
+        node = node
+            .child_by_field_name("argument")
+            .or_else(|| node.child_by_field_name("value"))
+            .or_else(|| node.named_child(node.named_child_count().checked_sub(1)?))?;
+    }
+    if !matches!(node.kind(), "identifier" | "qualified_identifier") {
+        return None;
+    }
+    let raw = node_text(node, source);
+    let name = raw.rsplit("::").next().unwrap_or(&raw).to_owned();
+    callable_names.contains(&name).then_some(name)
+}
+
+fn c_field_path(node: Node<'_>, source: &[u8]) -> Option<Vec<String>> {
+    if node.kind() == "identifier" {
+        return Some(vec![node_text(node, source)]);
+    }
+    if node.kind() != "field_expression" {
+        return None;
+    }
+    let argument = node.child_by_field_name("argument")?;
+    let field = node.child_by_field_name("field")?;
+    let mut path = c_field_path(argument, source)?;
+    if path.len() >= MAX_C_RECEIVER_PATH_DEPTH {
+        return None;
+    }
+    path.push(node_text(field, source));
+    Some(path)
+}
+
+fn c_receiver_type(node: Node<'_>, receiver: Option<&str>, source: &[u8]) -> Option<String> {
+    let receiver = receiver?;
+    let site = node.start_byte();
+    let mut callable = node.parent();
+    while let Some(ancestor) = callable {
+        if ancestor.kind() == "function_definition" {
+            return c_declared_type_in(ancestor, receiver, site, source);
+        }
+        callable = ancestor.parent();
+    }
+    None
+}
+
+fn c_declared_type_in(
+    node: Node<'_>,
+    receiver: &str,
+    site: usize,
+    source: &[u8],
+) -> Option<String> {
+    if node.start_byte() >= site {
+        return None;
+    }
+    if matches!(node.kind(), "parameter_declaration" | "declaration") {
+        let declared_type = node
+            .child_by_field_name("type")
+            .and_then(|type_node| c_type_name(type_node, source));
+        if declared_type.is_some() {
+            let mut cursor = node.walk();
+            if node
+                .named_children(&mut cursor)
+                .filter(|child| {
+                    child.id()
+                        != node
+                            .child_by_field_name("type")
+                            .map(|n| n.id())
+                            .unwrap_or(usize::MAX)
+                })
+                .filter_map(declarator_name)
+                .any(|name| node_text(name, source) == receiver)
+            {
+                return declared_type;
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() == "function_definition" && child.start_byte() != node.start_byte() {
+            continue;
+        }
+        if let Some(found) = c_declared_type_in(child, receiver, site, source) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn c_struct_type_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    node.child_by_field_name("name")
+        .map(|name| node_text(name, source))
+        .or_else(|| {
+            node.parent()
+                .filter(|parent| parent.kind() == "type_definition")
+                .and_then(|parent| parent.child_by_field_name("declarator"))
+                .and_then(c_declarator_name)
+                .map(|name| node_text(name, source))
+        })
+}
+
+fn c_declarator_name(node: Node<'_>) -> Option<Node<'_>> {
+    if matches!(
+        node.kind(),
+        "identifier" | "type_identifier" | "field_identifier"
+    ) {
+        return Some(node);
+    }
+    if let Some(declarator) = node.child_by_field_name("declarator") {
+        if let Some(name) = c_declarator_name(declarator) {
+            return Some(name);
+        }
+    }
+    let mut cursor = node.walk();
+    let found = node.named_children(&mut cursor).find_map(c_declarator_name);
+    found
+}
+
+fn c_type_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    match node.kind() {
+        "type_identifier" | "primitive_type" => Some(node_text(node, source)),
+        "struct_specifier" | "class_specifier" => node
+            .child_by_field_name("name")
+            .map(|name| node_text(name, source)),
+        _ => declarator_name(node).map(|name| node_text(name, source)),
+    }
+    .filter(|name| !name.is_empty())
+}
+
+fn first_descendant_or_self<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
+    if node.kind() == kind {
+        return Some(node);
+    }
+    let mut cursor = node.walk();
+    let found = node
+        .named_children(&mut cursor)
+        .find_map(|child| first_descendant_or_self(child, kind));
+    found
+}
+
 struct CallCollectionContext<'a> {
     source: &'a [u8],
     language: Language,
@@ -1189,6 +1724,7 @@ struct CallCollectionContext<'a> {
     project_names: &'a std::collections::HashSet<&'a str>,
     inline_callback_symbols: &'a HashMap<(usize, usize), Symbol>,
     inline_callback_ids: &'a std::collections::HashSet<String>,
+    indirect_call_sites: &'a std::collections::HashSet<usize>,
     file_symbol_id: &'a str,
 }
 
@@ -1534,7 +2070,8 @@ fn collect_calls(
             if let Some(name) = call_name(function, context.source) {
                 let parameter_invocation =
                     invoked_parameter(node, &name, context.source, context.symbol_owners);
-                let resolvable = parameter_invocation.is_none();
+                let resolvable = parameter_invocation.is_none()
+                    && !context.indirect_call_sites.contains(&node.start_byte());
                 let mut owner = node.parent();
                 let mut caller_id = None::<String>;
                 let mut declared_fallback = None::<String>;
@@ -4422,5 +4959,84 @@ mod tests {
         assert!(value_buckets
             .iter()
             .all(|(_, scoped_bindings)| scoped_bindings.len() == 1));
+    }
+
+    #[test]
+    fn extracts_exact_c_function_pointer_facts() {
+        let source = r#"
+typedef int (*handler_t)(int);
+typedef struct Ops {
+  int tag;
+  int (*run)(int);
+  handler_t reset;
+  struct Next *next;
+} Ops;
+static int leaf(int x) { return x; }
+static Ops table[] = {
+  { 1, leaf, &leaf, 0 },
+  { .tag = 2, .run = leaf, .reset = &leaf },
+};
+void install(Ops *ops) { ops->run = &leaf; ops->reset = leaf; }
+int dispatch(Ops *ops, int x) { return ops->next->run(x) + ops->reset(x); }
+"#;
+        let facts = parse_file("dispatch.c", source).unwrap();
+        let pointers = &facts.c_function_pointers;
+        assert_eq!(pointers.typedefs.len(), 1);
+        assert_eq!(pointers.typedefs[0].name, "handler_t");
+        assert!(pointers.typedefs[0].pointer);
+
+        let layout = pointers
+            .layouts
+            .iter()
+            .find(|layout| layout.type_name == "Ops")
+            .unwrap();
+        assert_eq!(layout.fields.len(), 4);
+        assert_eq!(
+            layout
+                .fields
+                .iter()
+                .map(|field| (field.name.as_str(), field.index, field.function_pointer))
+                .collect::<Vec<_>>(),
+            vec![
+                ("tag", 0, false),
+                ("run", 1, true),
+                ("reset", 2, true),
+                ("next", 3, false),
+            ]
+        );
+        assert_eq!(layout.fields[3].value_type.as_deref(), Some("Next"));
+
+        assert_eq!(pointers.bindings.len(), 6);
+        assert!(pointers.bindings.iter().any(|binding| {
+            binding.receiver_type.as_deref() == Some("Ops")
+                && binding.receiver_path == ["table"]
+                && binding.field_index == Some(1)
+                && binding.target_name == "leaf"
+        }));
+        assert!(pointers.bindings.iter().any(|binding| {
+            binding.receiver_path == ["table"]
+                && binding.field_name.as_deref() == Some("reset")
+                && binding.target_name == "leaf"
+        }));
+        assert!(pointers.bindings.iter().any(|binding| {
+            binding.receiver_type.as_deref() == Some("Ops")
+                && binding.receiver_path == ["ops"]
+                && binding.field_name.as_deref() == Some("run")
+                && binding.target_name == "leaf"
+        }));
+
+        assert_eq!(pointers.dispatches.len(), 2);
+        assert!(pointers.dispatches.iter().any(|dispatch| {
+            dispatch.receiver_type.as_deref() == Some("Ops")
+                && dispatch.receiver_path == ["ops", "next"]
+                && dispatch.field_name == "run"
+                && dispatch.proven_function_pointer
+        }));
+        assert!(pointers.dispatches.iter().all(|dispatch| {
+            facts
+                .unresolved_calls
+                .iter()
+                .any(|call| call.start_byte == dispatch.site_start_byte && !call.resolvable)
+        }));
     }
 }
