@@ -17,6 +17,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Index a project, start freshness, and connect a coding agent.
+    Setup {
+        /// Agent name: codex, claude, or cursor.
+        client: String,
+        /// Project root to prepare.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Replace the existing CodeGraph MCP entry in place.
+        #[arg(long)]
+        replace_codegraph: bool,
+    },
     /// Create or rebuild the project index.
     Init {
         /// Project root to index.
@@ -257,6 +268,23 @@ enum IntegrationCommand {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Setup {
+            client,
+            path,
+            replace_codegraph,
+        } => {
+            let client = structurely::integrations::AgentClient::parse(&client)?;
+            let executable = std::env::current_exe()?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&structurely::setup::run(
+                    path,
+                    client,
+                    executable,
+                    replace_codegraph
+                )?)?
+            );
+        }
         Command::Init { path } => {
             let (_, report) = Engine::init(path)?;
             println!("{}", serde_json::to_string_pretty(&report)?);

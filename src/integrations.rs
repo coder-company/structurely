@@ -9,6 +9,7 @@ use std::{
 use toml_edit::{value, Array, DocumentMut, Item, Table};
 
 const SERVER_NAME: &str = "structurely";
+const CODEGRAPH_SERVER_NAME: &str = "codegraph";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentClient {
@@ -48,8 +49,10 @@ impl AgentClient {
 pub struct IntegrationReport {
     pub client: &'static str,
     pub config: String,
+    pub server: &'static str,
     pub installed: bool,
     pub changed: bool,
+    pub replaced_codegraph: bool,
 }
 
 pub fn install(
@@ -61,20 +64,54 @@ pub fn install(
     let executable = absolute_executable(executable.as_ref())?;
     let path = client.config_path(&project);
     let changed = match client {
-        AgentClient::Codex => install_codex(&path, &project, &executable)?,
-        AgentClient::Claude | AgentClient::Cursor => install_json(&path, &project, &executable)?,
+        AgentClient::Codex => install_codex(&path, SERVER_NAME, &project, &executable)?,
+        AgentClient::Claude | AgentClient::Cursor => {
+            install_json(&path, SERVER_NAME, &project, &executable)?
+        }
     };
-    Ok(report(client, path, true, changed))
+    Ok(report(client, path, SERVER_NAME, true, changed, false))
+}
+
+pub fn replace_codegraph(
+    project: impl AsRef<Path>,
+    client: AgentClient,
+    executable: impl AsRef<Path>,
+) -> Result<IntegrationReport> {
+    let project = canonical_project(project.as_ref())?;
+    let executable = absolute_executable(executable.as_ref())?;
+    let path = client.config_path(&project);
+    let had_codegraph = match client {
+        AgentClient::Codex => codex_has_server(&path, CODEGRAPH_SERVER_NAME)?,
+        AgentClient::Claude | AgentClient::Cursor => json_has_server(&path, CODEGRAPH_SERVER_NAME)?,
+    };
+    let installed = match client {
+        AgentClient::Codex => install_codex(&path, CODEGRAPH_SERVER_NAME, &project, &executable)?,
+        AgentClient::Claude | AgentClient::Cursor => {
+            install_json(&path, CODEGRAPH_SERVER_NAME, &project, &executable)?
+        }
+    };
+    let removed_duplicate = match client {
+        AgentClient::Codex => uninstall_codex(&path, SERVER_NAME)?,
+        AgentClient::Claude | AgentClient::Cursor => uninstall_json(&path, SERVER_NAME)?,
+    };
+    Ok(report(
+        client,
+        path,
+        CODEGRAPH_SERVER_NAME,
+        true,
+        installed || removed_duplicate,
+        had_codegraph,
+    ))
 }
 
 pub fn uninstall(project: impl AsRef<Path>, client: AgentClient) -> Result<IntegrationReport> {
     let project = canonical_project(project.as_ref())?;
     let path = client.config_path(&project);
     let changed = match client {
-        AgentClient::Codex => uninstall_codex(&path)?,
-        AgentClient::Claude | AgentClient::Cursor => uninstall_json(&path)?,
+        AgentClient::Codex => uninstall_codex(&path, SERVER_NAME)?,
+        AgentClient::Claude | AgentClient::Cursor => uninstall_json(&path, SERVER_NAME)?,
     };
-    Ok(report(client, path, false, changed))
+    Ok(report(client, path, SERVER_NAME, false, changed, false))
 }
 
 pub fn status(
@@ -86,13 +123,39 @@ pub fn status(
     let executable = absolute_executable(executable.as_ref())?;
     let path = client.config_path(&project);
     let installed = match client {
-        AgentClient::Codex => codex_matches(&path, &project, &executable)?,
-        AgentClient::Claude | AgentClient::Cursor => json_matches(&path, &project, &executable)?,
+        AgentClient::Codex => codex_matches(&path, SERVER_NAME, &project, &executable)?,
+        AgentClient::Claude | AgentClient::Cursor => {
+            json_matches(&path, SERVER_NAME, &project, &executable)?
+        }
     };
-    Ok(report(client, path, installed, false))
+    Ok(report(client, path, SERVER_NAME, installed, false, false))
 }
 
-fn install_json(path: &Path, project: &Path, executable: &Path) -> Result<bool> {
+pub fn status_codegraph_replacement(
+    project: impl AsRef<Path>,
+    client: AgentClient,
+    executable: impl AsRef<Path>,
+) -> Result<IntegrationReport> {
+    let project = canonical_project(project.as_ref())?;
+    let executable = absolute_executable(executable.as_ref())?;
+    let path = client.config_path(&project);
+    let installed = match client {
+        AgentClient::Codex => codex_matches(&path, CODEGRAPH_SERVER_NAME, &project, &executable)?,
+        AgentClient::Claude | AgentClient::Cursor => {
+            json_matches(&path, CODEGRAPH_SERVER_NAME, &project, &executable)?
+        }
+    };
+    Ok(report(
+        client,
+        path,
+        CODEGRAPH_SERVER_NAME,
+        installed,
+        false,
+        installed,
+    ))
+}
+
+fn install_json(path: &Path, server_name: &str, project: &Path, executable: &Path) -> Result<bool> {
     let mut document = read_json_object(path)?;
     let before = document.clone();
     let servers = document
@@ -101,7 +164,7 @@ fn install_json(path: &Path, project: &Path, executable: &Path) -> Result<bool> 
         .as_object_mut()
         .context("`mcpServers` must be a JSON object")?;
     servers.insert(
-        SERVER_NAME.to_owned(),
+        server_name.to_owned(),
         json!({
             "command": executable,
             "args": ["serve", "--mcp", "--path", project],
@@ -115,7 +178,7 @@ fn install_json(path: &Path, project: &Path, executable: &Path) -> Result<bool> 
     Ok(true)
 }
 
-fn uninstall_json(path: &Path) -> Result<bool> {
+fn uninstall_json(path: &Path, server_name: &str) -> Result<bool> {
     if !path.exists() {
         return Ok(false);
     }
@@ -123,7 +186,7 @@ fn uninstall_json(path: &Path) -> Result<bool> {
     let removed = document
         .get_mut("mcpServers")
         .and_then(Value::as_object_mut)
-        .and_then(|servers| servers.remove(SERVER_NAME))
+        .and_then(|servers| servers.remove(server_name))
         .is_some();
     if !removed {
         return Ok(false);
@@ -144,12 +207,22 @@ fn uninstall_json(path: &Path) -> Result<bool> {
     Ok(true)
 }
 
-fn json_matches(path: &Path, project: &Path, executable: &Path) -> Result<bool> {
+fn json_has_server(path: &Path, server_name: &str) -> Result<bool> {
     if !path.exists() {
         return Ok(false);
     }
     let document = read_json_object(path)?;
-    Ok(document["mcpServers"][SERVER_NAME]
+    Ok(document["mcpServers"]
+        .as_object()
+        .is_some_and(|servers| servers.contains_key(server_name)))
+}
+
+fn json_matches(path: &Path, server_name: &str, project: &Path, executable: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let document = read_json_object(path)?;
+    Ok(document["mcpServers"][server_name]
         == json!({
             "command": executable,
             "args": ["serve", "--mcp", "--path", project],
@@ -157,10 +230,15 @@ fn json_matches(path: &Path, project: &Path, executable: &Path) -> Result<bool> 
         }))
 }
 
-fn install_codex(path: &Path, project: &Path, executable: &Path) -> Result<bool> {
+fn install_codex(
+    path: &Path,
+    server_name: &str,
+    project: &Path,
+    executable: &Path,
+) -> Result<bool> {
     let mut document = read_toml(path)?;
     let before = document.to_string();
-    let server = codex_server(&mut document);
+    let server = codex_server(&mut document, server_name);
     server["command"] = value(executable.display().to_string());
     let mut arguments = Array::new();
     for argument in [
@@ -180,7 +258,7 @@ fn install_codex(path: &Path, project: &Path, executable: &Path) -> Result<bool>
     Ok(true)
 }
 
-fn uninstall_codex(path: &Path) -> Result<bool> {
+fn uninstall_codex(path: &Path, server_name: &str) -> Result<bool> {
     if !path.exists() {
         return Ok(false);
     }
@@ -188,7 +266,7 @@ fn uninstall_codex(path: &Path) -> Result<bool> {
     let removed = document
         .get_mut("mcp_servers")
         .and_then(Item::as_table_mut)
-        .and_then(|servers| servers.remove(SERVER_NAME))
+        .and_then(|servers| servers.remove(server_name))
         .is_some();
     if !removed {
         return Ok(false);
@@ -209,7 +287,23 @@ fn uninstall_codex(path: &Path) -> Result<bool> {
     Ok(true)
 }
 
-fn codex_matches(path: &Path, project: &Path, executable: &Path) -> Result<bool> {
+fn codex_has_server(path: &Path, server_name: &str) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let document = read_toml(path)?;
+    Ok(document
+        .get("mcp_servers")
+        .and_then(Item::as_table)
+        .is_some_and(|servers| servers.contains_key(server_name)))
+}
+
+fn codex_matches(
+    path: &Path,
+    server_name: &str,
+    project: &Path,
+    executable: &Path,
+) -> Result<bool> {
     if !path.exists() {
         return Ok(false);
     }
@@ -217,7 +311,7 @@ fn codex_matches(path: &Path, project: &Path, executable: &Path) -> Result<bool>
     let Some(server) = document
         .get("mcp_servers")
         .and_then(Item::as_table)
-        .and_then(|servers| servers.get(SERVER_NAME))
+        .and_then(|servers| servers.get(server_name))
         .and_then(Item::as_table)
     else {
         return Ok(false);
@@ -242,16 +336,16 @@ fn codex_matches(path: &Path, project: &Path, executable: &Path) -> Result<bool>
             ])
 }
 
-fn codex_server(document: &mut DocumentMut) -> &mut Table {
+fn codex_server<'a>(document: &'a mut DocumentMut, server_name: &str) -> &'a mut Table {
     if !document.get("mcp_servers").is_some_and(Item::is_table) {
         document["mcp_servers"] = Item::Table(Table::new());
     }
     let servers = document["mcp_servers"].as_table_mut().unwrap();
-    if !servers.get(SERVER_NAME).is_some_and(Item::is_table) {
-        servers.insert(SERVER_NAME, Item::Table(Table::new()));
+    if !servers.get(server_name).is_some_and(Item::is_table) {
+        servers.insert(server_name, Item::Table(Table::new()));
     }
     servers
-        .get_mut(SERVER_NAME)
+        .get_mut(server_name)
         .and_then(Item::as_table_mut)
         .unwrap()
 }
@@ -301,12 +395,21 @@ fn remove_empty_parent(path: &Path) {
     }
 }
 
-fn report(client: AgentClient, path: PathBuf, installed: bool, changed: bool) -> IntegrationReport {
+fn report(
+    client: AgentClient,
+    path: PathBuf,
+    server: &'static str,
+    installed: bool,
+    changed: bool,
+    replaced_codegraph: bool,
+) -> IntegrationReport {
     IntegrationReport {
         client: client.name(),
         config: path.display().to_string(),
+        server,
         installed,
         changed,
+        replaced_codegraph,
     }
 }
 
@@ -352,6 +455,47 @@ mod tests {
                 }
             }
             assert!(!content.contains("structurely"));
+        }
+    }
+
+    #[test]
+    fn replacement_preserves_the_codegraph_server_name_and_removes_duplicates() {
+        for client in [AgentClient::Codex, AgentClient::Claude, AgentClient::Cursor] {
+            let temp = tempfile::tempdir().unwrap();
+            let executable = temp.path().join("bin/structurely");
+            let path = client.config_path(temp.path());
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            match client {
+                AgentClient::Codex => fs::write(
+                    &path,
+                    r#"[mcp_servers.codegraph]
+command = "codegraph"
+[mcp_servers.structurely]
+command = "old-structurely"
+"#,
+                )
+                .unwrap(),
+                _ => fs::write(
+                    &path,
+                    r#"{"mcpServers":{"codegraph":{"command":"codegraph"},"structurely":{"command":"old-structurely"}}}"#,
+                )
+                .unwrap(),
+            }
+
+            let report = replace_codegraph(temp.path(), client, &executable).unwrap();
+            assert!(report.installed);
+            assert!(report.replaced_codegraph);
+            assert_eq!(report.server, CODEGRAPH_SERVER_NAME);
+            assert!(
+                status_codegraph_replacement(temp.path(), client, &executable)
+                    .unwrap()
+                    .installed
+            );
+            let content = fs::read_to_string(path).unwrap();
+            assert!(!content.contains("old-structurely"));
+            assert!(content.contains("codegraph"));
         }
     }
 }

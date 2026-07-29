@@ -79,7 +79,8 @@ fn handle(engine: &mut Engine, request: Value) -> Result<Option<Value>> {
         "initialize" => json!({
             "protocolVersion": negotiated_protocol_version(&request),
             "capabilities": { "tools": {} },
-            "serverInfo": { "name": "structurely", "version": env!("CARGO_PKG_VERSION") }
+            "serverInfo": { "name": "structurely", "version": env!("CARGO_PKG_VERSION") },
+            "instructions": "Use codegraph_explore before reading files when you need task-oriented code context. Treat returned source locations as authoritative, and check freshness metadata before doing a manual repository search."
         }),
         "tools/list" => json!({ "tools": enabled_tool_definitions(
             std::env::var("CODEGRAPH_MCP_TOOLS").ok().as_deref()

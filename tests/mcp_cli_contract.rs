@@ -33,6 +33,10 @@ fn mcp_stdio_preserves_the_codegraph_agent_contract() {
         }),
     );
     assert_eq!(initialized["result"]["protocolVersion"], "2025-06-18");
+    assert!(initialized["result"]["instructions"]
+        .as_str()
+        .unwrap()
+        .contains("codegraph_explore"));
 
     let tools = session.request("tools/list", json!({}));
     let names = tools["result"]["tools"]

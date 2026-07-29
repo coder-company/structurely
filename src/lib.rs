@@ -11,6 +11,7 @@ mod project_config;
 mod project_resolution;
 pub mod quality;
 mod semantic;
+pub mod setup;
 mod source;
 pub mod store;
 
