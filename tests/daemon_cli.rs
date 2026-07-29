@@ -1,4 +1,3 @@
-#[cfg(unix)]
 use serde_json::Value;
 #[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
