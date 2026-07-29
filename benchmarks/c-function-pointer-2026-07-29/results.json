@@ -9,11 +9,11 @@
     "ownedProvenanceAndEvidenceSites": true,
     "noLeakageOrDuplicateEvidence": true
   },
-  "structurelyBinarySha256": "890fd52214ff87e4c6184caea2699b5cae8403a950235eb30fea7734b338f40b",
+  "structurelyBinarySha256": "7762661ac833bc132a58201522b0256bb5624436c6ed0052fa11982db7884e94",
   "repository": {
     "name": "openharmony",
     "commit": "a826ab0e75fe51d028c1c5af58188e908736b53b",
-    "selectedFiles": 16
+    "selectedFiles": 19
   },
   "corpora": {
     "audioToVideoSync": {
@@ -38,7 +38,7 @@
       "files": 5,
       "symbols": 32,
       "relationships": 47,
-      "freshIndexWallMs": 53.187,
+      "freshIndexWallMs": 46.574,
       "engineDurationMs": 29,
       "incremental": {
         "checks": {
@@ -48,18 +48,18 @@
           "syncUsesSamePersistentIndex": true
         },
         "cleanup": {
-          "wallMs": 22.603,
-          "engineDurationMs": 19,
+          "wallMs": 21.327,
+          "engineDurationMs": 18,
           "dispatchEdges": 0
         },
         "rebind": {
-          "wallMs": 22.388,
+          "wallMs": 21.879,
           "engineDurationMs": 18,
           "target": "ReplacementCallback"
         },
         "restore": {
-          "wallMs": 21.073,
-          "engineDurationMs": 18,
+          "wallMs": 20.827,
+          "engineDurationMs": 17,
           "target": "Callback"
         }
       }
@@ -86,8 +86,8 @@
       "files": 5,
       "symbols": 44,
       "relationships": 80,
-      "freshIndexWallMs": 55.072,
-      "engineDurationMs": 37
+      "freshIndexWallMs": 53.6,
+      "engineDurationMs": 35
     },
     "libsamplerate": {
       "checks": {
@@ -96,7 +96,8 @@
         "exactConstAndVariableDispatchSites": true,
         "qualifiedSourceAndTargetFiles": true,
         "stableNonzeroEvidenceSites": true,
-        "noDuplicateEvidenceIdentities": true
+        "noDuplicateEvidenceIdentities": true,
+        "exactFormalToStoredCallbackTargets": true
       },
       "srcProcessEdges": 14,
       "srcProcessTargets": [
@@ -108,12 +109,19 @@
         "sinc_stereo_vari_process",
         "zoh_vari_process"
       ],
-      "allCorpusDispatchEdges": 23,
-      "files": 6,
-      "symbols": 74,
-      "relationships": 91,
-      "freshIndexWallMs": 66.469,
-      "engineDurationMs": 46
+      "callbackReadEdges": 4,
+      "callbackReadTargets": [
+        "eos_callback_func",
+        "input_callback",
+        "src_input_callback",
+        "test_callback_func"
+      ],
+      "allCorpusDispatchEdges": 27,
+      "files": 9,
+      "symbols": 92,
+      "relationships": 272,
+      "freshIndexWallMs": 67.312,
+      "engineDurationMs": 48
     }
   }
 }

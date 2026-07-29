@@ -354,6 +354,7 @@ exact target-file provenance and a distinct nonzero evidence-site identity.
 The
 [`C/C++ function-pointer gate`](../benchmarks/c-function-pointer-2026-07-29/README.md)
 resolves exact `Release → Callback` flows in two pinned OpenHarmony players and
-23 libsamplerate table-dispatch relationships. Its 14 `src_process` edges cover
-both dispatch sites and seven exact implementations. Incremental mutation
-proves stale-edge removal and exact callback rebinding.
+27 libsamplerate dispatch relationships. Its 14 `src_process` edges cover both
+dispatch sites and seven exact implementations; four `src_callback_read` edges
+cross call argument, formal parameter, stored field, and indirect invocation.
+Incremental mutation proves stale-edge removal and exact callback rebinding.

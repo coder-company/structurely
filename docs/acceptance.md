@@ -169,6 +169,10 @@ incremental removal, rebinding, and restoration without stale edges.
 Graph model v62 additionally covers bounded function-pointer field propagation
 and typedef-proven bare arrays with file-local table identity, indexed
 designators, casts, and exact dispatch-site evidence.
+Graph model v63 traces callbacks through exact call arguments and formal
+positions into stored function-pointer fields. On pinned libsamplerate this
+adds four exact `src_callback_read` targets supplied through
+`src_callback_new`, increasing the corpus gate from 23 to 27 dispatch edges.
 
 The authoritative capability inventory is
 [`codegraph-parity.md`](codegraph-parity.md). A matching command name or schema
