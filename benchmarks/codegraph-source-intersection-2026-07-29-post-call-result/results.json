@@ -1,0 +1,109 @@
+{
+  "protocol": {
+    "trials": 5,
+    "query_processes": 20,
+    "query": "CodeGraph",
+    "corpus_files": 441
+  },
+  "structurely": {
+    "fresh_index_wall_samples_ms": [
+      2411.564046,
+      4209.349366,
+      3020.357726,
+      3053.648001,
+      2742.712885
+    ],
+    "fresh_index_wall_p50_ms": 3020.357726,
+    "reported_engine_samples_ms": [
+      2374,
+      4168,
+      2983,
+      3006,
+      2714
+    ],
+    "reported_engine_p50_ms": 2983,
+    "query_samples_us": [
+      33240,
+      33395,
+      44834,
+      33495,
+      36500,
+      41435,
+      34870,
+      37572,
+      33178,
+      42591,
+      34313,
+      34776,
+      33883,
+      32998,
+      37142,
+      33349,
+      34473,
+      33377,
+      40313,
+      33138
+    ],
+    "query_p50_us": 34393.0,
+    "query_p95_us": 44834,
+    "database_bytes": 39268352,
+    "indexed_files": 441,
+    "symbols": 5177,
+    "relationships": 35235,
+    "max_rss_kb": 142244
+  },
+  "codegraph": {
+    "fresh_index_wall_samples_ms": [
+      8117.004047,
+      7848.352026,
+      8235.996678,
+      7751.291847,
+      8241.603746
+    ],
+    "fresh_index_wall_p50_ms": 8117.004047,
+    "reported_engine_samples_ms": [
+      4000,
+      3700,
+      4100,
+      3800,
+      4200
+    ],
+    "reported_engine_p50_ms": 4000,
+    "query_samples_us": [
+      321759,
+      333923,
+      315687,
+      309047,
+      339985,
+      322146,
+      318908,
+      311978,
+      326809,
+      315646,
+      322133,
+      314937,
+      315067,
+      315671,
+      311592,
+      378669,
+      312950,
+      319583,
+      322205,
+      310017
+    ],
+    "query_p50_us": 317297.5,
+    "query_p95_us": 378669,
+    "database_bytes": 44453888,
+    "indexed_files": 441,
+    "nodes": 8957,
+    "edges": 35801,
+    "max_rss_kb": 1029732
+  },
+  "acceptance": {
+    "index_speedup": 2.6874313519643005,
+    "query_speedup": 9.22564184572442,
+    "minimum_index_speedup": 2.0,
+    "minimum_query_speedup": 2.0,
+    "passed": true
+  }
+}

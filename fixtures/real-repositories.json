@@ -469,6 +469,23 @@
             "\"confidence\": 0.94",
             "\"line\": 47"
           ]
+        },
+        {
+          "command": "callees",
+          "query": "KeyItem.build",
+          "file": "code/Solutions/InputMethod/KikaInputMethod/entry/src/main/ets/components/KeyItem.ets",
+          "contains": [
+            "\"qualified_name\": \"InputHandler.insertText\"",
+            "\"provenance\": \"tree-sitter/name-resolution\""
+          ],
+          "recordContains": [
+            "\"qualified_name\": \"InputHandler.insertText\"",
+            "code/Solutions/InputMethod/KikaInputMethod/entry/src/main/ets/model/KeyboardController.ets",
+            "\"provenance\": \"tree-sitter/name-resolution\"",
+            "\"confidence\": 0.97",
+            "\"line\": 50",
+            "receiver resolves from InputHandler.getInstance's explicit return annotation after the factory resolved through imported package"
+          ]
         }
       ]
     }

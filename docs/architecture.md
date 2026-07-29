@@ -131,6 +131,21 @@ calls are withheld and then published from that target map under either the
 accepted synthetic caller or the declared fallback. This keeps the callback
 Resolver adapter local and avoids a whole-graph pass per nesting depth.
 
+TypeScript, TSX, and ArkTS calls may resolve one immediate call-result receiver,
+such as `InputHandler.getInstance().insertText()`, when the inner callable
+resolves uniquely and declares a plain nominal return annotation. The nominal
+type must resolve uniquely in the factory file through a local declaration or
+verified import; the outer member must then resolve uniquely on that type.
+Confidence is the minimum of the factory, nominal-type, and member resolutions,
+and the return-annotation reasoning survives accepted inline-callback ownership
+and rejected-callback fallback. Inferred, primitive, generic, union, `Promise`,
+generator, alias, qualified, ambiguous, and deeper chained returns fail closed.
+Typed arrow factories are not yet summarized. A global 100,000-dependent-call
+fuse bounds this optional second resolution wave. Unshadowed ArkUI intrinsic
+component expressions are excluded so modifier extensions and their callback
+flows remain in the ArkUI resolver; a project declaration or verified import
+with the same name disables that intrinsic exception.
+
 ArkTS calls through imported singleton values prefer a unique candidate inside
 the caller's Harmony project root before language-wide fallback. This rank
 requires an actual import binding and applies only across `entry`, `feature`,
