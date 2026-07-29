@@ -1,0 +1,51 @@
+{
+  "structurely_commit": "9637a27",
+  "graph_model_version": 54,
+  "release_binary_sha256": "8d7cc08531ae267648ae8fd8fe66a13c3250845a11a202805096e97ecc3827a9",
+  "verification": {
+    "rust_unit_tests": 185,
+    "daemon_integration_tests": 1,
+    "mcp_integration_tests": 1,
+    "clippy_all_targets_all_features": "pass",
+    "independent_review_blockers_remaining": 0
+  },
+  "lightrag": {
+    "commit": "44db36fe080645ba97ded719d44b42c7dee1f54a",
+    "files_scanned": 515,
+    "files_skipped": 1,
+    "wall_ms": 3760,
+    "reported_engine_ms": 3727,
+    "max_rss_kib": 110516,
+    "source_symbols": 8173,
+    "resolver_reported_relationships": 21245,
+    "persisted_symbols": 8219,
+    "persisted_relationships": 28776,
+    "database_bytes": 35803136,
+    "database_sha256": "3841eab0a678783d1ec0b3527774942a0afd1f4561c1bd571b29deb623070d3f",
+    "keyword_callback_argument_relationships": 16,
+    "all_inline_callback_argument_relationships": 46
+  },
+  "django": {
+    "commit": "92470ad3742524902b29769d2c822dbe791630db",
+    "files_scanned": 2972,
+    "files_skipped": 0,
+    "wall_ms": 55030,
+    "reported_engine_ms": 54938,
+    "max_rss_kib": 258856,
+    "source_symbols": 47287,
+    "resolver_reported_relationships": 188922,
+    "persisted_symbols": 47377,
+    "persisted_relationships": 231417,
+    "database_bytes": 209149952,
+    "database_sha256": "7f9c617e463eb3b740aad2b0342c77135e26b59ddb220c8cb9b7b8522fb61a6c",
+    "keyword_callback_argument_relationships": 14,
+    "keyword_production_relationships": 3,
+    "keyword_test_relationships": 11,
+    "all_inline_callback_argument_relationships": 90
+  },
+  "combined": {
+    "keyword_callback_argument_relationships": 30,
+    "keyword_inline_identity_relationships": 30,
+    "confidence": 0.96
+  }
+}

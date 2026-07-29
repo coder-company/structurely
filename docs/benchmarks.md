@@ -308,3 +308,9 @@ The
 materializes 30 exact positional lambda callback flows: 24 production and six
 test relationships. The clean 515-file index takes 3.070 seconds wall time and
 105,848 KiB peak RSS; keyword callback actuals remain explicitly deferred.
+
+The
+[`Python keyword callback gate`](../benchmarks/python-keyword-callback-2026-07-29/README.md)
+closes that deferred mapping with 30 exact keyword callback relationships
+across pinned LightRAG and Django. LightRAG reaches 46 accepted inline callback
+flows in total; Django reaches 90.

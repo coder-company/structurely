@@ -130,6 +130,11 @@ model to v53 and materializes 30 exact positional Python lambda callback flows
 on pinned LightRAG: 24 production and six test relationships, each paired with
 a stable inline identity. Keyword actuals remain fail-closed and explicitly
 deferred.
+The `benchmarks/python-keyword-callback-2026-07-29/` gate advances the graph
+model to v54 and adds exact keyword-name-to-formal mapping after unique callee
+resolution. Pinned LightRAG and Django jointly materialize 30 keyword
+callback-argument relationships and 30 stable inline identities at confidence
+0.96.
 
 The authoritative capability inventory is
 [`codegraph-parity.md`](codegraph-parity.md). A matching command name or schema
