@@ -1,0 +1,54 @@
+{
+  "passed": true,
+  "checks": {
+    "pinnedRepositories": true,
+    "exact44MountedProductionRoutes": true,
+    "unmountedRoutersPublishZeroRoutes": {
+      "lightrag": 0,
+      "graphiti": 0
+    },
+    "factoryMountPrefixPropagates": true
+  },
+  "structurelyBinarySha256": "495bf60770ea7817bfdbf7bc6d723e59705cdd4853c99a68b106f3ce9bd179da",
+  "totalRoutes": 44,
+  "repositories": {
+    "lightrag": {
+      "checks": {
+        "exact_route_symbols": true,
+        "exact_route_handler_edges": true,
+        "exact_route_handler_provenance": true,
+        "no_duplicate_route_symbols": true,
+        "no_duplicate_route_edges": true,
+        "no_cross_router_targets": true,
+        "no_bare_prefixed_routes": true
+      },
+      "routes": 34,
+      "routeHandlerEdges": 34,
+      "files": 5,
+      "symbols": 251,
+      "relationships": 481,
+      "freshIndexWallMs": 141.333,
+      "engineDurationMs": 122,
+      "commit": "44db36fe080645ba97ded719d44b42c7dee1f54a"
+    },
+    "graphiti": {
+      "checks": {
+        "exact_route_symbols": true,
+        "exact_route_handler_edges": true,
+        "exact_route_handler_provenance": true,
+        "no_duplicate_route_symbols": true,
+        "no_duplicate_route_edges": true,
+        "no_cross_router_targets": true,
+        "no_bare_prefixed_routes": true
+      },
+      "routes": 10,
+      "routeHandlerEdges": 10,
+      "files": 3,
+      "symbols": 34,
+      "relationships": 52,
+      "freshIndexWallMs": 39.355,
+      "engineDurationMs": 19,
+      "commit": "526dcad7a300f3c5c506ff96a68bcdc7ca9f97ed"
+    }
+  }
+}

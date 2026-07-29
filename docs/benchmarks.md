@@ -336,3 +336,10 @@ engines. Structurely is 2.611× faster to index, 9.491× faster at query p50,
 uses 87.50% less peak memory, and has a 12.29% smaller database. Its normalized
 441-file semantic snapshot has zero additions, removals, or callback losses
 against accepted v51.
+
+The
+[`FastAPI router-composition gate`](../benchmarks/fastapi-router-composition-2026-07-29/README.md)
+materializes all 44 production endpoints across pinned LightRAG and Graphiti:
+34 and 10 respectively. It additionally requires zero public routes from
+unmounted router-only corpora and proves that a changed factory mount prefix
+propagates to every descendant.
