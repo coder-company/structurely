@@ -61,7 +61,10 @@ renders and capitalized JSX children to their component definitions. A bounded
 post-resolution adapter connects interface methods to directly declared
 concrete implementations. Vue and Svelte files use offset-preserving embedded
 script views plus bounded template adapters for component rendering and event
-handlers. This keeps
+handlers. Astro uses a first-nonblank-line frontmatter recognizer and lexical
+multi-script masking that preserve every byte and line boundary. Its adapter
+adds full-file components, explicit-import template and expression calls, and
+`src/pages` routes with exact relative-import resolution. This keeps
 framework policy out of the storage Module while letting every adapter reuse
 import scope, alias resolution, evidence, atomic publication, and graph
 traversal.

@@ -1,0 +1,45 @@
+{
+  "structurely": {
+    "commit": "e33fda3844ae32b034c96806e7f357a0fca22ddf",
+    "graph_model_version": 57,
+    "release_binary_sha256": "0aa4931672d58945a7e20e602e019cdb2dd1fb82a90889bad255468c9d8136af"
+  },
+  "codegraph": {
+    "version": "1.5.0",
+    "commit": "572d22bfbe82602080e457bec655f72e3314f9ef"
+  },
+  "astro_acceptance": {
+    "passed": true,
+    "files": 5,
+    "symbols": 13,
+    "relationships": 17,
+    "components": 4,
+    "routes": 1,
+    "fresh_index_wall_ms": 35.933,
+    "engine_duration_ms": 15,
+    "checks_passed": 10,
+    "checks_total": 10,
+    "template_self_edges": 0,
+    "external_default_symbols": 0,
+    "raw_sha256": "6c4b8a8a979c3a6c50744c74d72435532ff60a9710e79ab4e8fb7b70a648fa90"
+  },
+  "mcp_differential": {
+    "shared_passed": 25,
+    "shared_total": 25,
+    "structurely_extension_passed": 1,
+    "structurely_extension_total": 1,
+    "structurely_usefulness": 1.0,
+    "codegraph_usefulness": 1.0,
+    "structurely_context_characters": 2459,
+    "codegraph_context_characters": 2532,
+    "raw_sha256": "a802921a18624ab7fae4a857a8e2634823a663553d12f0b8b9d4f2b4606a381d"
+  },
+  "verification": {
+    "library_tests_passed": 213,
+    "daemon_process_tests_passed": 1,
+    "mcp_process_tests_passed": 1,
+    "differential_script_tests_passed": 4,
+    "clippy_warnings": 0,
+    "independent_review_blockers_remaining": 0
+  }
+}
