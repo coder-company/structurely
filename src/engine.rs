@@ -1102,7 +1102,7 @@ mod tests {
         let connection = rusqlite::Connection::open(database).unwrap();
         connection
             .execute(
-                "UPDATE metadata SET value='46' WHERE key='graph_model_version'",
+                "UPDATE metadata SET value='47' WHERE key='graph_model_version'",
                 [],
             )
             .unwrap();
@@ -1409,6 +1409,410 @@ mod tests {
         assert_eq!(callees[0].0.qualified_name, "UserService.save");
         assert_eq!(callees[0].1.confidence, 0.995);
         assert!(callees[0].1.explanation.contains("receiver type"));
+    }
+
+    #[test]
+    fn explicit_field_annotations_disambiguate_uninitialized_receivers() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("services.ts"),
+            "class Desired { ping() {} pong() {} }\n\
+             class Decoy { ping() {} pong() {} }\n\
+             class Runner {\n\
+               private dependency: Desired\n\
+               run() {\n\
+                 this.dependency.ping()\n\
+                 let local: Desired\n\
+                 local.pong()\n\
+               }\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let run = engine
+            .search("Runner.run", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.qualified_name == "Runner.run")
+            .unwrap()
+            .symbol;
+        let callees = engine.callees(&run.id).unwrap();
+        assert_eq!(callees.len(), 2);
+        assert!(callees
+            .iter()
+            .any(|(target, _)| target.qualified_name == "Desired.ping"));
+        assert!(callees
+            .iter()
+            .any(|(target, _)| target.qualified_name == "Desired.pong"));
+        assert!(callees.iter().all(|(target, evidence)| {
+            target.qualified_name != "Decoy.ping"
+                && evidence.confidence == 0.995
+                && evidence.explanation.contains("receiver type")
+        }));
+    }
+
+    #[test]
+    fn receiver_annotations_respect_lexical_shadowing_and_sibling_functions() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("scope.ts"),
+            "class Outer { ping() {} outerOnly() {} }\n\
+             class Inner { ping() {} innerOnly() {} }\n\
+             export function scoped() {\n\
+               let value: Outer\n\
+               value.outerOnly()\n\
+               {\n\
+                 let value: Inner\n\
+                 value.innerOnly()\n\
+               }\n\
+               value.outerOnly()\n\
+             }\n\
+             export function first() {\n\
+               let shared: Outer\n\
+               shared.ping()\n\
+             }\n\
+             export function second(shared: unknown) {\n\
+               shared.ping()\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let caller = |name: &str| {
+            engine
+                .search(name, 20)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.name == name)
+                .unwrap()
+                .symbol
+        };
+        let scoped = engine.callees(&caller("scoped").id).unwrap();
+        assert_eq!(
+            scoped
+                .iter()
+                .filter(|(target, _)| target.qualified_name == "Outer.outerOnly")
+                .count(),
+            2
+        );
+        assert_eq!(
+            scoped
+                .iter()
+                .filter(|(target, _)| target.qualified_name == "Inner.innerOnly")
+                .count(),
+            1
+        );
+        assert!(engine
+            .callees(&caller("first").id)
+            .unwrap()
+            .iter()
+            .any(|(target, evidence)| {
+                target.qualified_name == "Outer.ping" && evidence.confidence == 0.995
+            }));
+        assert!(engine
+            .callees(&caller("second").id)
+            .unwrap()
+            .iter()
+            .all(|(_, evidence)| evidence.confidence < 0.995));
+    }
+
+    #[test]
+    fn untyped_inner_bindings_shadow_outer_receiver_annotations() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("scope.ts"),
+            "class Typed { ping() {} }\n\
+             export function outer() {\n\
+               let value: Typed\n\
+               function parameterShadow(value: unknown) { value.ping() }\n\
+               function destructuredShadow({ value }: { value: unknown }) { value.ping() }\n\
+               {\n\
+                 let value: unknown\n\
+                 value.ping()\n\
+               }\n\
+               {\n\
+                 let { value } = { value: new Typed() }\n\
+                 value.ping()\n\
+               }\n\
+               {\n\
+                 value.ping()\n\
+                 let value: unknown\n\
+               }\n\
+               try { throw new Error() } catch (value) { value.ping() }\n\
+               value.ping()\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let symbol = |name: &str| {
+            engine
+                .search(name, 20)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.name == name)
+                .unwrap()
+                .symbol
+        };
+        assert!(engine
+            .callees(&symbol("parameterShadow").id)
+            .unwrap()
+            .iter()
+            .all(|(_, evidence)| evidence.confidence < 0.995));
+        assert!(engine
+            .callees(&symbol("destructuredShadow").id)
+            .unwrap()
+            .iter()
+            .all(|(_, evidence)| evidence.confidence < 0.995));
+        let outer = engine.callees(&symbol("outer").id).unwrap();
+        assert_eq!(
+            outer
+                .iter()
+                .filter(|(target, evidence)| {
+                    target.qualified_name == "Typed.ping" && evidence.confidence == 0.995
+                })
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn nested_assignments_update_the_owning_receiver_binding() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("scope.ts"),
+            "class First { firstOnly() {} }\n\
+             class Second { secondOnly() {} }\n\
+             export function changed() {\n\
+               let value: First\n\
+               { value = new Second() }\n\
+               value.secondOnly()\n\
+               value.firstOnly()\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let changed = engine
+            .search("changed", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.name == "changed")
+            .unwrap()
+            .symbol;
+        let callees = engine.callees(&changed.id).unwrap();
+        assert!(callees.iter().any(|(target, evidence)| {
+            target.qualified_name == "Second.secondOnly" && evidence.confidence == 0.995
+        }));
+        assert!(callees
+            .iter()
+            .all(|(target, _)| target.qualified_name != "First.firstOnly"));
+    }
+
+    #[test]
+    fn receiver_annotations_do_not_escape_loop_or_catch_scopes() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("scope.ts"),
+            "class Outer { outerOnly() {} }\n\
+             class Inner { innerOnly() {} }\n\
+             export function scoped() {\n\
+               let value: Outer\n\
+               for (let value: Inner; false;) {\n\
+                 value.innerOnly()\n\
+               }\n\
+               value.outerOnly()\n\
+               try { throw new Error() } catch (value) {\n\
+                 let caught: Inner\n\
+                 caught.innerOnly()\n\
+               }\n\
+               value.outerOnly()\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let scoped = engine
+            .search("scoped", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.qualified_name == "scoped")
+            .unwrap()
+            .symbol;
+        let callees = engine.callees(&scoped.id).unwrap();
+        assert_eq!(
+            callees
+                .iter()
+                .filter(|(target, _)| target.qualified_name == "Inner.innerOnly")
+                .count(),
+            2
+        );
+        assert_eq!(
+            callees
+                .iter()
+                .filter(|(target, _)| target.qualified_name == "Outer.outerOnly")
+                .count(),
+            2
+        );
+        assert!(callees.iter().all(|(target, _)| {
+            !matches!(
+                target.qualified_name.as_str(),
+                "Outer.innerOnly" | "Inner.outerOnly"
+            )
+        }));
+    }
+
+    #[test]
+    fn receiver_annotations_require_one_local_or_imported_nominal_type() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("a.ts"),
+            "export class Desired { ping() {} }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("b.ts"),
+            "export class Desired { ping() {} }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("imported.ts"),
+            "import { Desired } from './a'\n\
+             export function imported() {\n\
+               let value: Desired\n\
+               value.ping()\n\
+             }\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("ambiguous.ts"),
+            "export function ambiguous() {\n\
+               let value: Desired\n\
+               value.ping()\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let caller = |name: &str| {
+            engine
+                .search(name, 20)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.qualified_name == name)
+                .unwrap()
+                .symbol
+        };
+        let imported = engine.callees(&caller("imported").id).unwrap();
+        assert_eq!(imported.len(), 1);
+        assert_eq!(imported[0].0.qualified_name, "Desired.ping");
+        assert_eq!(imported[0].0.file, "a.ts");
+        assert_eq!(imported[0].1.confidence, 0.995);
+        assert!(engine.callees(&caller("ambiguous").id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn exact_typed_receivers_do_not_fall_through_to_free_imported_functions() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("util.ts"), "export function send() {}\n").unwrap();
+        fs::write(
+            temp.path().join("caller.ts"),
+            "import { send } from './util'\n\
+             class Client {}\n\
+             export function caller() {\n\
+               let client: Client\n\
+               client.send()\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let caller = engine
+            .search("caller", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.qualified_name == "caller")
+            .unwrap()
+            .symbol;
+        assert!(engine.callees(&caller.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn typed_receivers_resolve_nearest_verified_inherited_methods() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("base.ts"),
+            "export class Base { notify() {} }\n\
+             export class Mid extends Base { notify() {} }\n\
+             export class Leaf extends Mid {}\n",
+        )
+        .unwrap();
+        let child_path = temp.path().join("child.ts");
+        fs::write(
+            &child_path,
+            "import { Base } from './base'\n\
+             export class Child extends Base {}\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("decoy.ts"),
+            "export class Base { notify() {} }\n\
+             export class Child extends Base {}\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("caller.ts"),
+            "import { Leaf } from './base'\n\
+             import { Child } from './child'\n\
+             export function fromBase() {\n\
+               const value: Child = new Child()\n\
+               value.notify()\n\
+             }\n\
+             export function fromNearest() {\n\
+               const value: Leaf = new Leaf()\n\
+               value.notify()\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let inherited_target = |engine: &Engine, caller: &str| {
+            let source = engine
+                .search(caller, 20)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.qualified_name == caller)
+                .unwrap()
+                .symbol;
+            engine
+                .callees(&source.id)
+                .unwrap()
+                .into_iter()
+                .find(|(_, evidence)| {
+                    evidence
+                        .explanation
+                        .contains("nearest inherited receiver type")
+                })
+        };
+        let base = inherited_target(&engine, "fromBase").unwrap();
+        assert_eq!(base.0.qualified_name, "Base.notify");
+        assert_eq!(base.0.file, "base.ts");
+        assert_eq!(base.1.confidence, 0.97);
+        let nearest = inherited_target(&engine, "fromNearest").unwrap();
+        assert_eq!(nearest.0.qualified_name, "Mid.notify");
+        assert_eq!(nearest.1.confidence, 0.97);
+
+        fs::write(&child_path, "export class Child {}\n").unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 1);
+        assert!(inherited_target(&engine, "fromBase").is_none());
+        assert_eq!(
+            inherited_target(&engine, "fromNearest")
+                .unwrap()
+                .0
+                .qualified_name,
+            "Mid.notify"
+        );
     }
 
     #[test]

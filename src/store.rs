@@ -22,6 +22,23 @@ pub struct Store {
     path: PathBuf,
 }
 
+#[derive(Clone)]
+enum InheritedMemberResolution {
+    NoMatch,
+    Ambiguous,
+    Unique(String, String),
+}
+
+#[derive(Clone)]
+enum ReceiverNominalResolution {
+    NoMatch,
+    Ambiguous,
+    Unique(String),
+}
+
+type NominalType = (String, i64, String);
+type NominalTypeMap = HashMap<(i64, String), Vec<NominalType>>;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchHit {
     pub symbol: Symbol,
@@ -1155,8 +1172,7 @@ impl Store {
                 .collect::<rusqlite::Result<HashMap<_, _>>>()?;
             summaries
         };
-        type NominalType = (String, i64, String);
-        let mut local_nominal_types = HashMap::<(i64, String), Vec<NominalType>>::new();
+        let mut local_nominal_types = NominalTypeMap::new();
         {
             let mut statement = tx.prepare(
                 "SELECT s.file_id,s.name,s.qualified_name,f.path
@@ -1182,7 +1198,7 @@ impl Store {
                     .push((row.2, row.0, row.3));
             }
         }
-        let mut imported_nominal_types = HashMap::<(i64, String), Vec<NominalType>>::new();
+        let mut imported_nominal_types = NominalTypeMap::new();
         {
             let mut statement = tx.prepare(
                 "SELECT b.file_id,b.binding_name,s.qualified_name,s.file_id,f.path
@@ -1210,11 +1226,111 @@ impl Store {
                     .push((row.2, row.3, row.4));
             }
         }
+        let (nominal_symbols, nominal_owners) = {
+            let mut statement = tx.prepare(
+                "SELECT s.public_id,s.qualified_name,f.path,s.file_id
+                 FROM symbols s
+                 JOIN files f ON f.id=s.file_id
+                 WHERE s.kind IN ('class','struct','interface')
+                 ORDER BY s.qualified_name,s.public_id",
+            )?;
+            let symbols = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut owners = HashMap::<(i64, String), Vec<String>>::new();
+            for (public_id, qualified_name, _, file_id) in &symbols {
+                owners
+                    .entry((*file_id, qualified_name.clone()))
+                    .or_default()
+                    .push(public_id.clone());
+            }
+            (
+                symbols
+                    .into_iter()
+                    .map(|(public_id, qualified_name, path, _)| (public_id, qualified_name, path))
+                    .collect::<Vec<_>>(),
+                owners,
+            )
+        };
+        let inherited_bases = {
+            let mut statement = tx.prepare(
+                "SELECT source_public_id,target_public_id
+                 FROM relationships
+                 WHERE kind='extends'
+                 ORDER BY source_public_id,target_public_id",
+            )?;
+            let mut bases = HashMap::<String, Vec<String>>::new();
+            for (child, parent) in statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+            {
+                bases.entry(child).or_default().push(parent);
+            }
+            bases
+        };
+        let nominal_ids_by_identity = {
+            let mut identities = HashMap::<(String, String), Vec<String>>::new();
+            for (public_id, qualified_name, path) in &nominal_symbols {
+                identities
+                    .entry((qualified_name.clone(), path.clone()))
+                    .or_default()
+                    .push(public_id.clone());
+            }
+            identities
+        };
+        let inherited_methods = {
+            let mut statement = tx.prepare(
+                "SELECT file_id,name,public_id,qualified_name
+                 FROM symbols
+                 WHERE kind='method'
+                 ORDER BY file_id,name,qualified_name,public_id",
+            )?;
+            let mut methods = HashMap::<(String, String), Vec<(String, String)>>::new();
+            for (file_id, name, method_id, qualified_name) in statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+            {
+                let Some(owner_name) = qualified_name.strip_suffix(&format!(".{name}")) else {
+                    continue;
+                };
+                let Some(owners) = nominal_owners.get(&(file_id, owner_name.to_owned())) else {
+                    continue;
+                };
+                if owners.len() != 1 {
+                    continue;
+                }
+                methods
+                    .entry((owners[0].clone(), name))
+                    .or_default()
+                    .push((method_id, qualified_name));
+            }
+            methods
+        };
         type ResolvedCallsiteTarget = (String, String, f64, String);
         let mut resolved_callsite_targets =
             HashMap::<(i64, String, usize), Vec<ResolvedCallsiteTarget>>::new();
         let mut nominal_result_cache = HashMap::<(i64, String), Option<(NominalType, f64)>>::new();
         let mut imported_receiver_cache = HashMap::<(i64, String), Option<NominalType>>::new();
+        let mut inherited_member_cache =
+            HashMap::<(String, String), InheritedMemberResolution>::new();
+        let mut receiver_nominal_cache =
+            HashMap::<(i64, String, String), ReceiverNominalResolution>::new();
         for (
             call_id,
             caller_id,
@@ -1347,7 +1463,28 @@ impl Store {
                     .get(&(callee_name.clone(), language.clone()))
                     .map(Vec::as_slice)
                     .unwrap_or_default();
-                let receiver_qualified = format!("{receiver_type}.{callee_name}");
+                let receiver_nominal = if receiver_type.is_empty() {
+                    ReceiverNominalResolution::NoMatch
+                } else {
+                    let nominal_key = (file_id, receiver_type.clone(), target_file_hint.clone());
+                    receiver_nominal_cache
+                        .entry(nominal_key)
+                        .or_insert_with(|| {
+                            resolve_receiver_nominal(
+                                file_id,
+                                &receiver_type,
+                                &target_file_hint,
+                                &local_nominal_types,
+                                &imported_nominal_types,
+                                &nominal_ids_by_identity,
+                            )
+                        })
+                        .clone()
+                };
+                let mut receiver_ambiguous =
+                    matches!(receiver_nominal, ReceiverNominalResolution::Ambiguous);
+                let receiver_exact =
+                    matches!(receiver_nominal, ReceiverNominalResolution::Unique(_));
                 let mut targets = if is_arkui_route {
                     target_file_hint
                         .strip_prefix("arkui-route:")
@@ -1359,7 +1496,36 @@ impl Store {
                         })
                         .map(|candidate| (candidate.0.clone(), candidate.1.clone(), 0))
                         .collect::<Vec<_>>()
+                } else if let ReceiverNominalResolution::Unique(receiver_id) = &receiver_nominal {
+                    let direct_methods = inherited_methods
+                        .get(&(receiver_id.clone(), callee_name.clone()))
+                        .cloned()
+                        .unwrap_or_default();
+                    if direct_methods.len() > 1 {
+                        receiver_ambiguous = true;
+                        Vec::new()
+                    } else if direct_methods.is_empty() {
+                        let receiver_qualified = format!("{receiver_type}.{callee_name}");
+                        direct
+                            .iter()
+                            .filter(|candidate| {
+                                (target_file_hint.is_empty()
+                                    || module_hint_matches(&target_file_hint, &candidate.3))
+                                    && (candidate.1 == receiver_qualified
+                                        || candidate.1.ends_with(&format!(".{receiver_qualified}")))
+                            })
+                            .map(|candidate| (candidate.0.clone(), candidate.1.clone(), 0))
+                            .collect::<Vec<_>>()
+                    } else {
+                        direct_methods
+                            .into_iter()
+                            .map(|candidate| (candidate.0, candidate.1, 0))
+                            .collect::<Vec<_>>()
+                    }
+                } else if receiver_ambiguous {
+                    Vec::new()
                 } else {
+                    let receiver_qualified = format!("{receiver_type}.{callee_name}");
                     direct
                         .iter()
                         .filter(|candidate| {
@@ -1373,7 +1539,30 @@ impl Store {
                         .map(|candidate| (candidate.0.clone(), candidate.1.clone(), 0))
                         .collect::<Vec<_>>()
                 };
-                if !is_arkui_route && targets.is_empty() {
+                if !is_arkui_route && targets.is_empty() && !receiver_ambiguous {
+                    if let ReceiverNominalResolution::Unique(receiver_id) = &receiver_nominal {
+                        let inherited_key = (receiver_id.clone(), callee_name.clone());
+                        let inherited =
+                            inherited_member_cache
+                                .entry(inherited_key)
+                                .or_insert_with(|| {
+                                    resolve_inherited_member(
+                                        receiver_id,
+                                        &callee_name,
+                                        &inherited_bases,
+                                        &inherited_methods,
+                                    )
+                                });
+                        match inherited {
+                            InheritedMemberResolution::Unique(target_id, qualified_name) => {
+                                targets.push((target_id.clone(), qualified_name.clone(), 5));
+                            }
+                            InheritedMemberResolution::Ambiguous => receiver_ambiguous = true,
+                            InheritedMemberResolution::NoMatch => {}
+                        }
+                    }
+                }
+                if !is_arkui_route && targets.is_empty() && !receiver_ambiguous && !receiver_exact {
                     if let Some(local) =
                         local_candidates.get(&(file_id, callee_name.clone(), language.clone()))
                     {
@@ -1384,7 +1573,7 @@ impl Store {
                         );
                     }
                 }
-                if !is_arkui_route && targets.is_empty() {
+                if !is_arkui_route && targets.is_empty() && !receiver_ambiguous && !receiver_exact {
                     for candidate_language in
                         std::iter::once(language.as_str()).chain(compatible_web_language(&language))
                     {
@@ -1403,6 +1592,8 @@ impl Store {
                 }
                 if !is_arkui_route
                     && targets.is_empty()
+                    && !receiver_ambiguous
+                    && !receiver_exact
                     && language == "arkts"
                     && !receiver_binding.is_empty()
                     && imported_bindings.contains(&(file_id, receiver_binding.clone()))
@@ -1416,7 +1607,7 @@ impl Store {
                         );
                     }
                 }
-                if !is_arkui_route && targets.is_empty() {
+                if !is_arkui_route && targets.is_empty() && !receiver_ambiguous && !receiver_exact {
                     targets.extend(
                         direct
                             .iter()
@@ -1457,6 +1648,7 @@ impl Store {
                 (0..=2, _) => 0.65,
                 (3, 1) => 0.9,
                 (4, 1) => 0.75,
+                (5, 1) => 0.97,
                 _ => 0.35,
             };
             let scope = match (is_arkui_route, best_rank) {
@@ -1466,6 +1658,7 @@ impl Store {
                 (false, 1) => "same-file lexical scope",
                 (false, 2) => "explicit import scope",
                 (false, 3) => "verified Harmony project import scope",
+                (false, 5) => "nearest inherited receiver type",
                 _ => "language-wide fallback",
             };
             let relationship_explanation = inferred_factory
@@ -3444,6 +3637,119 @@ fn arkui_route_candidate_matches(
     caller_module.is_some_and(|module| module == &candidate_module)
 }
 
+fn resolve_receiver_nominal(
+    file_id: i64,
+    receiver_type: &str,
+    target_file_hint: &str,
+    local_nominal_types: &NominalTypeMap,
+    imported_nominal_types: &NominalTypeMap,
+    nominal_ids_by_identity: &HashMap<(String, String), Vec<String>>,
+) -> ReceiverNominalResolution {
+    let key = (file_id, receiver_type.to_owned());
+    let local = local_nominal_types.get(&key).cloned().unwrap_or_default();
+    let candidates = if local.is_empty() {
+        imported_nominal_types
+            .get(&key)
+            .cloned()
+            .unwrap_or_default()
+    } else {
+        local
+    };
+    let had_scoped_candidates = !candidates.is_empty();
+    let mut public_ids = candidates
+        .iter()
+        .filter(|(_, _, path)| {
+            target_file_hint.is_empty() || module_hint_matches(target_file_hint, path)
+        })
+        .filter_map(|(qualified_name, _, path)| {
+            nominal_ids_by_identity.get(&(qualified_name.clone(), path.clone()))
+        })
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>();
+    if public_ids.is_empty() && !had_scoped_candidates {
+        let qualified_suffix = format!(".{receiver_type}");
+        for ((qualified_name, path), ids) in nominal_ids_by_identity {
+            if (qualified_name == receiver_type || qualified_name.ends_with(&qualified_suffix))
+                && (target_file_hint.is_empty() || module_hint_matches(target_file_hint, path))
+            {
+                public_ids.extend(ids.iter().cloned());
+            }
+        }
+    }
+    if public_ids.is_empty() && had_scoped_candidates {
+        return ReceiverNominalResolution::Ambiguous;
+    }
+    public_ids.sort();
+    public_ids.dedup();
+    match public_ids.len() {
+        0 => ReceiverNominalResolution::NoMatch,
+        1 => ReceiverNominalResolution::Unique(public_ids.pop().expect("one nominal receiver")),
+        _ => ReceiverNominalResolution::Ambiguous,
+    }
+}
+
+fn resolve_inherited_member(
+    receiver_id: &str,
+    method_name: &str,
+    inherited_bases: &HashMap<String, Vec<String>>,
+    inherited_methods: &HashMap<(String, String), Vec<(String, String)>>,
+) -> InheritedMemberResolution {
+    const INHERITANCE_DEPTH_CAP: usize = 8;
+    const INHERITANCE_NODE_CAP: usize = 64;
+    let mut frontier = vec![receiver_id.to_owned()];
+    let mut visited = frontier.iter().cloned().collect::<HashSet<_>>();
+    for _ in 0..INHERITANCE_DEPTH_CAP {
+        let raw_parents = frontier
+            .iter()
+            .filter_map(|child| inherited_bases.get(child))
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+        if raw_parents.is_empty() {
+            return InheritedMemberResolution::NoMatch;
+        }
+        let mut parents = raw_parents
+            .into_iter()
+            .filter(|parent| !visited.contains(parent))
+            .collect::<Vec<_>>();
+        parents.sort();
+        parents.dedup();
+        if parents.is_empty() {
+            return InheritedMemberResolution::Ambiguous;
+        }
+        if visited.len().saturating_add(parents.len()) > INHERITANCE_NODE_CAP {
+            return InheritedMemberResolution::Ambiguous;
+        }
+        visited.extend(parents.iter().cloned());
+
+        let mut methods = parents
+            .iter()
+            .filter_map(|parent| inherited_methods.get(&(parent.clone(), method_name.to_owned())))
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+        methods.sort();
+        methods.dedup();
+        match methods.len() {
+            0 => frontier = parents,
+            1 => {
+                let (public_id, qualified_name) = methods.pop().expect("one inherited method");
+                return InheritedMemberResolution::Unique(public_id, qualified_name);
+            }
+            _ => return InheritedMemberResolution::Ambiguous,
+        }
+    }
+    if frontier
+        .iter()
+        .any(|child| inherited_bases.contains_key(child))
+    {
+        InheritedMemberResolution::Ambiguous
+    } else {
+        InheritedMemberResolution::NoMatch
+    }
+}
+
 fn identifier_segments(value: &str) -> Vec<String> {
     let mut segments = Vec::new();
     for token in value.split(|character: char| !character.is_alphanumeric()) {
@@ -3545,6 +3851,77 @@ mod tests {
         assert!(call_result_resolution_enabled(CALL_RESULT_DEPENDENT_CAP));
         assert!(!call_result_resolution_enabled(
             CALL_RESULT_DEPENDENT_CAP + 1
+        ));
+    }
+
+    #[test]
+    fn inherited_member_resolution_is_bounded_and_ambiguity_safe() {
+        let methods = HashMap::from([(
+            ("base".to_owned(), "run".to_owned()),
+            vec![("method".to_owned(), "Base.run".to_owned())],
+        )]);
+        let unique = resolve_inherited_member(
+            "child",
+            "run",
+            &HashMap::from([("child".to_owned(), vec!["base".to_owned()])]),
+            &methods,
+        );
+        assert!(matches!(
+            unique,
+            InheritedMemberResolution::Unique(_, ref name) if name == "Base.run"
+        ));
+        assert!(matches!(
+            resolve_receiver_nominal(
+                1,
+                "Child",
+                "",
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::from([
+                    (
+                        ("Child".to_owned(), "child.ts".to_owned()),
+                        vec!["child".to_owned()]
+                    ),
+                    (
+                        ("Child".to_owned(), "other.ts".to_owned()),
+                        vec!["other".to_owned()]
+                    ),
+                ]),
+            ),
+            ReceiverNominalResolution::Ambiguous
+        ));
+
+        let mut deep_bases = HashMap::new();
+        for depth in 0..=8 {
+            deep_bases.insert(format!("depth{depth}"), vec![format!("depth{}", depth + 1)]);
+        }
+        assert!(matches!(
+            resolve_inherited_member("depth0", "run", &deep_bases, &HashMap::new(),),
+            InheritedMemberResolution::Ambiguous
+        ));
+
+        let wide_parents = (0..64).map(|index| format!("base{index}")).collect();
+        assert!(matches!(
+            resolve_inherited_member(
+                "wide",
+                "run",
+                &HashMap::from([("wide".to_owned(), wide_parents)]),
+                &HashMap::new(),
+            ),
+            InheritedMemberResolution::Ambiguous
+        ));
+
+        assert!(matches!(
+            resolve_inherited_member(
+                "cycle-a",
+                "run",
+                &HashMap::from([
+                    ("cycle-a".to_owned(), vec!["cycle-b".to_owned()]),
+                    ("cycle-b".to_owned(), vec!["cycle-a".to_owned()]),
+                ]),
+                &HashMap::new(),
+            ),
+            InheritedMemberResolution::Ambiguous
         ));
     }
 

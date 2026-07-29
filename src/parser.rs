@@ -111,8 +111,11 @@ pub(crate) fn parse_file_as(
         .values()
         .map(|symbol| symbol.id.clone())
         .collect::<std::collections::HashSet<_>>();
-    let mut receiver_bindings = HashMap::<String, Vec<(usize, String)>>::new();
+    let mut receiver_bindings = ReceiverBindingMap::new();
     collect_receiver_bindings(tree.root_node(), source_bytes, &mut receiver_bindings);
+    for bindings in receiver_bindings.values_mut() {
+        bindings.sort_by_key(|binding| binding.position);
+    }
     let module_bindings = collect_module_bindings(tree.root_node(), source_bytes, language);
     let project_names = symbols
         .iter()
@@ -866,13 +869,21 @@ struct CallCollectionContext<'a> {
     language: Language,
     file: &'a str,
     symbol_owners: &'a HashMap<(usize, usize), String>,
-    receiver_bindings: &'a HashMap<String, Vec<(usize, String)>>,
+    receiver_bindings: &'a ReceiverBindingMap,
     module_bindings: &'a HashMap<String, String>,
     project_names: &'a std::collections::HashSet<&'a str>,
     inline_callback_symbols: &'a HashMap<(usize, usize), Symbol>,
     inline_callback_ids: &'a std::collections::HashSet<String>,
     file_symbol_id: &'a str,
 }
+
+struct ReceiverBinding {
+    position: usize,
+    requires_prior_declaration: bool,
+    receiver_type: Option<String>,
+}
+
+type ReceiverBindingMap = HashMap<(String, usize, usize), Vec<ReceiverBinding>>;
 
 struct InlineCallbackCollection<'a> {
     source: &'a [u8],
@@ -1475,7 +1486,7 @@ fn receiver_type_hint(
     function: Node<'_>,
     call: Node<'_>,
     source: &[u8],
-    receiver_bindings: &HashMap<String, Vec<(usize, String)>>,
+    receiver_bindings: &ReceiverBindingMap,
 ) -> Option<String> {
     let receiver = function
         .child_by_field_name("object")
@@ -1498,32 +1509,57 @@ fn receiver_type_hint(
         let field = receiver
             .child_by_field_name("property")
             .map(|property| format!("this.{}", node_text(property, source)))?;
-        return receiver_bindings.get(&field).and_then(|bindings| {
-            bindings
-                .iter()
-                .rev()
-                .find(|(position, _)| *position < call.start_byte())
-                .map(|(_, receiver_type)| receiver_type.clone())
-        });
+        return receiver_binding_at_call(&field, call, receiver_bindings);
     }
     if !matches!(receiver.kind(), "identifier" | "simple_identifier" | "name") {
         return None;
     }
     let variable = node_text(receiver, source);
-    receiver_bindings.get(&variable).and_then(|bindings| {
-        bindings
-            .iter()
-            .rev()
-            .find(|(position, _)| *position < call.start_byte())
-            .map(|(_, receiver_type)| receiver_type.clone())
-    })
+    receiver_binding_at_call(&variable, call, receiver_bindings)
 }
 
-fn collect_receiver_bindings(
-    node: Node<'_>,
-    source: &[u8],
-    output: &mut HashMap<String, Vec<(usize, String)>>,
-) {
+fn receiver_binding_at_call(
+    name: &str,
+    call: Node<'_>,
+    receiver_bindings: &ReceiverBindingMap,
+) -> Option<String> {
+    let call_position = call.start_byte();
+    let mut ancestor = Some(call);
+    while let Some(scope) = ancestor {
+        if receiver_scope_kind(scope.kind()) {
+            if let Some(bindings) =
+                receiver_bindings.get(&(name.to_owned(), scope.start_byte(), scope.end_byte()))
+            {
+                let preceding =
+                    bindings.partition_point(|binding| binding.position < call_position);
+                if let Some(binding) = bindings[..preceding].last().or_else(|| {
+                    bindings
+                        .iter()
+                        .find(|binding| !binding.requires_prior_declaration)
+                }) {
+                    return binding.receiver_type.clone();
+                }
+                return None;
+            }
+        }
+        ancestor = scope.parent();
+    }
+    receiver_bindings
+        .get(&(name.to_owned(), 0, usize::MAX))
+        .and_then(|bindings| {
+            let preceding = bindings.partition_point(|binding| binding.position < call_position);
+            bindings[..preceding]
+                .last()
+                .or_else(|| {
+                    bindings
+                        .iter()
+                        .find(|binding| !binding.requires_prior_declaration)
+                })
+                .and_then(|binding| binding.receiver_type.clone())
+        })
+}
+
+fn collect_receiver_bindings(node: Node<'_>, source: &[u8], output: &mut ReceiverBindingMap) {
     if node.kind() == "public_field_definition" {
         if let Some(name) = node.child_by_field_name("name") {
             let receiver_type = node
@@ -1531,13 +1567,22 @@ fn collect_receiver_bindings(
                 .and_then(|value| constructor_type(value, source))
                 .or_else(|| {
                     node.child_by_field_name("type")
-                        .map(|kind| node_text(kind, source))
+                        .and_then(|kind| simple_receiver_type(kind, source))
                 });
             if let Some(receiver_type) = receiver_type {
+                let (scope_start, scope_end) = receiver_binding_scope(node, false);
                 output
-                    .entry(format!("this.{}", node_text(name, source)))
+                    .entry((
+                        format!("this.{}", node_text(name, source)),
+                        scope_start,
+                        scope_end,
+                    ))
                     .or_default()
-                    .push((node.start_byte(), receiver_type));
+                    .push(ReceiverBinding {
+                        position: node.start_byte(),
+                        requires_prior_declaration: false,
+                        receiver_type: Some(receiver_type),
+                    });
             }
         }
     }
@@ -1557,15 +1602,61 @@ fn collect_receiver_bindings(
             .child_by_field_name("value")
             .or_else(|| node.child_by_field_name("right"));
         if let Some(name) = name {
-            let variable = node_text(name, source);
             let receiver_type = value
                 .and_then(|value| constructor_type(value, source))
                 .or_else(|| declared_variable_type(node, source));
-            if let Some(receiver_type) = receiver_type {
+            let declares_binding = matches!(
+                node.kind(),
+                "variable_declarator" | "lexical_declaration" | "let_declaration"
+            );
+            let binding_names = bound_binding_names(name, source);
+            let simple_binding = binding_names.len() == 1
+                && matches!(name.kind(), "identifier" | "simple_identifier" | "name");
+            let assignable_binding =
+                simple_binding || matches!(name.kind(), "object_pattern" | "array_pattern");
+            if declares_binding || assignable_binding {
+                for variable in binding_names {
+                    let (scope_start, scope_end) = if declares_binding {
+                        receiver_binding_scope(node, true)
+                    } else {
+                        receiver_assignment_scope(&variable, node, output)
+                    };
+                    output
+                        .entry((variable, scope_start, scope_end))
+                        .or_default()
+                        .push(ReceiverBinding {
+                            position: node.start_byte(),
+                            requires_prior_declaration: true,
+                            receiver_type: simple_binding.then(|| receiver_type.clone()).flatten(),
+                        });
+                }
+            }
+        }
+    }
+    if is_parameter_binding(node) {
+        let name = node
+            .child_by_field_name("name")
+            .or_else(|| node.child_by_field_name("pattern"))
+            .or_else(|| {
+                matches!(node.kind(), "identifier" | "simple_identifier" | "name").then_some(node)
+            });
+        if let Some(name) = name {
+            let binding_names = bound_binding_names(name, source);
+            let simple_binding = binding_names.len() == 1
+                && matches!(name.kind(), "identifier" | "simple_identifier" | "name");
+            let receiver_type = simple_binding
+                .then(|| declared_variable_type(node, source))
+                .flatten();
+            let (scope_start, scope_end) = receiver_binding_scope(node, true);
+            for variable in binding_names {
                 output
-                    .entry(variable)
+                    .entry((variable, scope_start, scope_end))
                     .or_default()
-                    .push((node.start_byte(), receiver_type));
+                    .push(ReceiverBinding {
+                        position: node.start_byte(),
+                        requires_prior_declaration: true,
+                        receiver_type: receiver_type.clone(),
+                    });
             }
         }
     }
@@ -1573,6 +1664,158 @@ fn collect_receiver_bindings(
     for child in node.named_children(&mut cursor) {
         collect_receiver_bindings(child, source, output);
     }
+}
+
+fn bound_binding_names(node: Node<'_>, source: &[u8]) -> Vec<String> {
+    fn visit(node: Node<'_>, source: &[u8], output: &mut Vec<String>) {
+        if matches!(
+            node.kind(),
+            "identifier" | "simple_identifier" | "name" | "shorthand_property_identifier_pattern"
+        ) {
+            output.push(node_text(node, source));
+            return;
+        }
+        if matches!(
+            node.kind(),
+            "pair_pattern" | "pair" | "object_assignment_pattern"
+        ) {
+            if let Some(value) = node
+                .child_by_field_name("value")
+                .or_else(|| node.child_by_field_name("right"))
+            {
+                visit(value, source, output);
+            }
+            return;
+        }
+        if node.kind() == "assignment_pattern" {
+            if let Some(left) = node
+                .child_by_field_name("left")
+                .or_else(|| node.child_by_field_name("pattern"))
+            {
+                visit(left, source, output);
+            }
+            return;
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            visit(child, source, output);
+        }
+    }
+
+    let mut names = Vec::new();
+    visit(node, source, &mut names);
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn receiver_assignment_scope(
+    name: &str,
+    node: Node<'_>,
+    bindings: &ReceiverBindingMap,
+) -> (usize, usize) {
+    let position = node.start_byte();
+    bindings
+        .keys()
+        .filter(|(candidate, start, end)| {
+            candidate == name && *start <= position && position < *end
+        })
+        .min_by_key(|(_, start, end)| end.saturating_sub(*start))
+        .map(|(_, start, end)| (*start, *end))
+        .unwrap_or_else(|| receiver_enclosing_callable_scope(node))
+}
+
+fn receiver_enclosing_callable_scope(node: Node<'_>) -> (usize, usize) {
+    let mut ancestor = node.parent();
+    while let Some(scope) = ancestor {
+        if matches!(
+            scope.kind(),
+            "function_declaration"
+                | "function_expression"
+                | "arrow_function"
+                | "method_definition"
+                | "method_declaration"
+        ) {
+            return (scope.start_byte(), scope.end_byte());
+        }
+        ancestor = scope.parent();
+    }
+    (0, usize::MAX)
+}
+
+fn is_parameter_binding(node: Node<'_>) -> bool {
+    matches!(
+        node.kind(),
+        "required_parameter"
+            | "optional_parameter"
+            | "formal_parameter"
+            | "typed_parameter"
+            | "default_parameter"
+            | "parameter"
+    ) || (matches!(node.kind(), "identifier" | "simple_identifier" | "name")
+        && node.parent().is_some_and(|parent| {
+            matches!(
+                parent.kind(),
+                "formal_parameters" | "parameters" | "parameter_list" | "catch_clause"
+            )
+        }))
+}
+
+fn receiver_binding_scope(node: Node<'_>, local: bool) -> (usize, usize) {
+    let mut ancestor = node.parent();
+    while let Some(scope) = ancestor {
+        let is_scope = if local {
+            matches!(
+                scope.kind(),
+                "statement_block"
+                    | "block"
+                    | "for_statement"
+                    | "for_in_statement"
+                    | "for_of_statement"
+                    | "catch_clause"
+                    | "switch_case"
+                    | "switch_statement"
+                    | "function_declaration"
+                    | "function_expression"
+                    | "arrow_function"
+                    | "method_definition"
+                    | "method_declaration"
+            )
+        } else {
+            matches!(
+                scope.kind(),
+                "class_declaration" | "class_body" | "struct_declaration" | "struct_body"
+            )
+        };
+        if is_scope {
+            return (scope.start_byte(), scope.end_byte());
+        }
+        ancestor = scope.parent();
+    }
+    (0, usize::MAX)
+}
+
+fn receiver_scope_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "statement_block"
+            | "block"
+            | "for_statement"
+            | "for_in_statement"
+            | "for_of_statement"
+            | "catch_clause"
+            | "switch_case"
+            | "switch_statement"
+            | "function_declaration"
+            | "function_expression"
+            | "arrow_function"
+            | "method_definition"
+            | "method_declaration"
+            | "class_declaration"
+            | "class_body"
+            | "struct_declaration"
+            | "struct_body"
+    )
 }
 
 fn constructor_type(node: Node<'_>, source: &[u8]) -> Option<String> {
@@ -1603,6 +1846,12 @@ fn constructor_type(node: Node<'_>, source: &[u8]) -> Option<String> {
 }
 
 fn declared_variable_type(node: Node<'_>, source: &[u8]) -> Option<String> {
+    if let Some(receiver_type) = node
+        .child_by_field_name("type")
+        .and_then(|kind| simple_receiver_type(kind, source))
+    {
+        return Some(receiver_type);
+    }
     let mut declaration = node.parent();
     while let Some(parent) = declaration {
         if matches!(
@@ -1611,7 +1860,7 @@ fn declared_variable_type(node: Node<'_>, source: &[u8]) -> Option<String> {
         ) {
             return parent
                 .child_by_field_name("type")
-                .map(|kind| node_text(kind, source));
+                .and_then(|kind| simple_receiver_type(kind, source));
         }
         if matches!(
             parent.kind(),
@@ -1622,6 +1871,21 @@ fn declared_variable_type(node: Node<'_>, source: &[u8]) -> Option<String> {
         declaration = parent.parent();
     }
     None
+}
+
+fn simple_receiver_type(annotation: Node<'_>, source: &[u8]) -> Option<String> {
+    let raw = node_text(annotation, source);
+    let name = raw.trim().strip_prefix(':').unwrap_or(raw.trim()).trim();
+    let mut characters = name.chars();
+    let first = characters.next()?;
+    (first == '_' || first == '$' || first.is_ascii_alphabetic())
+        .then_some(())
+        .filter(|_| {
+            characters.all(|character| {
+                character == '_' || character == '$' || character.is_ascii_alphanumeric()
+            })
+        })?;
+    Some(name.to_owned())
 }
 
 fn call_target_node(node: Node<'_>) -> Option<Node<'_>> {
@@ -2313,5 +2577,27 @@ mod tests {
             .callback_arguments
             .iter()
             .any(|argument| argument.callee_name == "colorPicker"));
+    }
+
+    #[test]
+    fn repeated_receiver_names_are_partitioned_by_lexical_scope() {
+        let mut source = String::from("class Service { run() {} }\n");
+        for index in 0..5_000 {
+            source.push_str(&format!(
+                "function sibling{index}() {{ let value: Service; value.run(); }}\n"
+            ));
+        }
+        let tree = parse_tree(Language::TypeScript, &source).unwrap();
+        let mut bindings = ReceiverBindingMap::new();
+        collect_receiver_bindings(tree.root_node(), source.as_bytes(), &mut bindings);
+
+        let value_buckets = bindings
+            .iter()
+            .filter(|((name, _, _), _)| name == "value")
+            .collect::<Vec<_>>();
+        assert_eq!(value_buckets.len(), 5_000);
+        assert!(value_buckets
+            .iter()
+            .all(|(_, scoped_bindings)| scoped_bindings.len() == 1));
     }
 }
