@@ -200,12 +200,6 @@ impl Store {
                 file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
                 payload TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS resolved_call_targets (
-                call_id INTEGER NOT NULL REFERENCES unresolved_calls(id) ON DELETE CASCADE,
-                target_public_id TEXT NOT NULL,
-                target_qualified_name TEXT NOT NULL,
-                PRIMARY KEY(call_id,target_public_id)
-            );
             CREATE TABLE IF NOT EXISTS dynamic_events (
                 id INTEGER PRIMARY KEY,
                 file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
@@ -359,6 +353,18 @@ impl Store {
         self.connection.execute(
             "INSERT OR IGNORE INTO metadata(key, value) VALUES ('graph_model_version', ?1)",
             [GRAPH_MODEL_VERSION.to_string()],
+        )?;
+        self.connection.execute_batch(
+            "
+            DROP TABLE IF EXISTS main.resolved_call_targets;
+            DROP TABLE IF EXISTS temp.resolved_call_targets;
+            CREATE TEMP TABLE resolved_call_targets (
+                call_id INTEGER NOT NULL,
+                target_public_id TEXT NOT NULL,
+                target_qualified_name TEXT NOT NULL,
+                PRIMARY KEY(call_id,target_public_id)
+            ) WITHOUT ROWID;
+            ",
         )?;
         Ok(())
     }
@@ -3049,17 +3055,25 @@ mod tests {
         assert!(call_columns.contains(&"explanation".to_owned()));
         assert!(call_columns.contains(&"resolvable".to_owned()));
         assert!(call_columns.contains(&"start_byte".to_owned()));
-        for table in ["callback_parameter_delegations", "resolved_call_targets"] {
-            let exists = store
-                .connection
-                .query_row(
-                    "SELECT COUNT(*) FROM sqlite_master
-                     WHERE type='table' AND name=?1",
-                    [table],
-                    |row| row.get::<_, usize>(0),
-                )
-                .unwrap();
-            assert_eq!(exists, 1);
-        }
+        let delegations_exist = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type='table' AND name='callback_parameter_delegations'",
+                [],
+                |row| row.get::<_, usize>(0),
+            )
+            .unwrap();
+        assert_eq!(delegations_exist, 1);
+        let resolved_calls_are_temporary = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_temp_master
+                 WHERE type='table' AND name='resolved_call_targets'",
+                [],
+                |row| row.get::<_, usize>(0),
+            )
+            .unwrap();
+        assert_eq!(resolved_calls_are_temporary, 1);
     }
 }
