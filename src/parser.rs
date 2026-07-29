@@ -2,11 +2,11 @@ use crate::model::{
     CFunctionPointerArgumentFact, CFunctionPointerArrayDispatchFact, CFunctionPointerArrayFact,
     CFunctionPointerArrayTargetFact, CFunctionPointerBindingFact, CFunctionPointerDispatchFact,
     CFunctionPointerFacts, CFunctionPointerFormalStorageFact, CFunctionPointerPropagationFact,
-    CFunctionPointerTypedefFact, CIncludeFact, CStructFieldFact, CStructLayoutFact,
-    CallableReturnFact, CallbackArgumentFact, CallbackParameterDelegationFact,
-    CallbackParameterInvocation, Evidence, FileFacts, Language, PythonCallbackFormalFact,
-    Relationship, RelationshipKind, SourceSpan, Symbol, SymbolKind, UnresolvedCall,
-    UnresolvedReference,
+    CFunctionPointerTypedefFact, CIncludeFact, CLocalFunctionPointerBindingFact,
+    CLocalFunctionPointerDispatchFact, CStructFieldFact, CStructLayoutFact, CallableReturnFact,
+    CallbackArgumentFact, CallbackParameterDelegationFact, CallbackParameterInvocation, Evidence,
+    FileFacts, Language, PythonCallbackFormalFact, Relationship, RelationshipKind, SourceSpan,
+    Symbol, SymbolKind, UnresolvedCall, UnresolvedReference,
 };
 use crate::semantic::{enrich_file_facts, is_arkui_intrinsic_name};
 use anyhow::{anyhow, Context, Result};
@@ -129,6 +129,13 @@ pub(crate) fn parse_file_as(
         .iter()
         .filter(|dispatch| dispatch.proven_function_pointer)
         .map(|dispatch| dispatch.site_start_byte)
+        .chain(
+            c_function_pointers
+                .local_dispatches
+                .iter()
+                .filter(|dispatch| local_pointer_declaration_at(dispatch, &c_function_pointers))
+                .map(|dispatch| dispatch.site_start_byte),
+        )
         .collect::<std::collections::HashSet<_>>();
     let inline_callback_symbols = collect_inline_callback_symbols(
         tree.root_node(),
@@ -1275,6 +1282,12 @@ fn collect_c_function_pointer_facts(
     if facts.arguments.len() > MAX_C_FUNCTION_POINTER_FACTS_PER_FILE {
         facts.arguments.clear();
     }
+    if facts.local_bindings.len() > MAX_C_FUNCTION_POINTER_FACTS_PER_FILE {
+        facts.local_bindings.clear();
+    }
+    if facts.local_dispatches.len() > MAX_C_FUNCTION_POINTER_FACTS_PER_FILE {
+        facts.local_dispatches.clear();
+    }
     if facts.includes.len() > MAX_C_FUNCTION_POINTER_FACTS_PER_FILE {
         facts.includes.clear();
     }
@@ -1413,6 +1426,32 @@ fn collect_c_function_pointer_observations(
             node.child_by_field_name("left"),
             node.child_by_field_name("right"),
         ) {
+            if language == Language::Cpp && left.kind() == "identifier" {
+                let target_name = c_address_of_callable_reference(right, source, callable_names);
+                if target_name.is_some()
+                    || c_local_pointer_name_has_declaration(
+                        &node_text(left, source),
+                        node,
+                        &facts.local_bindings,
+                    )
+                {
+                    let (scope_start_byte, scope_end_byte) =
+                        receiver_enclosing_callable_scope(node);
+                    facts.local_bindings.push(CLocalFunctionPointerBindingFact {
+                        owner_id: owning_symbol_id(node, owners)
+                            .cloned()
+                            .unwrap_or_else(|| file_symbol_id.to_owned()),
+                        local_name: node_text(left, source),
+                        target_name,
+                        declares_binding: false,
+                        conditional: c_write_is_conditional(node),
+                        scope_start_byte,
+                        scope_end_byte,
+                        line: node.start_position().row + 1,
+                        site_start_byte: node.start_byte(),
+                    });
+                }
+            }
             if let (Some(mut path), Some(parameter_name)) = (
                 c_field_path(left, source),
                 (right.kind() == "identifier").then(|| node_text(right, source)),
@@ -1488,6 +1527,16 @@ fn collect_c_function_pointer_observations(
             }
         }
     } else if node.kind() == "declaration" {
+        if language == Language::Cpp {
+            collect_c_local_function_pointer_declarations(
+                node,
+                source,
+                owners,
+                file_symbol_id,
+                callable_names,
+                &mut facts.local_bindings,
+            );
+        }
         collect_c_function_pointer_arrays(node, source, callable_names, &mut facts.arrays);
         collect_c_initializer_bindings(
             node,
@@ -1500,6 +1549,21 @@ fn collect_c_function_pointer_observations(
     } else if node.kind() == "call_expression" {
         if let Some(function) = node.child_by_field_name("function") {
             if function.kind() == "identifier" {
+                if language == Language::Cpp {
+                    let (scope_start_byte, scope_end_byte) = receiver_binding_scope(node, true);
+                    facts
+                        .local_dispatches
+                        .push(CLocalFunctionPointerDispatchFact {
+                            owner_id: owning_symbol_id(node, owners)
+                                .cloned()
+                                .unwrap_or_else(|| file_symbol_id.to_owned()),
+                            local_name: node_text(function, source),
+                            scope_start_byte,
+                            scope_end_byte,
+                            line: node.start_position().row + 1,
+                            site_start_byte: node.start_byte(),
+                        });
+                }
                 if let Some(arguments) = node.child_by_field_name("arguments") {
                     let mut argument_cursor = arguments.walk();
                     for (argument_index, argument) in
@@ -1704,6 +1768,118 @@ fn collect_c_function_pointer_arrays(
     }
 }
 
+fn collect_c_local_function_pointer_declarations(
+    declaration: Node<'_>,
+    source: &[u8],
+    owners: &HashMap<(usize, usize), String>,
+    file_symbol_id: &str,
+    callable_names: &std::collections::HashSet<String>,
+    output: &mut Vec<CLocalFunctionPointerBindingFact>,
+) {
+    let mut cursor = declaration.walk();
+    for initializer in declaration
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() == "init_declarator")
+    {
+        let (Some(declarator), Some(value)) = (
+            initializer.child_by_field_name("declarator"),
+            initializer.child_by_field_name("value"),
+        ) else {
+            continue;
+        };
+        let (Some(local_name), Some(target_name)) = (
+            declarator_name(declarator).map(|name| node_text(name, source)),
+            c_address_of_callable_reference(value, source, callable_names),
+        ) else {
+            continue;
+        };
+        output.push(CLocalFunctionPointerBindingFact {
+            owner_id: owning_symbol_id(initializer, owners)
+                .cloned()
+                .unwrap_or_else(|| file_symbol_id.to_owned()),
+            local_name,
+            target_name: Some(target_name),
+            declares_binding: true,
+            conditional: false,
+            scope_start_byte: receiver_binding_scope(initializer, true).0,
+            scope_end_byte: receiver_binding_scope(initializer, true).1,
+            line: initializer.start_position().row + 1,
+            site_start_byte: initializer.start_byte(),
+        });
+    }
+}
+
+fn c_local_pointer_name_has_declaration(
+    name: &str,
+    node: Node<'_>,
+    bindings: &[CLocalFunctionPointerBindingFact],
+) -> bool {
+    let position = node.start_byte();
+    bindings.iter().any(|binding| {
+        binding.declares_binding
+            && binding.local_name == name
+            && binding.site_start_byte < position
+            && binding.scope_start_byte <= position
+            && position < binding.scope_end_byte
+    })
+}
+
+fn c_write_is_conditional(node: Node<'_>) -> bool {
+    let mut ancestor = node.parent();
+    while let Some(current) = ancestor {
+        if matches!(
+            current.kind(),
+            "if_statement"
+                | "switch_statement"
+                | "switch_case"
+                | "for_statement"
+                | "for_range_loop"
+                | "while_statement"
+                | "do_statement"
+                | "conditional_expression"
+                | "try_statement"
+                | "catch_clause"
+        ) {
+            return true;
+        }
+        if matches!(
+            current.kind(),
+            "function_definition"
+                | "function_declaration"
+                | "function_expression"
+                | "lambda_expression"
+        ) {
+            break;
+        }
+        ancestor = current.parent();
+    }
+    false
+}
+
+fn local_pointer_declaration_at(
+    dispatch: &CLocalFunctionPointerDispatchFact,
+    facts: &CFunctionPointerFacts,
+) -> bool {
+    facts.local_bindings.iter().any(|binding| {
+        binding.declares_binding
+            && binding.owner_id == dispatch.owner_id
+            && binding.local_name == dispatch.local_name
+            && binding.site_start_byte < dispatch.site_start_byte
+            && binding.scope_start_byte <= dispatch.site_start_byte
+            && dispatch.site_start_byte < binding.scope_end_byte
+    })
+}
+
+fn c_address_of_callable_reference(
+    node: Node<'_>,
+    source: &[u8],
+    callable_names: &std::collections::HashSet<String>,
+) -> Option<String> {
+    (node.kind() == "pointer_expression" && node_text(node, source).trim_start().starts_with('&'))
+        .then(|| c_callable_reference(node, source, callable_names))
+        .flatten()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn collect_c_initializer_element(
     element: Node<'_>,
@@ -1764,11 +1940,21 @@ fn c_callable_reference(
             .or_else(|| node.child_by_field_name("value"))
             .or_else(|| node.named_child(node.named_child_count().checked_sub(1)?))?;
     }
-    if !matches!(node.kind(), "identifier" | "qualified_identifier") {
+    if !matches!(
+        node.kind(),
+        "identifier" | "qualified_identifier" | "template_function"
+    ) {
         return None;
     }
     let raw = node_text(node, source);
-    let name = raw.rsplit("::").next().unwrap_or(&raw).to_owned();
+    let name = raw
+        .rsplit("::")
+        .next()
+        .unwrap_or(&raw)
+        .split('<')
+        .next()
+        .unwrap_or(&raw)
+        .to_owned();
     callable_names.contains(&name).then_some(name)
 }
 
@@ -3801,13 +3987,17 @@ fn receiver_binding_scope(node: Node<'_>, local: bool) -> (usize, usize) {
                 scope.kind(),
                 "statement_block"
                     | "block"
+                    | "compound_statement"
                     | "for_statement"
                     | "for_in_statement"
                     | "for_of_statement"
+                    | "if_statement"
+                    | "while_statement"
                     | "catch_clause"
                     | "switch_case"
                     | "switch_statement"
                     | "function_declaration"
+                    | "function_definition"
                     | "function_expression"
                     | "arrow_function"
                     | "method_definition"

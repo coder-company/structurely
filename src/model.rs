@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path};
 
-pub const GRAPH_MODEL_VERSION: u32 = 63;
+pub const GRAPH_MODEL_VERSION: u32 = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -435,6 +435,8 @@ pub(crate) struct CFunctionPointerFacts {
     pub array_dispatches: Vec<CFunctionPointerArrayDispatchFact>,
     pub formal_storages: Vec<CFunctionPointerFormalStorageFact>,
     pub arguments: Vec<CFunctionPointerArgumentFact>,
+    pub local_bindings: Vec<CLocalFunctionPointerBindingFact>,
+    pub local_dispatches: Vec<CLocalFunctionPointerDispatchFact>,
     pub includes: Vec<CIncludeFact>,
 }
 
@@ -539,6 +541,29 @@ pub(crate) struct CFunctionPointerArgumentFact {
     pub callee_name: String,
     pub argument_index: usize,
     pub target_name: String,
+    pub line: usize,
+    pub site_start_byte: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CLocalFunctionPointerBindingFact {
+    pub owner_id: String,
+    pub local_name: String,
+    pub target_name: Option<String>,
+    pub declares_binding: bool,
+    pub conditional: bool,
+    pub scope_start_byte: usize,
+    pub scope_end_byte: usize,
+    pub line: usize,
+    pub site_start_byte: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CLocalFunctionPointerDispatchFact {
+    pub owner_id: String,
+    pub local_name: String,
+    pub scope_start_byte: usize,
+    pub scope_end_byte: usize,
     pub line: usize,
     pub site_start_byte: usize,
 }

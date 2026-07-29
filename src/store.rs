@@ -1011,6 +1011,8 @@ impl Store {
             || !file.c_function_pointers.array_dispatches.is_empty()
             || !file.c_function_pointers.formal_storages.is_empty()
             || !file.c_function_pointers.arguments.is_empty()
+            || !file.c_function_pointers.local_bindings.is_empty()
+            || !file.c_function_pointers.local_dispatches.is_empty()
             || !file.c_function_pointers.includes.is_empty()
         {
             let payload = serde_json::to_string(&file.c_function_pointers)?;
@@ -2387,6 +2389,138 @@ impl Store {
                                 format!(
                                     "proven C/C++ function-pointer array may-dispatch through {}",
                                     dispatch.name
+                                ),
+                                path,
+                                dispatch.line,
+                            )
+                            .at_site(dispatch.site_start_byte),
+                        },
+                    )?;
+                    resolved += 1;
+                }
+            }
+        }
+        for path in &paths {
+            let mut local_bindings = HashMap::<
+                (String, String),
+                Vec<&crate::model::CLocalFunctionPointerBindingFact>,
+            >::new();
+            for binding in &files[path].local_bindings {
+                if work >= WORK_CAP {
+                    break;
+                }
+                work += 1;
+                local_bindings
+                    .entry((binding.owner_id.clone(), binding.local_name.clone()))
+                    .or_default()
+                    .push(binding);
+            }
+            for bindings in local_bindings.values_mut() {
+                bindings.sort_by_key(|binding| binding.site_start_byte);
+            }
+            for dispatch in &files[path].local_dispatches {
+                if work >= WORK_CAP {
+                    break;
+                }
+                work += 1;
+                let Some(bindings) =
+                    local_bindings.get(&(dispatch.owner_id.clone(), dispatch.local_name.clone()))
+                else {
+                    continue;
+                };
+                let declaration = bindings
+                    .iter()
+                    .copied()
+                    .filter(|binding| {
+                        binding.declares_binding
+                            && binding.site_start_byte < dispatch.site_start_byte
+                            && binding.scope_start_byte <= dispatch.site_start_byte
+                            && dispatch.site_start_byte < binding.scope_end_byte
+                    })
+                    .min_by_key(|binding| {
+                        (
+                            binding
+                                .scope_end_byte
+                                .saturating_sub(binding.scope_start_byte),
+                            usize::MAX - binding.site_start_byte,
+                        )
+                    });
+                let Some(declaration) = declaration else {
+                    continue;
+                };
+                let mut targets = HashSet::<String>::new();
+                let mut has_conditional_target = false;
+                for binding in bindings.iter().copied().filter(|binding| {
+                    declaration.site_start_byte <= binding.site_start_byte
+                        && binding.site_start_byte < dispatch.site_start_byte
+                        && declaration.scope_start_byte <= binding.site_start_byte
+                        && binding.site_start_byte < declaration.scope_end_byte
+                }) {
+                    let binding_declaration = bindings
+                        .iter()
+                        .copied()
+                        .filter(|candidate| {
+                            candidate.declares_binding
+                                && candidate.site_start_byte <= binding.site_start_byte
+                                && candidate.scope_start_byte <= binding.site_start_byte
+                                && binding.site_start_byte < candidate.scope_end_byte
+                        })
+                        .min_by_key(|candidate| {
+                            (
+                                candidate
+                                    .scope_end_byte
+                                    .saturating_sub(candidate.scope_start_byte),
+                                usize::MAX - candidate.site_start_byte,
+                            )
+                        });
+                    if binding_declaration.is_none_or(|candidate| {
+                        candidate.site_start_byte != declaration.site_start_byte
+                    }) {
+                        continue;
+                    }
+                    let target_id = binding.target_name.as_ref().and_then(|target_name| {
+                        let candidates = symbols_by_file_name
+                            .get(&(path.clone(), target_name.clone()))
+                            .cloned()
+                            .unwrap_or_default();
+                        (candidates.len() == 1).then(|| candidates[0].clone())
+                    });
+                    if binding.conditional {
+                        if let Some(target_id) = target_id {
+                            targets.insert(target_id);
+                            has_conditional_target = true;
+                        }
+                    } else {
+                        targets.clear();
+                        if let Some(target_id) = target_id {
+                            targets.insert(target_id);
+                        }
+                        has_conditional_target = false;
+                    }
+                }
+                if targets.len() > TARGET_FANOUT_CAP {
+                    continue;
+                }
+                let mut targets = targets.iter().cloned().collect::<Vec<_>>();
+                targets.sort();
+                for target_id in targets {
+                    Self::insert_relationship(
+                        tx,
+                        &Relationship {
+                            source_id: dispatch.owner_id.clone(),
+                            target_id,
+                            kind: RelationshipKind::Calls,
+                            evidence: Evidence::new(
+                                PROVENANCE,
+                                if has_conditional_target { 0.97 } else { 0.995 },
+                                format!(
+                                    "{} same-owner C++ local function-pointer dispatch through {}",
+                                    if has_conditional_target {
+                                        "bounded may-call"
+                                    } else {
+                                        "exact"
+                                    },
+                                    dispatch.local_name,
                                 ),
                                 path,
                                 dispatch.line,

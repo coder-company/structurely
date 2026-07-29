@@ -8095,6 +8095,179 @@ def outer():
     }
 
     #[test]
+    fn cpp_local_function_pointers_are_same_owner_address_proven_and_incremental() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("dispatch.cpp");
+        fs::write(
+            &source,
+            "static int alpha(int value) { return value + 1; }\n\
+             static int beta(int value) { return value + 2; }\n\
+             int run(bool split, int value) {\n\
+               auto local = &alpha;\n\
+               if (split) local = &beta;\n\
+               return local(value);\n\
+             }\n\
+             int sibling(int value) { return local(value); }\n",
+        )
+        .unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let targets = |engine: &Engine, caller_name: &str| {
+            let caller = engine
+                .search(caller_name, 10)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.name == caller_name)
+                .unwrap()
+                .symbol;
+            engine
+                .callees(&caller.id)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, evidence)| {
+                    evidence.provenance == "dynamic/c-function-pointer-dispatch"
+                })
+                .map(|(target, evidence)| (target.name, evidence.site.unwrap()))
+                .collect::<Vec<_>>()
+        };
+        let run = targets(&engine, "run");
+        assert_eq!(
+            run.iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<std::collections::HashSet<_>>(),
+            std::collections::HashSet::from(["alpha", "beta"])
+        );
+        assert_eq!(
+            run.iter()
+                .map(|(_, site)| *site)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            1
+        );
+        assert!(targets(&engine, "sibling").is_empty());
+
+        fs::write(
+            &source,
+            "static int alpha(int value) { return value + 1; }\n\
+             static int beta(int value) { return value + 2; }\n\
+             int run(bool split, int value) {\n\
+               (void)split;\n\
+               auto local = &beta;\n\
+               return local(value);\n\
+             }\n\
+             int sibling(int value) { return local(value); }\n",
+        )
+        .unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 1);
+        assert_eq!(
+            targets(&engine, "run")
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>(),
+            ["beta"]
+        );
+    }
+
+    #[test]
+    fn cpp_local_function_pointer_flow_respects_order_shadowing_and_kills() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("scopes.cpp"),
+            "static int alpha(int value) { return value + 1; }\n\
+             static int beta(int value) { return value + 2; }\n\
+             static int local(int value) { return value + 3; }\n\
+             int ordered(int value) {\n\
+               int before = local(value);\n\
+               auto local = &alpha;\n\
+               return before + local(value);\n\
+             }\n\
+             int shadowed(int value) {\n\
+               auto pointer = &alpha;\n\
+               { auto pointer = &beta; value += pointer(value); }\n\
+               return pointer(value);\n\
+             }\n\
+             int killed(int value) {\n\
+               auto pointer = &alpha;\n\
+               pointer = nullptr;\n\
+               return pointer(value);\n\
+             }\n\
+             int rebound(int value) {\n\
+               auto pointer = &alpha;\n\
+               pointer = &beta;\n\
+               return pointer(value);\n\
+             }\n\
+             static int fallback(int value) { return value + 4; }\n\
+             int if_scoped(int value) {\n\
+               if (auto fallback = &alpha; value) value = fallback(value);\n\
+               return fallback(value);\n\
+             }\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        let dynamic_targets = |caller_name: &str| {
+            let caller = engine
+                .search(caller_name, 10)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.symbol.name == caller_name)
+                .unwrap()
+                .symbol;
+            engine
+                .callees(&caller.id)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, evidence)| {
+                    evidence.provenance == "dynamic/c-function-pointer-dispatch"
+                })
+                .map(|(target, evidence)| (evidence.line, target.name))
+                .collect::<std::collections::HashSet<_>>()
+        };
+
+        assert_eq!(
+            dynamic_targets("ordered"),
+            std::collections::HashSet::from([(7, "alpha".to_owned())])
+        );
+        let ordered = engine
+            .search("ordered", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.name == "ordered")
+            .unwrap()
+            .symbol;
+        assert!(engine
+            .callees(&ordered.id)
+            .unwrap()
+            .into_iter()
+            .any(|(target, evidence)| target.name == "local"
+                && evidence.line == 5
+                && evidence.provenance != "dynamic/c-function-pointer-dispatch"));
+        assert_eq!(
+            dynamic_targets("shadowed"),
+            std::collections::HashSet::from([(11, "beta".to_owned()), (12, "alpha".to_owned())])
+        );
+        assert!(dynamic_targets("killed").is_empty());
+        assert_eq!(
+            dynamic_targets("rebound"),
+            std::collections::HashSet::from([(22, "beta".to_owned())])
+        );
+        assert_eq!(
+            dynamic_targets("if_scoped"),
+            std::collections::HashSet::from([(26, "alpha".to_owned())])
+        );
+        let if_scoped = engine
+            .search("if_scoped", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.name == "if_scoped")
+            .unwrap()
+            .symbol;
+        assert!(engine.callees(&if_scoped.id).unwrap().into_iter().any(
+            |(target, evidence)| target.name == "fallback"
+                && evidence.line == 27
+                && evidence.provenance != "dynamic/c-function-pointer-dispatch"
+        ));
+    }
+
+    #[test]
     fn watcher_makes_saved_symbols_query_visible() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("main.ts"), "function before() {}\n").unwrap();
