@@ -166,6 +166,12 @@ pub(crate) fn parse_file_as(
         &mut callback_parameter_delegations,
         &mut callback_arguments,
     );
+    collect_stored_callback_parameter_invocations(
+        tree.root_node(),
+        source_bytes,
+        &symbol_owners,
+        &mut callback_parameter_invocations,
+    );
     let mut unresolved_references = Vec::new();
     collect_structural_references(
         tree.root_node(),
@@ -1235,6 +1241,382 @@ fn invoked_parameter(
         ancestor = node.parent();
     }
     None
+}
+
+const MAX_STORED_CALLBACK_FIELDS_PER_CLASS: usize = 64;
+const MAX_STORED_CALLBACK_METHODS_PER_CLASS: usize = 64;
+const MAX_STORED_CALLBACK_OPERATIONS_PER_CLASS: usize = 256;
+
+#[derive(Debug)]
+struct StoredCallbackField {
+    name: String,
+    invoked: bool,
+    poisoned: bool,
+    sources: Vec<(String, usize)>,
+}
+
+struct StoredCallbackScan<'a> {
+    source: &'a [u8],
+    parameter_names: &'a [Option<String>],
+    owner_id: &'a str,
+    fields: &'a mut [StoredCallbackField],
+    operations: &'a mut usize,
+    assigned_fields: &'a mut std::collections::HashSet<String>,
+}
+
+fn collect_stored_callback_parameter_invocations(
+    node: Node<'_>,
+    source: &[u8],
+    symbol_owners: &HashMap<(usize, usize), String>,
+    output: &mut Vec<CallbackParameterInvocation>,
+) {
+    if matches!(node.kind(), "class_declaration" | "class_definition") {
+        collect_class_stored_callback_parameter_invocations(node, source, symbol_owners, output);
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_stored_callback_parameter_invocations(child, source, symbol_owners, output);
+    }
+}
+
+fn collect_class_stored_callback_parameter_invocations(
+    class: Node<'_>,
+    source: &[u8],
+    symbol_owners: &HashMap<(usize, usize), String>,
+    output: &mut Vec<CallbackParameterInvocation>,
+) {
+    let Some(body) = class.child_by_field_name("body") else {
+        return;
+    };
+    let mut body_cursor = body.walk();
+    let members = body.named_children(&mut body_cursor).collect::<Vec<_>>();
+    let method_count = members
+        .iter()
+        .filter(|member| member.kind() == "method_definition")
+        .count();
+    if method_count > MAX_STORED_CALLBACK_METHODS_PER_CLASS {
+        return;
+    }
+
+    let mut fields = members
+        .iter()
+        .filter(|member| member.kind() == "public_field_definition")
+        .filter_map(|field| {
+            let name = field.child_by_field_name("name")?;
+            let annotation = field.child_by_field_name("type")?;
+            callback_compatible_field_type(&node_text(annotation, source))?;
+            let poisoned = field
+                .child_by_field_name("value")
+                .is_some_and(|value| !is_nullish_callback_clear(value, source));
+            Some(StoredCallbackField {
+                name: node_text(name, source),
+                invoked: false,
+                poisoned,
+                sources: Vec::new(),
+            })
+        })
+        .take(MAX_STORED_CALLBACK_FIELDS_PER_CLASS + 1)
+        .collect::<Vec<_>>();
+    if fields.is_empty() || fields.len() > MAX_STORED_CALLBACK_FIELDS_PER_CLASS {
+        return;
+    }
+
+    let mut operations = 0usize;
+    for method in members
+        .into_iter()
+        .filter(|member| member.kind() == "method_definition")
+    {
+        let Some(parameters) = method.child_by_field_name("parameters") else {
+            continue;
+        };
+        let parameter_names = direct_parameter_names(parameters, source);
+        let Some(owner_id) = symbol_owners
+            .get(&(method.start_byte(), method.end_byte()))
+            .cloned()
+        else {
+            continue;
+        };
+        let mut assigned_fields = std::collections::HashSet::new();
+        let mut scan = StoredCallbackScan {
+            source,
+            parameter_names: &parameter_names,
+            owner_id: &owner_id,
+            fields: &mut fields,
+            operations: &mut operations,
+            assigned_fields: &mut assigned_fields,
+        };
+        if !collect_stored_callback_operations(method, method, &mut scan) {
+            return;
+        }
+    }
+
+    for field in fields {
+        if field.invoked && !field.poisoned {
+            for (owner_id, parameter_index) in field.sources {
+                if !output.iter().any(|candidate| {
+                    candidate.owner_id == owner_id && candidate.parameter_index == parameter_index
+                }) {
+                    output.push(CallbackParameterInvocation {
+                        owner_id,
+                        parameter_index,
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn collect_stored_callback_operations(
+    node: Node<'_>,
+    method: Node<'_>,
+    scan: &mut StoredCallbackScan<'_>,
+) -> bool {
+    if node.id() != method.id()
+        && matches!(
+            node.kind(),
+            "function_declaration"
+                | "function_expression"
+                | "arrow_function"
+                | "method_definition"
+                | "class_declaration"
+                | "class_definition"
+        )
+    {
+        if !matches!(node.kind(), "class_declaration" | "class_definition") {
+            return poison_nested_callback_field_uses(node, scan);
+        }
+        return true;
+    }
+    if node.kind() == "assignment_expression" {
+        if let Some(name) = node
+            .child_by_field_name("left")
+            .and_then(|left| direct_this_member(left, scan.source))
+            .and_then(|member| member.strip_prefix("this.").map(str::to_owned))
+        {
+            if let Some(field) = scan.fields.iter_mut().find(|field| field.name == name) {
+                *scan.operations += 1;
+                if *scan.operations > MAX_STORED_CALLBACK_OPERATIONS_PER_CLASS {
+                    return false;
+                }
+                let right = node.child_by_field_name("right");
+                if !is_plain_assignment(node, scan.source) {
+                    field.poisoned = true;
+                } else if right.is_some_and(|right| is_nullish_callback_clear(right, scan.source)) {
+                    if scan.assigned_fields.contains(&name) {
+                        field.poisoned = true;
+                    }
+                } else if let Some(parameter_index) = right
+                    .filter(|right| right.kind() == "identifier")
+                    .map(|right| node_text(right, scan.source))
+                    .and_then(|name| {
+                        scan.parameter_names
+                            .iter()
+                            .position(|parameter| parameter.as_deref() == Some(name.as_str()))
+                    })
+                {
+                    field
+                        .sources
+                        .push((scan.owner_id.to_owned(), parameter_index));
+                    scan.assigned_fields.insert(name);
+                } else {
+                    field.poisoned = true;
+                }
+            }
+        }
+    }
+    if node.kind() == "augmented_assignment_expression" {
+        if let Some(name) = node
+            .child_by_field_name("left")
+            .and_then(|left| direct_this_member(left, scan.source))
+            .and_then(|member| member.strip_prefix("this.").map(str::to_owned))
+        {
+            if let Some(field) = scan.fields.iter_mut().find(|field| field.name == name) {
+                *scan.operations += 1;
+                if *scan.operations > MAX_STORED_CALLBACK_OPERATIONS_PER_CLASS {
+                    return false;
+                }
+                field.poisoned = true;
+            }
+        }
+    }
+    if node.kind() == "call_expression" {
+        if let Some(name) = node
+            .child_by_field_name("function")
+            .and_then(|function| direct_this_member(function, scan.source))
+            .and_then(|member| member.strip_prefix("this.").map(str::to_owned))
+        {
+            if let Some(field) = scan.fields.iter_mut().find(|field| field.name == name) {
+                *scan.operations += 1;
+                if *scan.operations > MAX_STORED_CALLBACK_OPERATIONS_PER_CLASS {
+                    return false;
+                }
+                field.invoked = true;
+            }
+        }
+    }
+    if let Some(name) = direct_this_member(node, scan.source)
+        .and_then(|member| member.strip_prefix("this.").map(str::to_owned))
+    {
+        if let Some(field) = scan.fields.iter_mut().find(|field| field.name == name) {
+            *scan.operations += 1;
+            if *scan.operations > MAX_STORED_CALLBACK_OPERATIONS_PER_CLASS {
+                return false;
+            }
+            if !stored_callback_member_use_is_safe(node, scan.source) {
+                field.poisoned = true;
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if !collect_stored_callback_operations(child, method, scan) {
+            return false;
+        }
+    }
+    true
+}
+
+fn poison_nested_callback_field_uses(node: Node<'_>, scan: &mut StoredCallbackScan<'_>) -> bool {
+    if matches!(node.kind(), "class_declaration" | "class_definition") {
+        return true;
+    }
+    if let Some(name) = direct_this_member(node, scan.source)
+        .and_then(|member| member.strip_prefix("this.").map(str::to_owned))
+    {
+        if let Some(field) = scan.fields.iter_mut().find(|field| field.name == name) {
+            *scan.operations += 1;
+            if *scan.operations > MAX_STORED_CALLBACK_OPERATIONS_PER_CLASS {
+                return false;
+            }
+            field.poisoned = true;
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if !poison_nested_callback_field_uses(child, scan) {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_plain_assignment(node: Node<'_>, source: &[u8]) -> bool {
+    let (Some(left), Some(right)) = (
+        node.child_by_field_name("left"),
+        node.child_by_field_name("right"),
+    ) else {
+        return false;
+    };
+    source
+        .get(left.end_byte()..right.start_byte())
+        .and_then(|operator| std::str::from_utf8(operator).ok())
+        .is_some_and(|operator| operator.trim() == "=")
+}
+
+fn stored_callback_member_use_is_safe(member: Node<'_>, source: &[u8]) -> bool {
+    let Some(parent) = member.parent() else {
+        return false;
+    };
+    if parent.kind() == "call_expression"
+        && parent
+            .child_by_field_name("function")
+            .is_some_and(|function| function.id() == member.id())
+    {
+        return true;
+    }
+    if matches!(
+        parent.kind(),
+        "assignment_expression" | "augmented_assignment_expression"
+    ) && parent
+        .child_by_field_name("left")
+        .is_some_and(|left| left.id() == member.id())
+    {
+        return true;
+    }
+    if parent.kind() == "binary_expression" {
+        let left = parent.child_by_field_name("left");
+        let right = parent.child_by_field_name("right");
+        let other = if left.is_some_and(|left| left.id() == member.id()) {
+            right
+        } else if right.is_some_and(|right| right.id() == member.id()) {
+            left
+        } else {
+            None
+        };
+        if other.is_some_and(|other| is_nullish_callback_clear(other, source)) {
+            let raw = node_text(parent, source);
+            return ["===", "!==", "==", "!="]
+                .into_iter()
+                .any(|operator| raw.contains(operator));
+        }
+    }
+    if parent.kind() == "unary_expression"
+        && node_text(parent, source).trim_start().starts_with("typeof")
+    {
+        return true;
+    }
+    stored_callback_truthiness_guard(member, source)
+}
+
+fn stored_callback_truthiness_guard(mut node: Node<'_>, source: &[u8]) -> bool {
+    while let Some(parent) = node.parent() {
+        if matches!(
+            parent.kind(),
+            "parenthesized_expression" | "unary_expression"
+        ) {
+            node = parent;
+            continue;
+        }
+        if parent.kind() == "binary_expression" {
+            let (Some(left), Some(right)) = (
+                parent.child_by_field_name("left"),
+                parent.child_by_field_name("right"),
+            ) else {
+                return false;
+            };
+            let logical = source
+                .get(left.end_byte()..right.start_byte())
+                .and_then(|operator| std::str::from_utf8(operator).ok())
+                .is_some_and(|operator| matches!(operator.trim(), "&&" | "||"));
+            if !logical {
+                return false;
+            }
+            node = parent;
+            continue;
+        }
+        return matches!(
+            parent.kind(),
+            "if_statement" | "while_statement" | "do_statement" | "ternary_expression"
+        ) && parent
+            .child_by_field_name("condition")
+            .is_some_and(|condition| condition.id() == node.id());
+    }
+    false
+}
+
+fn callback_compatible_field_type(raw: &str) -> Option<()> {
+    let compact = raw
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    let annotation = compact.strip_prefix(':').unwrap_or(&compact);
+    let mut callable_count = 0usize;
+    for member in annotation.split('|') {
+        if matches!(member, "null" | "undefined") {
+            continue;
+        }
+        if member == "Function" || (member.starts_with('(') && member.contains(")=>")) {
+            callable_count += 1;
+        } else {
+            return None;
+        }
+    }
+    (callable_count == 1).then_some(())
+}
+
+fn is_nullish_callback_clear(node: Node<'_>, source: &[u8]) -> bool {
+    matches!(node_text(node, source).trim(), "null" | "undefined")
 }
 
 fn direct_parameter_names(parameters: Node<'_>, source: &[u8]) -> Vec<Option<String>> {
@@ -2440,6 +2822,70 @@ mod tests {
             .symbols
             .iter()
             .all(|symbol| symbol.id != inline_symbol.id));
+    }
+
+    #[test]
+    fn same_class_stored_callback_fields_mark_the_source_parameter_invoked() {
+        let facts = parse_file(
+            "InputDeviceUtil.ets",
+            "class InputDevice {\n\
+               private callback: Function | null = null\n\
+               registerChange(callback: Function): void { this.callback = callback }\n\
+               unregisterChange(): void {\n\
+                 if (this.callback !== null) { this.callback([]); this.callback = null }\n\
+               }\n\
+               onChange(): void { if (this.callback) { this.callback([]) } }\n\
+             }\n",
+        )
+        .unwrap();
+        let register = facts
+            .symbols
+            .iter()
+            .find(|symbol| symbol.qualified_name == "InputDevice.registerChange")
+            .unwrap();
+        assert!(facts
+            .callback_parameter_invocations
+            .iter()
+            .any(
+                |invocation| invocation.owner_id == register.id && invocation.parameter_index == 0
+            ));
+    }
+
+    #[test]
+    fn stored_callback_summaries_fail_closed_for_unsafe_fields_and_writes() {
+        for source in [
+            "class Unsafe { callback: Function | string = null; set(callback: Function) { this.callback = callback } run() { this.callback() } }",
+            "class Unsafe { callback: Function | null = () => {}; set(callback: Function) { this.callback = callback } run() { this.callback() } }",
+            "class Unsafe { callback: Function | null = null; set(callback: Function) { this.callback = callback; this.callback = other } run() { this.callback() } }",
+            "class Unsafe { callback: Function | null = null; set(callback: Function) { const nested = () => { this.callback = callback } } run() { this.callback() } }",
+            "class Unsafe { callback: Function | null = null; set(callback: Function) { this.callback = callback } run() { const nested = () => this.callback() } }",
+            "class Unsafe { callback: Function | null = null; set(callback: Function) { this.callback = callback } leak() { return this.callback } run() { this.callback() } }",
+            "class Unsafe { callback: Function | null = null; set(callback: Function) { this.callback = callback } leak() { use(this.callback) } run() { this.callback() } }",
+            "class Unsafe { callback: Function | null = null; set(callback: Function) { this.callback = callback } leak() { const alias = this.callback } run() { this.callback() } }",
+            "class Unsafe { callback: Function | null = null; set(callback: Function) { this.callback = callback } run() { this.callback.call(this) } }",
+            "class Unsafe { callback: Function | null = null; set(callback: Function) { this.callback = callback; this.callback += callback } run() { this.callback() } }",
+            "class Unsafe { callback: Function | null = null; set(callback: Function) { this.callback = callback; this.callback = null } run() { this.callback() } }",
+        ] {
+            let facts = parse_file("unsafe.ets", source).unwrap();
+            assert!(
+                facts.callback_parameter_invocations.is_empty(),
+                "unexpected stored callback summary for {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn stored_callback_operation_cap_fails_closed() {
+        let guards = "if (this.callback) {}\n".repeat(MAX_STORED_CALLBACK_OPERATIONS_PER_CLASS + 1);
+        let source = format!(
+            "class Capped {{\n\
+               callback: Function | null = null\n\
+               set(callback: Function) {{ this.callback = callback }}\n\
+               run() {{ this.callback(); {guards} }}\n\
+             }}"
+        );
+        let facts = parse_file("capped.ets", &source).unwrap();
+        assert!(facts.callback_parameter_invocations.is_empty());
     }
 
     #[test]

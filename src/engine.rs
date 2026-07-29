@@ -3219,6 +3219,55 @@ mod tests {
     }
 
     #[test]
+    fn input_device_stored_callback_lifecycle_propagates_and_removes_incrementally() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("InputDeviceUtil.ets");
+        let source = "class InputDevice {\n\
+               private callback: Function | null = null\n\
+               registerChange(callback: Function): void {\n\
+                 this.callback = callback\n\
+               }\n\
+               unregisterChange(): void {\n\
+                 if (this.callback !== null) {\n\
+                   this.callback([])\n\
+                   this.callback = null\n\
+                 }\n\
+               }\n\
+               onChange(): void {\n\
+                 if (this.callback) { this.callback([]) }\n\
+               }\n\
+             }\n\
+             function selected(devices: object[]): void {}\n\
+             function start(): void {\n\
+               const device: InputDevice = new InputDevice()\n\
+               device.registerChange(selected)\n\
+             }\n";
+        fs::write(&path, source).unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let register = engine
+            .search("InputDevice.registerChange", 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.symbol.qualified_name == "InputDevice.registerChange")
+            .unwrap()
+            .symbol;
+        let propagated = |engine: &Engine| {
+            engine
+                .callees(&register.id)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, evidence)| evidence.provenance == "dynamic/callback-argument")
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(propagated(&engine).len(), 1);
+        assert_eq!(propagated(&engine)[0].0.qualified_name, "selected");
+
+        fs::write(&path, source.replace("this.callback([])", "void 0")).unwrap();
+        assert_eq!(engine.sync().unwrap().files_changed, 1);
+        assert!(propagated(&engine).is_empty());
+    }
+
+    #[test]
     fn inline_callback_arguments_materialize_stable_callable_flows() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("main.ts");
