@@ -181,6 +181,16 @@ conditional assignments form bounded 0.97-confidence may-call unions, and
 C++17 `if`-initializer aliases do not leak past the statement. The unchanged
 19-file OpenHarmony gate still passes all 27 libsamplerate dispatch edges and
 both player callback flows with the v64 release binary.
+Graph model v65 adds type-proven same-file C++ function-pointer factory
+returns. The controlled superiority gate resolves both local
+`pointer = factory(); pointer()` and immediate `factory()(value)` dispatch,
+distinguishes 0.995-confidence single-target results from 0.97-confidence
+conditional unions, rejects scalar, shadowed, killed and nested-lambda shapes,
+and proves incremental 7 → 5 → 7 edge cleanup and restoration. On the exact
+same fixture, pinned CodeGraph 1.5.0 retains ordinary factory calls but emits
+zero returned `alpha`/`beta` target edges. The claim is intentionally limited
+to this fixture and the documented same-file C++ subset; cross-file, C,
+cast/bare-name, overload and transitive factory flow remain unsupported.
 
 The authoritative capability inventory is
 [`codegraph-parity.md`](codegraph-parity.md). A matching command name or schema

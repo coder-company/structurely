@@ -1,0 +1,283 @@
+{
+  "passed": true,
+  "checks": {
+    "graphModelVersion65": true,
+    "sameFileFactoryReturnFlow": true,
+    "localAndImmediateDispatch": true,
+    "exactAndMayConfidence": true,
+    "rejectionCasesFailClosed": true,
+    "incrementalTargetCleanupAndRestore": true,
+    "binaryAndSourceIdentityRecorded": true,
+    "pinnedCodeGraphFixtureComparison": true
+  },
+  "graphModelVersion": 65,
+  "structurely": {
+    "commit": "44f8892ac3bd86fd22078e8d6db29bc663713f8a",
+    "worktreeDirty": true,
+    "binarySha256": "8b39785888b0054f9870a10fa270594aab0e1b465b47943e9e65e6797815738a"
+  },
+  "fixture": {
+    "file": "factory.cpp",
+    "initialSha256": "d11923f69dc20029e5e8428e9427caedbbe863a4ae8206287822e897e39457bc",
+    "reboundSha256": "4f0a2dc77d8579b870c02f3ca6ae021c1673a6fc383db6fabdea398bbee3da68"
+  },
+  "fresh": {
+    "wallMs": 33.994,
+    "engineDurationMs": 14,
+    "checks": {
+      "localFactoryDispatch": true,
+      "immediateFactoryDispatch": true,
+      "singleTargetExactConfidence0995": true,
+      "multiTargetMayConfidence097": true,
+      "unsafeShapesRejected": true,
+      "ownedNonzeroEvidenceSites": true,
+      "noDuplicateEvidenceIdentities": true
+    },
+    "dynamicEdges": 7,
+    "edges": [
+      {
+        "source": "exact_local_dispatch",
+        "target": "alpha",
+        "kind": "calls",
+        "confidence": 0.995,
+        "file": "factory.cpp",
+        "line": 21,
+        "site": 864,
+        "explanation": "exact same-owner C++ local function-pointer dispatch through pointer"
+      },
+      {
+        "source": "explicit_local_dispatch",
+        "target": "alpha",
+        "kind": "calls",
+        "confidence": 0.97,
+        "file": "factory.cpp",
+        "line": 25,
+        "site": 986,
+        "explanation": "bounded may-call same-owner C++ local function-pointer dispatch through pointer"
+      },
+      {
+        "source": "explicit_local_dispatch",
+        "target": "beta",
+        "kind": "calls",
+        "confidence": 0.97,
+        "file": "factory.cpp",
+        "line": 25,
+        "site": 986,
+        "explanation": "bounded may-call same-owner C++ local function-pointer dispatch through pointer"
+      },
+      {
+        "source": "immediate_dispatch",
+        "target": "alpha",
+        "kind": "calls",
+        "confidence": 0.97,
+        "file": "factory.cpp",
+        "line": 28,
+        "site": 1061,
+        "explanation": "bounded may-call C++ function-pointer factory dispatch through choose"
+      },
+      {
+        "source": "immediate_dispatch",
+        "target": "beta",
+        "kind": "calls",
+        "confidence": 0.97,
+        "file": "factory.cpp",
+        "line": 28,
+        "site": 1061,
+        "explanation": "bounded may-call C++ function-pointer factory dispatch through choose"
+      },
+      {
+        "source": "local_dispatch",
+        "target": "alpha",
+        "kind": "calls",
+        "confidence": 0.97,
+        "file": "factory.cpp",
+        "line": 17,
+        "site": 765,
+        "explanation": "bounded may-call same-owner C++ local function-pointer dispatch through pointer"
+      },
+      {
+        "source": "local_dispatch",
+        "target": "beta",
+        "kind": "calls",
+        "confidence": 0.97,
+        "file": "factory.cpp",
+        "line": 17,
+        "site": 765,
+        "explanation": "bounded may-call same-owner C++ local function-pointer dispatch through pointer"
+      }
+    ]
+  },
+  "incremental": {
+    "rebind": {
+      "wallMs": 18.702,
+      "engineDurationMs": 15,
+      "checks": {
+        "localFactoryDispatch": true,
+        "immediateFactoryDispatch": true,
+        "singleTargetExactConfidence0995": true,
+        "multiTargetMayConfidence097": false,
+        "unsafeShapesRejected": true,
+        "ownedNonzeroEvidenceSites": true,
+        "noDuplicateEvidenceIdentities": true
+      },
+      "dynamicEdges": 5,
+      "edges": [
+        {
+          "source": "exact_local_dispatch",
+          "target": "alpha",
+          "kind": "calls",
+          "confidence": 0.995,
+          "file": "factory.cpp",
+          "line": 21,
+          "site": 833,
+          "explanation": "exact same-owner C++ local function-pointer dispatch through pointer"
+        },
+        {
+          "source": "explicit_local_dispatch",
+          "target": "alpha",
+          "kind": "calls",
+          "confidence": 0.97,
+          "file": "factory.cpp",
+          "line": 25,
+          "site": 955,
+          "explanation": "bounded may-call same-owner C++ local function-pointer dispatch through pointer"
+        },
+        {
+          "source": "explicit_local_dispatch",
+          "target": "beta",
+          "kind": "calls",
+          "confidence": 0.97,
+          "file": "factory.cpp",
+          "line": 25,
+          "site": 955,
+          "explanation": "bounded may-call same-owner C++ local function-pointer dispatch through pointer"
+        },
+        {
+          "source": "immediate_dispatch",
+          "target": "beta",
+          "kind": "calls",
+          "confidence": 0.995,
+          "file": "factory.cpp",
+          "line": 28,
+          "site": 1030,
+          "explanation": "exact C++ function-pointer factory dispatch through choose"
+        },
+        {
+          "source": "local_dispatch",
+          "target": "beta",
+          "kind": "calls",
+          "confidence": 0.995,
+          "file": "factory.cpp",
+          "line": 17,
+          "site": 734,
+          "explanation": "exact same-owner C++ local function-pointer dispatch through pointer"
+        }
+      ]
+    },
+    "restore": {
+      "wallMs": 18.173,
+      "engineDurationMs": 15,
+      "checks": {
+        "localFactoryDispatch": true,
+        "immediateFactoryDispatch": true,
+        "singleTargetExactConfidence0995": true,
+        "multiTargetMayConfidence097": true,
+        "unsafeShapesRejected": true,
+        "ownedNonzeroEvidenceSites": true,
+        "noDuplicateEvidenceIdentities": true
+      },
+      "dynamicEdges": 7,
+      "edges": [
+        {
+          "source": "exact_local_dispatch",
+          "target": "alpha",
+          "kind": "calls",
+          "confidence": 0.995,
+          "file": "factory.cpp",
+          "line": 21,
+          "site": 864,
+          "explanation": "exact same-owner C++ local function-pointer dispatch through pointer"
+        },
+        {
+          "source": "explicit_local_dispatch",
+          "target": "alpha",
+          "kind": "calls",
+          "confidence": 0.97,
+          "file": "factory.cpp",
+          "line": 25,
+          "site": 986,
+          "explanation": "bounded may-call same-owner C++ local function-pointer dispatch through pointer"
+        },
+        {
+          "source": "explicit_local_dispatch",
+          "target": "beta",
+          "kind": "calls",
+          "confidence": 0.97,
+          "file": "factory.cpp",
+          "line": 25,
+          "site": 986,
+          "explanation": "bounded may-call same-owner C++ local function-pointer dispatch through pointer"
+        },
+        {
+          "source": "immediate_dispatch",
+          "target": "alpha",
+          "kind": "calls",
+          "confidence": 0.97,
+          "file": "factory.cpp",
+          "line": 28,
+          "site": 1061,
+          "explanation": "bounded may-call C++ function-pointer factory dispatch through choose"
+        },
+        {
+          "source": "immediate_dispatch",
+          "target": "beta",
+          "kind": "calls",
+          "confidence": 0.97,
+          "file": "factory.cpp",
+          "line": 28,
+          "site": 1061,
+          "explanation": "bounded may-call C++ function-pointer factory dispatch through choose"
+        },
+        {
+          "source": "local_dispatch",
+          "target": "alpha",
+          "kind": "calls",
+          "confidence": 0.97,
+          "file": "factory.cpp",
+          "line": 17,
+          "site": 765,
+          "explanation": "bounded may-call same-owner C++ local function-pointer dispatch through pointer"
+        },
+        {
+          "source": "local_dispatch",
+          "target": "beta",
+          "kind": "calls",
+          "confidence": 0.97,
+          "file": "factory.cpp",
+          "line": 17,
+          "site": 765,
+          "explanation": "bounded may-call same-owner C++ local function-pointer dispatch through pointer"
+        }
+      ]
+    }
+  },
+  "codegraphComparison": {
+    "version": "1.5.0",
+    "commit": "572d22bfbe82602080e457bec655f72e3314f9ef",
+    "worktreeDirty": false,
+    "fixtureCallees": {
+      "local_dispatch": [
+        "choose"
+      ],
+      "exact_local_dispatch": [
+        "exact_factory"
+      ],
+      "explicit_local_dispatch": [],
+      "immediate_dispatch": [
+        "choose"
+      ]
+    },
+    "returnedFactoryTargetEdges": 0,
+    "scope": "CLI callees on this controlled fixture only; direct edges to the factory itself are retained and are not returned-target edges"
+  }
+}
