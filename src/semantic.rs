@@ -1046,21 +1046,6 @@ fn enrich_arkui_builder_param_assignment(
             caller.semantic_key, component_name, child_ordinal
         ),
     );
-    facts.relationships.push(Relationship {
-        source_id: caller.id.clone(),
-        target_id: target.id.clone(),
-        kind: RelationshipKind::Contains,
-        evidence: Evidence::new(
-            "framework/arkui-builder-param-child",
-            1.0,
-            format!(
-                "{} contains an inline ArkUI BuilderParam child for {component_name}",
-                caller.qualified_name
-            ),
-            &facts.path,
-            children.start_position().row + 1,
-        ),
-    });
     facts
         .arkui_builder_flow
         .assignments
@@ -1068,12 +1053,12 @@ fn enrich_arkui_builder_param_assignment(
             caller_id: caller.id,
             component_binding: component_name,
             param_name: None,
-            target_id: Some(target.id.clone()),
+            target_id: None,
+            target_symbol: Some(target),
             target_binding: None,
             require_decorated_target: false,
             line: component.start_position().row + 1,
         });
-    facts.symbols.push(target);
 }
 
 fn collect_recovered_arkui_builder_param_assignments(
@@ -1150,70 +1135,52 @@ fn collect_arkui_builder_param_object_assignments(
                 continue;
             };
             let param_name = text(key, source).trim_matches(['\'', '"']).to_owned();
-            let (target_id, target_binding, require_decorated_target) = if let Some(builder_name) =
-                exact_this_member_name(value, source)
-            {
-                let candidates = builders
-                    .iter()
-                    .filter(|builder| {
-                        builder.target.name == builder_name
-                            && builder.owner.as_deref() == caller_owner
-                    })
-                    .collect::<Vec<_>>();
-                if candidates.len() != 1 {
-                    continue;
-                }
-                (Some(candidates[0].target.id.clone()), None, true)
-            } else if value.kind() == "identifier" {
-                (None, Some(text(value, source)), true)
-            } else if matches!(value.kind(), "arrow_function" | "function_expression") {
-                let adapter_ordinal = facts
-                    .arkui_builder_flow
-                    .assignments
-                    .iter()
-                    .filter(|assignment| {
-                        assignment.caller_id == caller.id
-                            && assignment.component_binding == component_name
-                            && assignment.param_name.as_deref() == Some(&param_name)
-                    })
-                    .count()
-                    + 1;
-                let adapter_name = format!("<BuilderParam adapter {component_name}.{param_name}>");
-                let qualified_name = format!("{}.{}", caller.qualified_name, adapter_name);
-                let adapter = Symbol::new_disambiguated(
-                    Language::ArkTs,
-                    SymbolKind::Function,
-                    &adapter_name,
-                    &qualified_name,
-                    &facts.path,
-                    span(value),
-                    &format!(
-                        "arkui-builder-param-adapter|{}|{}|{}|{}",
-                        caller.semantic_key, component_name, param_name, adapter_ordinal
-                    ),
-                );
-                facts.relationships.push(Relationship {
-                    source_id: caller.id.clone(),
-                    target_id: adapter.id.clone(),
-                    kind: RelationshipKind::Contains,
-                    evidence: Evidence::new(
-                        "framework/arkui-builder-param-adapter",
-                        1.0,
-                        format!(
-                            "{} contains an inline ArkUI BuilderParam adapter for \
-                                 {component_name}.{param_name}",
-                            caller.qualified_name
-                        ),
+            let (target_id, target_symbol, target_binding, require_decorated_target) =
+                if let Some(builder_name) = exact_this_member_name(value, source) {
+                    let candidates = builders
+                        .iter()
+                        .filter(|builder| {
+                            builder.target.name == builder_name
+                                && builder.owner.as_deref() == caller_owner
+                        })
+                        .collect::<Vec<_>>();
+                    if candidates.len() != 1 {
+                        continue;
+                    }
+                    (Some(candidates[0].target.id.clone()), None, None, true)
+                } else if value.kind() == "identifier" {
+                    (None, None, Some(text(value, source)), true)
+                } else if matches!(value.kind(), "arrow_function" | "function_expression") {
+                    let adapter_ordinal = facts
+                        .arkui_builder_flow
+                        .assignments
+                        .iter()
+                        .filter(|assignment| {
+                            assignment.caller_id == caller.id
+                                && assignment.component_binding == component_name
+                                && assignment.param_name.as_deref() == Some(&param_name)
+                        })
+                        .count()
+                        + 1;
+                    let adapter_name =
+                        format!("<BuilderParam adapter {component_name}.{param_name}>");
+                    let qualified_name = format!("{}.{}", caller.qualified_name, adapter_name);
+                    let adapter = Symbol::new_disambiguated(
+                        Language::ArkTs,
+                        SymbolKind::Function,
+                        &adapter_name,
+                        &qualified_name,
                         &facts.path,
-                        value.start_position().row + 1,
-                    ),
-                });
-                let target_id = adapter.id.clone();
-                facts.symbols.push(adapter);
-                (Some(target_id), None, false)
-            } else {
-                continue;
-            };
+                        span(value),
+                        &format!(
+                            "arkui-builder-param-adapter|{}|{}|{}|{}",
+                            caller.semantic_key, component_name, param_name, adapter_ordinal
+                        ),
+                    );
+                    (None, Some(adapter), None, false)
+                } else {
+                    continue;
+                };
             facts
                 .arkui_builder_flow
                 .assignments
@@ -1222,6 +1189,7 @@ fn collect_arkui_builder_param_object_assignments(
                     component_binding: component_name.to_owned(),
                     param_name: Some(param_name),
                     target_id,
+                    target_symbol,
                     target_binding,
                     require_decorated_target,
                     line: pair.start_position().row + 1,

@@ -1332,10 +1332,41 @@ impl Store {
     fn resolve_arkui_builder_flows(tx: &Transaction<'_>) -> Result<usize> {
         tx.execute(
             "DELETE FROM relationships
+             WHERE source_public_id IN (
+                       SELECT public_id FROM symbols
+                       WHERE name LIKE '<BuilderParam adapter %'
+                          OR name LIKE '<BuilderParam child %'
+                   )
+                OR target_public_id IN (
+                       SELECT public_id FROM symbols
+                       WHERE name LIKE '<BuilderParam adapter %'
+                          OR name LIKE '<BuilderParam child %'
+                   )",
+            [],
+        )?;
+        tx.execute(
+            "DELETE FROM relationships
              WHERE provenance IN (
                  'framework/arkui-builder-param',
-                 'framework/arkui-builder-param-dispatch'
+                 'framework/arkui-builder-param-dispatch',
+                 'framework/arkui-builder-param-adapter',
+                 'framework/arkui-builder-param-child'
              )",
+            [],
+        )?;
+        tx.execute(
+            "DELETE FROM symbol_search
+             WHERE public_id IN (
+                 SELECT public_id FROM symbols
+                 WHERE name LIKE '<BuilderParam adapter %'
+                    OR name LIKE '<BuilderParam child %'
+             )",
+            [],
+        )?;
+        tx.execute(
+            "DELETE FROM symbols
+             WHERE name LIKE '<BuilderParam adapter %'
+                OR name LIKE '<BuilderParam child %'",
             [],
         )?;
         let mut batch_statement = tx.prepare(
@@ -1476,6 +1507,8 @@ impl Store {
 
                 let mut target_ids = if let Some(target_id) = &assignment.target_id {
                     vec![target_id.clone()]
+                } else if let Some(target) = &assignment.target_symbol {
+                    vec![target.id.clone()]
                 } else if let Some(binding) = &assignment.target_binding {
                     local
                         .get(&(*file_id, binding.clone()))
@@ -1501,6 +1534,83 @@ impl Store {
                     continue;
                 }
                 let target_id = &target_ids[0];
+                if let Some(target) = assignment
+                    .target_symbol
+                    .as_ref()
+                    .filter(|target| target.id == *target_id)
+                {
+                    let is_child = target.name.starts_with("<BuilderParam child ");
+                    let provenance = if is_child {
+                        "framework/arkui-builder-param-child"
+                    } else {
+                        "framework/arkui-builder-param-adapter"
+                    };
+                    let explanation = if is_child {
+                        format!(
+                            "{} contains an inline ArkUI BuilderParam child for {}",
+                            assignment.caller_id, param.component_name
+                        )
+                    } else {
+                        format!(
+                            "{} contains an inline ArkUI BuilderParam adapter for {}.{}",
+                            assignment.caller_id, param.component_name, param.param_name
+                        )
+                    };
+                    let inserted = tx
+                        .prepare_cached(
+                            "INSERT OR IGNORE INTO symbols(
+                            public_id, semantic_key, file_id, language, kind, name,
+                            qualified_name, start_byte, end_byte, start_line, end_line
+                         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                        )?
+                        .execute(params![
+                            target.id,
+                            target.semantic_key,
+                            file_id,
+                            target.language.to_string(),
+                            target.kind.to_string(),
+                            target.name,
+                            target.qualified_name,
+                            target.start_byte as i64,
+                            target.end_byte as i64,
+                            target.start_line as i64,
+                            target.end_line as i64
+                        ])?;
+                    if inserted == 1 {
+                        tx.prepare_cached(
+                            "INSERT INTO symbol_search(
+                                public_id, name, qualified_name, file, segments
+                             ) VALUES (?1,?2,?3,?4,?5)",
+                        )?
+                        .execute(params![
+                            target.id,
+                            target.name,
+                            target.qualified_name,
+                            target.file,
+                            identifier_segments(&format!(
+                                "{} {}",
+                                target.name, target.qualified_name
+                            ))
+                            .join(" ")
+                        ])?;
+                        Self::insert_relationship(
+                            tx,
+                            &Relationship {
+                                source_id: assignment.caller_id.clone(),
+                                target_id: target.id.clone(),
+                                kind: RelationshipKind::Contains,
+                                evidence: Evidence::new(
+                                    provenance,
+                                    1.0,
+                                    explanation,
+                                    file,
+                                    assignment.line,
+                                ),
+                            },
+                        )?;
+                        resolved += 1;
+                    }
+                }
                 Self::insert_relationship(
                     tx,
                     &Relationship {

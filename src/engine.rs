@@ -3618,6 +3618,11 @@ mod tests {
                @BuilderParam content: () => void\n\
                @BuilderParam footer: () => void\n\
                build() { this.content(); this.footer() }\n\
+             }\n\
+             @Component\n\
+             export struct PlainSlot {\n\
+               handler: () => void\n\
+               build() { Text('plain') }\n\
              }\n",
         )
         .unwrap();
@@ -3631,7 +3636,7 @@ mod tests {
         let host = temp.path().join("Host.ets");
         fs::write(
             &host,
-            "import { Slot as AliasedSlot, MultiSlot } from './Slot'\n\
+            "import { Slot as AliasedSlot, MultiSlot, PlainSlot } from './Slot'\n\
              import { importedContent as contentBuilder, undecorated } from './Builders'\n\
              @Component\n\
              struct Host {\n\
@@ -3643,6 +3648,7 @@ mod tests {
                  AliasedSlot() { Text('inline') }\n\
                  MultiSlot() { Text('ambiguous') }\n\
                  Column() { AliasedSlot({ content: () => { Text('recovered') } }) }\n\
+                 Column() { PlainSlot({ handler: () => { Text('not a param') } }) }\n\
                }\n\
              }\n",
         )
@@ -3693,6 +3699,16 @@ mod tests {
                 .count(),
             2
         );
+        assert!(engine
+            .search("<BuilderParam adapter PlainSlot.handler>", 20)
+            .unwrap()
+            .into_iter()
+            .all(|hit| hit.symbol.name != "<BuilderParam adapter PlainSlot.handler>"));
+        assert!(engine
+            .search("<BuilderParam child MultiSlot>", 20)
+            .unwrap()
+            .into_iter()
+            .all(|hit| hit.symbol.name != "<BuilderParam child MultiSlot>"));
 
         let slot_build = symbol(&engine, "Slot.build");
         let dispatches = engine
@@ -3747,6 +3763,16 @@ mod tests {
             .unwrap()
             .into_iter()
             .all(|(_, evidence)| evidence.provenance != "framework/arkui-builder-param"));
+        assert!(engine
+            .search(&adapter.qualified_name, 20)
+            .unwrap()
+            .into_iter()
+            .all(|hit| hit.symbol.id != adapter.id));
+        assert!(engine
+            .search(&inline.qualified_name, 20)
+            .unwrap()
+            .into_iter()
+            .all(|hit| hit.symbol.id != inline.id));
     }
 
     #[test]

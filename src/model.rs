@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path};
 
-pub const GRAPH_MODEL_VERSION: u32 = 42;
+pub const GRAPH_MODEL_VERSION: u32 = 43;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -327,6 +327,7 @@ pub(crate) struct ArkuiBuilderParamAssignmentFact {
     pub component_binding: String,
     pub param_name: Option<String>,
     pub target_id: Option<String>,
+    pub target_symbol: Option<Symbol>,
     pub target_binding: Option<String>,
     pub require_decorated_target: bool,
     pub line: usize,
