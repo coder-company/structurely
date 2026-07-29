@@ -295,3 +295,10 @@ The
 then records 34 `LRUCache` confidence upgrades on the 441-file intersection
 and recovers all eight real OrangeShopping constructor-built emitter channel
 facts (four registrations and four dispatches) on the 6,995-file pin.
+
+The
+[`stored-callback gate`](../benchmarks/openharmony-stored-callback-2026-07-29/README.md)
+adds two exact 0.96 DistributedRdb callback-argument relationships and their
+two inline identities on the same OpenHarmony pin, with zero callback
+relationship removals. The underlying inventory contains 48 exact shapes, 36
+of which meet the conservative single-assignment/no-escape screen.

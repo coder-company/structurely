@@ -120,6 +120,11 @@ constructor-built OrangeShopping emitter facts on the 6,995-file OpenHarmony
 pin. The gate explicitly distinguishes the two exact inline registration
 relationships from the still-unimplemented formal-callback dispatch
 composition.
+The `benchmarks/openharmony-stored-callback-2026-07-29/` gate advances the
+graph model to v52 and records two exact 0.96 DistributedRdb callback-argument
+relationships through callable-typed same-class fields. The 6,995-file
+snapshot adds two callback flows and two inline identities with zero callback
+removals; strict class/work caps and adversarial escape fixtures remain green.
 
 The authoritative capability inventory is
 [`codegraph-parity.md`](codegraph-parity.md). A matching command name or schema
