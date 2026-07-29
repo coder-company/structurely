@@ -5947,6 +5947,229 @@ mod tests {
     }
 
     #[test]
+    fn nestjs_transport_decorators_create_exact_routes_and_handler_edges() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("transport.ts"),
+            "import { SubscribeMessage as OnMessage } from '@nestjs/websockets';\n\
+             import { MessagePattern, EventPattern as OnEvent, GrpcMethod, GrpcStreamMethod } from '@nestjs/microservices';\n\
+             export class TransportController {\n\
+               @OnMessage('chat.message')\n\
+               socket() {}\n\
+               @MessagePattern([{ cmd: 'sum', version: 2 }, 'health'], { transport: 'tcp' }, dynamicExtras)\n\
+               message() {}\n\
+               @MessagePattern(-7)\n\
+               numeric() {}\n\
+               @OnEvent({ topic: 'created', durable: true })\n\
+               event() {}\n\
+               @GrpcMethod()\n\
+               unary() {}\n\
+               @GrpcMethod('')\n\
+               blankService() {}\n\
+               @GrpcMethod('Heroes', '')\n\
+               blankMethod() {}\n\
+               @GrpcStreamMethod('Heroes', 'FindMany')\n\
+               stream() {}\n\
+               @GrpcStreamMethod('', '')\n\
+               blankStream() {}\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        for (route_name, handler, provenance) in [
+            (
+                "WS \"chat.message\"",
+                "socket",
+                "framework/nestjs-websocket",
+            ),
+            (
+                "MESSAGE {\"cmd\":\"sum\",\"version\":2}",
+                "message",
+                "framework/nestjs-microservice",
+            ),
+            (
+                "MESSAGE \"health\"",
+                "message",
+                "framework/nestjs-microservice",
+            ),
+            ("MESSAGE -7", "numeric", "framework/nestjs-microservice"),
+            (
+                "EVENT {\"durable\":true,\"topic\":\"created\"}",
+                "event",
+                "framework/nestjs-microservice",
+            ),
+            (
+                "GRPC TransportController/Unary",
+                "unary",
+                "framework/nestjs-microservice",
+            ),
+            (
+                "GRPC TransportController/BlankService",
+                "blankService",
+                "framework/nestjs-microservice",
+            ),
+            (
+                "GRPC Heroes/BlankMethod",
+                "blankMethod",
+                "framework/nestjs-microservice",
+            ),
+            (
+                "GRPC_STREAM Heroes/FindMany",
+                "stream",
+                "framework/nestjs-microservice",
+            ),
+            (
+                "GRPC_STREAM TransportController/BlankStream",
+                "blankStream",
+                "framework/nestjs-microservice",
+            ),
+        ] {
+            let route = engine
+                .snapshot()
+                .unwrap()
+                .symbols
+                .into_iter()
+                .find(|symbol| {
+                    symbol.kind == crate::model::SymbolKind::Route && symbol.name == route_name
+                })
+                .unwrap_or_else(|| panic!("missing transport route {route_name}"));
+            let callees = engine.callees(&route.id).unwrap();
+            assert_eq!(callees.len(), 1, "{route_name}");
+            assert_eq!(callees[0].0.name, handler);
+            assert_eq!(
+                callees[0].0.qualified_name,
+                format!("TransportController.{handler}")
+            );
+            assert_eq!(callees[0].1.provenance, provenance);
+            assert_eq!(callees[0].1.confidence, 0.99);
+        }
+    }
+
+    #[test]
+    fn nestjs_transport_adapter_rejects_unproven_shadowed_and_dynamic_decorators() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("invalid.ts"),
+            "import type { MessagePattern as Typed } from '@nestjs/microservices';\n\
+             import { MessagePattern, GrpcMethod } from '@nestjs/microservices';\n\
+             import { SubscribeMessage } from './lookalike';\n\
+             const pattern = 'dynamic';\n\
+             function scope(MessagePattern: Function) { return MessagePattern; }\n\
+             class Invalid {\n\
+               @Typed('typed') typed() {}\n\
+               @MessagePattern(pattern) dynamic() {}\n\
+               @MessagePattern({ nested: { value: 1 } }) nested() {}\n\
+               @MessagePattern('too-many', 1, 2, 3) tooMany() {}\n\
+               @GrpcMethod('Service', pattern) grpcDynamic() {}\n\
+               @GrpcMethod('A', 'B', 'C') grpcExtra() {}\n\
+               @SubscribeMessage('fake') fake() {}\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        assert!(engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .iter()
+            .all(|symbol| symbol.kind != crate::model::SymbolKind::Route));
+    }
+
+    #[test]
+    fn nestjs_transport_shadow_detection_covers_destructured_parameters_and_catches() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("shadowed.ts"),
+            "import { MessagePattern as ParamPattern, EventPattern as CatchPattern } from '@nestjs/microservices';\n\
+             function parameter({ nested: { ParamPattern } }: any) {\n\
+               class Nested { @ParamPattern('false-param') handle() {} }\n\
+             }\n\
+             try { throw {}; } catch ({ nested: { CatchPattern } }) {\n\
+               class Nested { @CatchPattern('false-catch') handle() {} }\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        assert!(engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .iter()
+            .all(|symbol| symbol.kind != crate::model::SymbolKind::Route));
+    }
+
+    #[test]
+    fn nestjs_transport_route_ids_ignore_unrelated_same_pattern_insertions() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("stable.ts");
+        let original = "import { MessagePattern } from '@nestjs/microservices';\n\
+                        class Stable { @MessagePattern('same') target() {} }\n";
+        fs::write(&path, original).unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let original_id = engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .into_iter()
+            .find(|symbol| {
+                symbol.kind == crate::model::SymbolKind::Route && symbol.name == "MESSAGE \"same\""
+            })
+            .unwrap()
+            .id;
+
+        fs::write(
+            &path,
+            "import { MessagePattern } from '@nestjs/microservices';\n\
+             class Earlier { @MessagePattern('same') unrelated() {} }\n\
+             class Stable { @MessagePattern('same') target() {} }\n",
+        )
+        .unwrap();
+        engine.sync().unwrap();
+        let stable_route = engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .into_iter()
+            .find(|symbol| {
+                symbol.kind == crate::model::SymbolKind::Route
+                    && symbol.name == "MESSAGE \"same\""
+                    && symbol.id == original_id
+            });
+        assert!(stable_route.is_some());
+    }
+
+    #[test]
+    fn nestjs_transport_routes_clean_up_incrementally() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("consumer.ts");
+        fs::write(
+            &path,
+            "import { EventPattern } from '@nestjs/microservices';\n\
+             class Consumer { @EventPattern('created') consume() {} }\n",
+        )
+        .unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        assert!(engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .iter()
+            .any(|symbol| symbol.kind == crate::model::SymbolKind::Route));
+
+        fs::write(&path, "class Consumer { consume() {} }\n").unwrap();
+        engine.sync().unwrap();
+        assert!(engine
+            .snapshot()
+            .unwrap()
+            .symbols
+            .iter()
+            .all(|symbol| symbol.kind != crate::model::SymbolKind::Route));
+    }
+
+    #[test]
     fn watcher_makes_saved_symbols_query_visible() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("main.ts"), "function before() {}\n").unwrap();

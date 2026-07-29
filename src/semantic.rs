@@ -4,7 +4,10 @@ use crate::model::{
     FileFacts, Language, LiteralBindingFact, ModuleExportFact, Relationship, RelationshipKind,
     SourceSpan, Symbol, SymbolKind, UnresolvedCall, UnresolvedReference,
 };
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 use tree_sitter::Node;
 
 pub(crate) fn enrich_file_facts(root: Node<'_>, source: &[u8], facts: &mut FileFacts) {
@@ -24,6 +27,7 @@ pub(crate) fn enrich_file_facts(root: Node<'_>, source: &[u8], facts: &mut FileF
             }
             collect_javascript_registrations(root, source, facts);
             collect_javascript_function_references(root, source, facts);
+            collect_nestjs_transport_routes(root, source, facts);
             collect_nestjs_routes(root, source, facts);
             if facts.language == Language::ArkTs {
                 collect_arkui_routes(root, source, facts);
@@ -2893,6 +2897,434 @@ fn byte_line(source: &[u8], offset: usize) -> usize {
         + 1
 }
 
+#[derive(Clone, Copy)]
+enum NestTransportDecorator {
+    WebSocket,
+    Message,
+    Event,
+    Grpc,
+    GrpcStream,
+}
+
+impl NestTransportDecorator {
+    fn canonical_name(self) -> &'static str {
+        match self {
+            Self::WebSocket => "SubscribeMessage",
+            Self::Message => "MessagePattern",
+            Self::Event => "EventPattern",
+            Self::Grpc => "GrpcMethod",
+            Self::GrpcStream => "GrpcStreamMethod",
+        }
+    }
+
+    fn provenance(self) -> &'static str {
+        match self {
+            Self::WebSocket => "framework/nestjs-websocket",
+            Self::Message | Self::Event | Self::Grpc | Self::GrpcStream => {
+                "framework/nestjs-microservice"
+            }
+        }
+    }
+}
+
+fn collect_nestjs_transport_routes(root: Node<'_>, source: &[u8], facts: &mut FileFacts) {
+    if !contains_bytes(source, b"@nestjs/") {
+        return;
+    }
+    let imports = nestjs_transport_imports(root, source);
+    if imports.is_empty() {
+        return;
+    }
+    let shadowed = imports
+        .keys()
+        .filter(|binding| javascript_binding_redeclared(root, source, binding))
+        .cloned()
+        .collect::<HashSet<_>>();
+    let mut occurrences = HashMap::new();
+    collect_nestjs_transport_classes(root, source, facts, &imports, &shadowed, &mut occurrences);
+}
+
+fn nestjs_transport_imports(
+    root: Node<'_>,
+    source: &[u8],
+) -> HashMap<String, NestTransportDecorator> {
+    fn visit(node: Node<'_>, source: &[u8], output: &mut HashMap<String, NestTransportDecorator>) {
+        if node.kind() == "import_statement" {
+            let Some(module) = node
+                .child_by_field_name("source")
+                .and_then(|value| string_literal(value, source))
+            else {
+                return;
+            };
+            let supported: &[(&str, NestTransportDecorator)] = match module.as_str() {
+                "@nestjs/websockets" => &[("SubscribeMessage", NestTransportDecorator::WebSocket)],
+                "@nestjs/microservices" => &[
+                    ("MessagePattern", NestTransportDecorator::Message),
+                    ("EventPattern", NestTransportDecorator::Event),
+                    ("GrpcMethod", NestTransportDecorator::Grpc),
+                    ("GrpcStreamMethod", NestTransportDecorator::GrpcStream),
+                ],
+                _ => return,
+            };
+            let statement = text(node, source);
+            let Some(clause) = statement
+                .strip_prefix("import")
+                .and_then(|body| body.rsplit_once(" from ").map(|(clause, _)| clause.trim()))
+                .filter(|clause| !clause.starts_with("type "))
+            else {
+                return;
+            };
+            for (canonical, kind) in supported {
+                for binding in named_import_bindings(clause, canonical) {
+                    output.insert(binding, *kind);
+                }
+            }
+            return;
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            visit(child, source, output);
+        }
+    }
+
+    let mut output = HashMap::new();
+    visit(root, source, &mut output);
+    output
+}
+
+fn javascript_binding_redeclared(root: Node<'_>, source: &[u8], binding: &str) -> bool {
+    fn pattern_binds(node: Node<'_>, source: &[u8], binding: &str) -> bool {
+        if matches!(
+            node.kind(),
+            "identifier"
+                | "shorthand_property_identifier_pattern"
+                | "shorthand_property_identifier"
+        ) {
+            return text(node, source) == binding;
+        }
+        if node.kind() == "pair_pattern" {
+            return node
+                .child_by_field_name("value")
+                .is_some_and(|value| pattern_binds(value, source, binding));
+        }
+        if node.kind() == "assignment_pattern" {
+            return node
+                .child_by_field_name("left")
+                .is_some_and(|left| pattern_binds(left, source, binding));
+        }
+        if !matches!(
+            node.kind(),
+            "object_pattern"
+                | "array_pattern"
+                | "rest_pattern"
+                | "required_parameter"
+                | "optional_parameter"
+        ) {
+            return false;
+        }
+        let mut cursor = node.walk();
+        let found = node
+            .named_children(&mut cursor)
+            .any(|child| pattern_binds(child, source, binding));
+        found
+    }
+
+    fn visit(node: Node<'_>, source: &[u8], binding: &str) -> bool {
+        if node.kind() == "import_statement" {
+            return false;
+        }
+        let declares = match node.kind() {
+            "variable_declarator" | "function_declaration" | "class_declaration" => node
+                .child_by_field_name("name")
+                .is_some_and(|name| pattern_binds(name, source, binding)),
+            "required_parameter" | "optional_parameter" => node
+                .child_by_field_name("pattern")
+                .or_else(|| node.child_by_field_name("name"))
+                .is_some_and(|name| pattern_binds(name, source, binding)),
+            "catch_clause" => node
+                .child_by_field_name("parameter")
+                .is_some_and(|parameter| pattern_binds(parameter, source, binding)),
+            _ => false,
+        };
+        if declares {
+            return true;
+        }
+        let mut cursor = node.walk();
+        let found = node
+            .named_children(&mut cursor)
+            .any(|child| visit(child, source, binding));
+        found
+    }
+    visit(root, source, binding)
+}
+
+fn collect_nestjs_transport_classes(
+    node: Node<'_>,
+    source: &[u8],
+    facts: &mut FileFacts,
+    imports: &HashMap<String, NestTransportDecorator>,
+    shadowed: &HashSet<String>,
+    occurrences: &mut HashMap<String, usize>,
+) {
+    if node.kind() == "class_declaration" {
+        enrich_nestjs_transport_class(node, source, facts, imports, shadowed, occurrences);
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_nestjs_transport_classes(child, source, facts, imports, shadowed, occurrences);
+    }
+}
+
+fn enrich_nestjs_transport_class(
+    class: Node<'_>,
+    source: &[u8],
+    facts: &mut FileFacts,
+    imports: &HashMap<String, NestTransportDecorator>,
+    shadowed: &HashSet<String>,
+    occurrences: &mut HashMap<String, usize>,
+) {
+    let Some(class_name) = class
+        .child_by_field_name("name")
+        .map(|name| text(name, source))
+        .filter(|name| is_javascript_identifier(name))
+    else {
+        return;
+    };
+    let Some(body) = class.child_by_field_name("body") else {
+        return;
+    };
+    let mut cursor = body.walk();
+    let children = body.named_children(&mut cursor).collect::<Vec<_>>();
+    let mut pending = Vec::new();
+    for method in children {
+        if method.kind() == "decorator" {
+            pending.push(method);
+            continue;
+        }
+        if method.kind() != "method_definition" {
+            pending.clear();
+            continue;
+        }
+        let Some(handler) = method
+            .child_by_field_name("name")
+            .map(|name| text(name, source))
+            .filter(|name| is_javascript_identifier(name))
+        else {
+            pending.clear();
+            continue;
+        };
+        for decorator in pending.drain(..) {
+            let Some((binding, arguments)) = decorator_call(decorator, source) else {
+                continue;
+            };
+            let Some(kind) = imports.get(&binding).copied() else {
+                continue;
+            };
+            if shadowed.contains(&binding) {
+                continue;
+            }
+            let Some(names) =
+                nestjs_transport_route_names(kind, &arguments, source, &class_name, &handler)
+            else {
+                continue;
+            };
+            for name in names {
+                let occurrence_key =
+                    format!("{}|{name}|{class_name}|{handler}", kind.canonical_name());
+                let occurrence = occurrences.entry(occurrence_key).or_default();
+                *occurrence += 1;
+                let route = Symbol::new_disambiguated(
+                    facts.language,
+                    SymbolKind::Route,
+                    &name,
+                    &name,
+                    &facts.path,
+                    span(decorator),
+                    &format!(
+                        "nestjs-transport|{}|{name}|{class_name}|{handler}|occurrence:{occurrence}",
+                        kind.canonical_name(),
+                    ),
+                );
+                let file_symbol = facts.symbols.first().expect("file symbol");
+                facts.relationships.push(Relationship {
+                    source_id: file_symbol.id.clone(),
+                    target_id: route.id.clone(),
+                    kind: RelationshipKind::Contains,
+                    evidence: Evidence::new(
+                        kind.provenance(),
+                        1.0,
+                        format!("{name} is registered in {}", facts.path),
+                        &facts.path,
+                        decorator.start_position().row + 1,
+                    ),
+                });
+                facts.unresolved_calls.push(UnresolvedCall {
+                    caller_id: route.id.clone(),
+                    fallback_caller_id: None,
+                    callee_name: handler.clone(),
+                    receiver_binding: None,
+                    receiver_type: Some(class_name.clone()),
+                    receiver_call_start_byte: None,
+                    target_file_hint: None,
+                    provenance: kind.provenance().to_owned(),
+                    confidence: 0.99,
+                    explanation: format!("{name} decorates {class_name}.{handler}"),
+                    resolvable: true,
+                    file: facts.path.clone(),
+                    line: decorator.start_position().row + 1,
+                    start_byte: decorator.start_byte(),
+                });
+                facts.symbols.push(route);
+            }
+        }
+    }
+}
+
+fn nestjs_transport_route_names(
+    kind: NestTransportDecorator,
+    arguments: &[Node<'_>],
+    source: &[u8],
+    class_name: &str,
+    handler: &str,
+) -> Option<Vec<String>> {
+    match kind {
+        NestTransportDecorator::WebSocket => {
+            if arguments.len() != 1 {
+                return None;
+            }
+            let value = string_literal(arguments[0], source)?;
+            (value.len() <= 256).then(|| {
+                vec![format!(
+                    "WS {}",
+                    serde_json::to_string(&value).expect("string serialization")
+                )]
+            })
+        }
+        NestTransportDecorator::Message | NestTransportDecorator::Event => {
+            if arguments.is_empty() || arguments.len() > 3 {
+                return None;
+            }
+            let values = nestjs_pattern_values(arguments[0], source)?;
+            let prefix = if matches!(kind, NestTransportDecorator::Message) {
+                "MESSAGE"
+            } else {
+                "EVENT"
+            };
+            Some(
+                values
+                    .into_iter()
+                    .map(|value| format!("{prefix} {value}"))
+                    .collect(),
+            )
+        }
+        NestTransportDecorator::Grpc | NestTransportDecorator::GrpcStream => {
+            if arguments.len() > 2 {
+                return None;
+            }
+            let service = match arguments.first() {
+                Some(argument) => string_literal(*argument, source)?,
+                None => class_name.to_owned(),
+            };
+            let service = if service.is_empty() {
+                class_name.to_owned()
+            } else {
+                service
+            };
+            let method = match arguments.get(1) {
+                Some(argument) => string_literal(*argument, source)?,
+                None => uppercase_first(handler),
+            };
+            let method = if method.is_empty() {
+                uppercase_first(handler)
+            } else {
+                method
+            };
+            if service.len() > 256 || method.len() > 256 {
+                return None;
+            }
+            let prefix = if matches!(kind, NestTransportDecorator::Grpc) {
+                "GRPC"
+            } else {
+                "GRPC_STREAM"
+            };
+            Some(vec![format!("{prefix} {service}/{method}")])
+        }
+    }
+}
+
+fn uppercase_first(value: &str) -> String {
+    let mut characters = value.chars();
+    let Some(first) = characters.next() else {
+        return String::new();
+    };
+    first.to_uppercase().chain(characters).collect()
+}
+
+fn nestjs_pattern_values(node: Node<'_>, source: &[u8]) -> Option<Vec<String>> {
+    if node.kind() == "array" {
+        let mut cursor = node.walk();
+        let elements = node.named_children(&mut cursor).collect::<Vec<_>>();
+        if elements.is_empty() || elements.len() > 16 {
+            return None;
+        }
+        return elements
+            .into_iter()
+            .map(|element| nestjs_canonical_pattern(element, source))
+            .collect();
+    }
+    Some(vec![nestjs_canonical_pattern(node, source)?])
+}
+
+fn nestjs_canonical_pattern(node: Node<'_>, source: &[u8]) -> Option<String> {
+    fn value(node: Node<'_>, source: &[u8]) -> Option<serde_json::Value> {
+        if let Some(string) = string_literal(node, source) {
+            return Some(serde_json::Value::String(string));
+        }
+        match node.kind() {
+            "true" => return Some(serde_json::Value::Bool(true)),
+            "false" => return Some(serde_json::Value::Bool(false)),
+            "null" => return Some(serde_json::Value::Null),
+            "number" => return serde_json::from_str(&text(node, source)).ok(),
+            "unary_expression" => {
+                let parsed = serde_json::from_str::<serde_json::Value>(&text(node, source)).ok()?;
+                return parsed.is_number().then_some(parsed);
+            }
+            "object" => {}
+            _ => return None,
+        }
+        let mut cursor = node.walk();
+        let pairs = node.named_children(&mut cursor).collect::<Vec<_>>();
+        if pairs.len() > 16 || pairs.iter().any(|pair| pair.kind() != "pair") {
+            return None;
+        }
+        let mut object = serde_json::Map::new();
+        for pair in pairs {
+            let key_node = pair.child_by_field_name("key")?;
+            if !matches!(
+                key_node.kind(),
+                "property_identifier" | "string" | "string_fragment"
+            ) {
+                return None;
+            }
+            let key = string_literal(key_node, source)
+                .unwrap_or_else(|| text(key_node, source).to_owned());
+            if object.contains_key(&key) {
+                return None;
+            }
+            let item = value(pair.child_by_field_name("value")?, source)?;
+            if item.is_object() {
+                return None;
+            }
+            object.insert(key, item);
+        }
+        Some(serde_json::Value::Object(object))
+    }
+
+    let canonical = serde_json::to_string(&value(node, source)?).ok()?;
+    (canonical.len() <= 512).then_some(canonical)
+}
+
 fn collect_nestjs_routes(node: Node<'_>, source: &[u8], facts: &mut FileFacts) {
     if node.kind() == "class_declaration" {
         enrich_nestjs_controller(node, source, facts);
@@ -4104,5 +4536,17 @@ fn span(node: Node<'_>) -> SourceSpan {
         end_byte: node.end_byte(),
         start_line: node.start_position().row + 1,
         end_line: node.end_position().row + 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::uppercase_first;
+
+    #[test]
+    fn nestjs_grpc_default_method_uppercases_ascii_and_unicode_initials() {
+        assert_eq!(uppercase_first("findOne"), "FindOne");
+        assert_eq!(uppercase_first("élan"), "Élan");
+        assert_eq!(uppercase_first(""), "");
     }
 }
