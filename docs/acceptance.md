@@ -166,6 +166,9 @@ to v60 and resolves two exact OpenHarmony player callback flows plus 23
 libsamplerate table-dispatch relationships. The pinned 16-file corpus includes
 14 `src_process` may-call edges to seven exact implementations and proves
 incremental removal, rebinding, and restoration without stale edges.
+Graph model v62 additionally covers bounded function-pointer field propagation
+and typedef-proven bare arrays with file-local table identity, indexed
+designators, casts, and exact dispatch-site evidence.
 
 The authoritative capability inventory is
 [`codegraph-parity.md`](codegraph-parity.md). A matching command name or schema

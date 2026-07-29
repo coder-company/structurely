@@ -1,15 +1,17 @@
 # C/C++ function-pointer acceptance — 2026-07-29
 
 This gate verifies Structurely commit
-`63ba2930aa9e0c14ea1b4d01dbd41e4fd5312cfd` against 16 files from pinned
+`11b7a49ea65ac8db88772c4f1088d0566ac53157` against 16 files from pinned
 OpenHarmony commit `a826ab0e75fe51d028c1c5af58188e908736b53b`.
 
-Graph model v60 adds explicit C/C++ function-pointer facts and an include-aware,
+Graph model v62 adds explicit C/C++ function-pointer facts and an include-aware,
 bounded resolver adapter. It recognizes direct function-pointer fields,
 function-pointer typedef fields, field assignments, positional and designated
-table initializers, and chained typed dispatch. Resolution requires a unique
-include-visible layout and a real same-file callable registration; ambiguity,
-unknown layouts, dynamic targets, and excessive fanout fail closed.
+table initializers, chained typed dispatch, bounded field-to-field propagation,
+and file-local bare pointer arrays with indexed designators and casts.
+Resolution requires a unique include-visible layout or typedef and a real
+same-file callable registration; ambiguity, unknown layouts, data typedefs,
+dynamic targets, and excessive fanout fail closed.
 
 The production gate proves:
 
@@ -27,12 +29,12 @@ a 0.97-confidence may-call relationship rather than a path-sensitive must-call.
 Receiver chains are capped at eight members, include traversal at 16 levels,
 project work at 100,000 items, and target fanout at 300.
 
-The final gate passes 236 library tests, daemon and persistent MCP process
+The final gate passes 239 library tests, daemon and persistent MCP process
 tests, strict all-target/all-feature Clippy, formatting, and diff checks. The
 release binary SHA-256 is
-`43302a11e9fced4bb092c2ee351c7b6a7f06c98a7397a351620fbb6361712853`;
+`890fd52214ff87e4c6184caea2699b5cae8403a950235eb30fea7734b338f40b`;
 the raw result SHA-256 is
-`f005bab0f508346bbe321228728149fb6cb2b5411c2628274ab633ce6bdbee77`.
+`08c96feae700cd4a929b08d13c94866f163a9d522688895044b9b6c4798ad701`.
 
 Reproduce with:
 

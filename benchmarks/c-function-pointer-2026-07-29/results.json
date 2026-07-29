@@ -9,7 +9,7 @@
     "ownedProvenanceAndEvidenceSites": true,
     "noLeakageOrDuplicateEvidence": true
   },
-  "structurelyBinarySha256": "43302a11e9fced4bb092c2ee351c7b6a7f06c98a7397a351620fbb6361712853",
+  "structurelyBinarySha256": "890fd52214ff87e4c6184caea2699b5cae8403a950235eb30fea7734b338f40b",
   "repository": {
     "name": "openharmony",
     "commit": "a826ab0e75fe51d028c1c5af58188e908736b53b",
@@ -38,8 +38,8 @@
       "files": 5,
       "symbols": 32,
       "relationships": 47,
-      "freshIndexWallMs": 53.859,
-      "engineDurationMs": 31,
+      "freshIndexWallMs": 53.187,
+      "engineDurationMs": 29,
       "incremental": {
         "checks": {
           "removedBindingCleansDispatch": true,
@@ -48,18 +48,18 @@
           "syncUsesSamePersistentIndex": true
         },
         "cleanup": {
-          "wallMs": 22.956,
+          "wallMs": 22.603,
           "engineDurationMs": 19,
           "dispatchEdges": 0
         },
         "rebind": {
-          "wallMs": 24.352,
-          "engineDurationMs": 21,
+          "wallMs": 22.388,
+          "engineDurationMs": 18,
           "target": "ReplacementCallback"
         },
         "restore": {
-          "wallMs": 22.393,
-          "engineDurationMs": 19,
+          "wallMs": 21.073,
+          "engineDurationMs": 18,
           "target": "Callback"
         }
       }
@@ -86,8 +86,8 @@
       "files": 5,
       "symbols": 44,
       "relationships": 80,
-      "freshIndexWallMs": 56.159,
-      "engineDurationMs": 38
+      "freshIndexWallMs": 55.072,
+      "engineDurationMs": 37
     },
     "libsamplerate": {
       "checks": {
@@ -112,8 +112,8 @@
       "files": 6,
       "symbols": 74,
       "relationships": 91,
-      "freshIndexWallMs": 62.066,
-      "engineDurationMs": 42
+      "freshIndexWallMs": 66.469,
+      "engineDurationMs": 46
     }
   }
 }
