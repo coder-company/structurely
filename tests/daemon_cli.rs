@@ -151,6 +151,7 @@ fn daemon_start_status_catch_up_and_stop_are_idempotent() {
     assert_eq!(duplicate["started"], false);
     let final_stop = run_json(&temp, &["daemon", "stop", "--path", temp.to_str().unwrap()]);
     assert_eq!(final_stop["stopped"], true);
+    #[cfg(unix)]
     fs::remove_dir_all(temp).unwrap();
 }
 
