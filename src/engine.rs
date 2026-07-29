@@ -3,7 +3,7 @@ use crate::{
     model::{Evidence, RelationshipKind},
     parser::parse_file_as,
     project_resolution::ProjectResolutionContext,
-    store::{FileSummary, SearchHit, StorageMetrics, Store},
+    store::{ConcurrentPublication, FileSummary, SearchHit, StorageMetrics, Store},
 };
 use anyhow::{anyhow, bail, Context, Result};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
@@ -41,6 +41,8 @@ pub struct IndexReport {
     pub staging_ms: u128,
     pub resolution_ms: u128,
     pub duration_ms: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maintenance_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -155,7 +157,8 @@ impl Engine {
                     return Ok(report);
                 }
                 Err(error)
-                    if error.downcast_ref::<InventoryStale>().is_some()
+                    if (error.downcast_ref::<InventoryStale>().is_some()
+                        || error.downcast_ref::<ConcurrentPublication>().is_some())
                         && attempt + 1 < MAX_SYNC_ATTEMPTS =>
                 {
                     thread::sleep(Duration::from_millis(INITIAL_RETRY_DELAY_MS << attempt));
@@ -202,74 +205,90 @@ impl Engine {
             available_workers,
             files_changed,
         );
-        let (epoch, relationships_resolved, symbols_changed, staging_ms, resolution_ms) =
-            if changed.is_empty() && deleted.is_empty() {
-                (self.store.epoch()?, 0, 0, 0, 0)
-            } else if parse_workers == 1 {
-                let facts = changed.into_iter().map(|snapshot| {
-                    let (relative, language, source) = snapshot.into_parts()?;
-                    let mut facts = parse_file_as(&relative, &source, language)?;
-                    resolution_context.apply(&mut facts);
-                    Ok(facts)
-                });
-                self.store.publish(facts, &deleted)?
-            } else {
-                thread::scope(|scope| {
-                    let (work_sender, work_receiver) =
-                        mpsc::channel::<crate::inventory::SourceSnapshot>();
-                    let work_receiver = Arc::new(Mutex::new(work_receiver));
-                    let (result_sender, result_receiver) =
-                        mpsc::sync_channel::<Result<crate::model::FileFacts>>(
-                            parse_workers.saturating_mul(2),
-                        );
-                    for _ in 0..parse_workers {
-                        let work_receiver = Arc::clone(&work_receiver);
-                        let result_sender = result_sender.clone();
-                        let resolution_context = Arc::clone(&resolution_context);
-                        scope.spawn(move || loop {
-                            let work = match work_receiver.lock() {
-                                Ok(receiver) => receiver.recv(),
-                                Err(_) => return,
-                            };
-                            let Ok(snapshot) = work else {
-                                return;
-                            };
-                            let facts = (|| {
-                                let (relative, language, source) = snapshot.into_parts()?;
-                                let mut facts = parse_file_as(&relative, &source, language)?;
-                                resolution_context.apply(&mut facts);
-                                Ok(facts)
-                            })();
-                            if result_sender.send(facts).is_err() {
-                                return;
-                            }
-                        });
-                    }
-                    drop(result_sender);
-                    for work in changed {
-                        work_sender
-                            .send(work)
-                            .map_err(|_| anyhow!("parser worker queue closed"))?;
-                    }
-                    drop(work_sender);
-                    let mut received = 0;
-                    let facts = std::iter::from_fn(|| {
-                        if received >= files_changed {
-                            return None;
+        let (
+            epoch,
+            relationships_resolved,
+            symbols_changed,
+            staging_ms,
+            resolution_ms,
+            maintenance_warning,
+        ) = if changed.is_empty() && deleted.is_empty() {
+            (self.store.epoch()?, 0, 0, 0, 0, None)
+        } else if parse_workers == 1 {
+            let facts = changed.into_iter().map(|snapshot| {
+                let (relative, language, source) = snapshot.into_parts()?;
+                let mut facts = parse_file_as(&relative, &source, language)?;
+                resolution_context.apply(&mut facts);
+                Ok(facts)
+            });
+            self.store.publish(
+                facts,
+                &deleted,
+                &[(RESOLUTION_FINGERPRINT_KEY, resolution_context.fingerprint())],
+            )?
+        } else {
+            thread::scope(|scope| {
+                let (work_sender, work_receiver) =
+                    mpsc::channel::<crate::inventory::SourceSnapshot>();
+                let work_receiver = Arc::new(Mutex::new(work_receiver));
+                let (result_sender, result_receiver) =
+                    mpsc::sync_channel::<Result<crate::model::FileFacts>>(
+                        parse_workers.saturating_mul(2),
+                    );
+                for _ in 0..parse_workers {
+                    let work_receiver = Arc::clone(&work_receiver);
+                    let result_sender = result_sender.clone();
+                    let resolution_context = Arc::clone(&resolution_context);
+                    scope.spawn(move || loop {
+                        let work = match work_receiver.lock() {
+                            Ok(receiver) => receiver.recv(),
+                            Err(_) => return,
+                        };
+                        let Ok(snapshot) = work else {
+                            return;
+                        };
+                        let facts = (|| {
+                            let (relative, language, source) = snapshot.into_parts()?;
+                            let mut facts = parse_file_as(&relative, &source, language)?;
+                            resolution_context.apply(&mut facts);
+                            Ok(facts)
+                        })();
+                        if result_sender.send(facts).is_err() {
+                            return;
                         }
-                        received += 1;
-                        Some(
-                            result_receiver
-                                .recv()
-                                .unwrap_or_else(|_| Err(anyhow!("parser worker stopped"))),
-                        )
                     });
-                    self.store.publish(facts, &deleted)
-                })?
-            };
-        if resolution_changed {
-            self.store
-                .set_metadata_value(RESOLUTION_FINGERPRINT_KEY, resolution_context.fingerprint())?;
+                }
+                drop(result_sender);
+                for work in changed {
+                    work_sender
+                        .send(work)
+                        .map_err(|_| anyhow!("parser worker queue closed"))?;
+                }
+                drop(work_sender);
+                let mut received = 0;
+                let facts = std::iter::from_fn(|| {
+                    if received >= files_changed {
+                        return None;
+                    }
+                    received += 1;
+                    Some(
+                        result_receiver
+                            .recv()
+                            .unwrap_or_else(|_| Err(anyhow!("parser worker stopped"))),
+                    )
+                });
+                self.store.publish(
+                    facts,
+                    &deleted,
+                    &[(RESOLUTION_FINGERPRINT_KEY, resolution_context.fingerprint())],
+                )
+            })?
+        };
+        if (resolution_changed || force_reindex) && files_changed == 0 && deleted.is_empty() {
+            self.store.mark_empty_graph_current(&[(
+                RESOLUTION_FINGERPRINT_KEY,
+                resolution_context.fingerprint(),
+            )])?;
         }
 
         Ok(IndexReport {
@@ -284,6 +303,7 @@ impl Engine {
             staging_ms,
             resolution_ms,
             duration_ms: started.elapsed().as_millis(),
+            maintenance_warning,
         })
     }
 
@@ -1233,14 +1253,29 @@ mod tests {
         let (mut engine, _) = Engine::init(temp.path()).unwrap();
         let before = serde_json::to_string(&engine.snapshot().unwrap()).unwrap();
         let epoch = engine.status().unwrap().epoch;
+        let fingerprint = engine
+            .store
+            .metadata_value("project_resolution_fingerprint")
+            .unwrap();
 
         let replacement = parse_file("main.ts", "function after() {}\n").unwrap();
         engine
             .store
-            .inject_rolled_back_publish(&[replacement], &[])
+            .inject_rolled_back_publish_with_metadata(
+                &[replacement],
+                &[],
+                &[("project_resolution_fingerprint", "must-not-commit")],
+            )
             .unwrap();
 
         assert_eq!(engine.status().unwrap().epoch, epoch);
+        assert_eq!(
+            engine
+                .store
+                .metadata_value("project_resolution_fingerprint")
+                .unwrap(),
+            fingerprint
+        );
         assert_eq!(
             serde_json::to_string(&engine.snapshot().unwrap()).unwrap(),
             before
@@ -1250,6 +1285,49 @@ mod tests {
             engine.search("before", 10).unwrap()[0].symbol.name,
             "before"
         );
+    }
+
+    #[test]
+    fn post_commit_checkpoint_failure_reports_maintenance_without_failing_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("main.ts");
+        fs::write(&source, "function before() {}\n").unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let epoch = engine.status().unwrap().epoch;
+
+        fs::write(&source, "function after() {}\n").unwrap();
+        engine.store.inject_checkpoint_failure_once();
+        let report = engine.sync().unwrap();
+
+        assert_eq!(report.epoch, epoch + 1);
+        assert!(report
+            .maintenance_warning
+            .as_deref()
+            .is_some_and(|warning| warning.contains("graph committed")));
+        assert!(engine.search("before", 10).unwrap().is_empty());
+        assert_eq!(engine.search("after", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn empty_projects_atomically_advance_graph_metadata_without_spurious_epochs() {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let epoch = engine.status().unwrap().epoch;
+        engine
+            .store
+            .set_metadata_value("graph_model_version", "0")
+            .unwrap();
+        assert!(!engine.store.is_current_graph_model().unwrap());
+
+        let report = engine.sync().unwrap();
+
+        assert_eq!(report.epoch, epoch);
+        assert!(engine.store.is_current_graph_model().unwrap());
+        assert!(engine
+            .store
+            .metadata_value("project_resolution_fingerprint")
+            .unwrap()
+            .is_some());
     }
 
     #[test]

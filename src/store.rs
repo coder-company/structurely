@@ -6,7 +6,7 @@ use crate::model::{
     SymbolKind, GRAPH_MODEL_VERSION,
 };
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::Serialize;
 use std::{
     cell::Cell,
@@ -21,9 +21,14 @@ const JOURNAL_SIZE_LIMIT_BYTES: u64 = 16 * 1024 * 1024;
 const INLINE_CALLBACK_DEPTH_CAP: usize = 16;
 const CALL_RESULT_DEPENDENT_CAP: usize = 100_000;
 
+#[derive(Debug, thiserror::Error)]
+#[error("graph changed concurrently; retry publication")]
+pub(crate) struct ConcurrentPublication;
+
 pub struct Store {
     connection: Connection,
     path: PathBuf,
+    checkpoint_failure_injected: bool,
 }
 
 #[derive(Clone)]
@@ -96,6 +101,7 @@ impl Store {
         let mut store = Self {
             connection,
             path: path.to_owned(),
+            checkpoint_failure_injected: false,
         };
         store.migrate()?;
         Ok(store)
@@ -114,12 +120,37 @@ impl Store {
             .map_err(Into::into)
     }
 
+    #[cfg(test)]
     pub(crate) fn set_metadata_value(&mut self, key: &str, value: &str) -> Result<()> {
         self.connection.execute(
             "INSERT INTO metadata(key,value) VALUES (?1,?2)
              ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (key, value),
         )?;
+        Ok(())
+    }
+
+    pub(crate) fn mark_empty_graph_current(&mut self, metadata: &[(&str, &str)]) -> Result<()> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let file_count: u64 = tx.query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))?;
+        if file_count != 0 {
+            return Err(ConcurrentPublication.into());
+        }
+        for (key, value) in metadata {
+            tx.execute(
+                "INSERT INTO metadata(key,value) VALUES (?1,?2)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, value),
+            )?;
+        }
+        tx.execute(
+            "INSERT INTO metadata(key,value) VALUES ('graph_model_version',?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [GRAPH_MODEL_VERSION.to_string()],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -683,12 +714,23 @@ impl Store {
         &mut self,
         facts: I,
         deleted: &[String],
-    ) -> Result<(u64, usize, usize, u128, u128)>
+        metadata: &[(&str, &str)],
+    ) -> Result<(u64, usize, usize, u128, u128, Option<String>)>
     where
         I: IntoIterator<Item = Result<FileFacts>>,
     {
-        let next_epoch = self.epoch()? + 1;
-        let tx = self.connection.transaction()?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current_epoch: String = tx.query_row(
+            "SELECT value FROM metadata WHERE key = 'graph_epoch'",
+            [],
+            |row| row.get(0),
+        )?;
+        let next_epoch = current_epoch
+            .parse::<u64>()?
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("graph epoch overflow"))?;
         let staging_started = Instant::now();
         for path in deleted {
             Self::delete_file(&tx, path)?;
@@ -702,20 +744,46 @@ impl Store {
         let staging_ms = staging_started.elapsed().as_millis();
         let resolution_started = Instant::now();
         let relationships_resolved = Self::finish_epoch(&tx, next_epoch)?;
+        for (key, value) in metadata {
+            tx.execute(
+                "INSERT INTO metadata(key,value) VALUES (?1,?2)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, value),
+            )?;
+        }
         let resolution_ms = resolution_started.elapsed().as_millis();
         tx.commit()?;
-        let _: (u32, u32, u32) =
-            self.connection
-                .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                })?;
+        let checkpoint: Result<(u32, u32, u32)> =
+            if std::mem::take(&mut self.checkpoint_failure_injected) {
+                Err(anyhow::anyhow!("injected post-commit checkpoint failure"))
+            } else {
+                self.connection
+                    .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                    })
+                    .map_err(anyhow::Error::from)
+            };
+        let maintenance_warning = match checkpoint {
+            Ok((0, _, _)) => None,
+            Ok((busy, log_pages, checkpointed_pages)) => Some(format!(
+                "graph committed; WAL checkpoint deferred: busy={busy}, \
+                 log_pages={log_pages}, checkpointed_pages={checkpointed_pages}"
+            )),
+            Err(error) => Some(format!("graph committed; WAL checkpoint deferred: {error}")),
+        };
         Ok((
             next_epoch,
             relationships_resolved,
             symbols_changed,
             staging_ms,
             resolution_ms,
+            maintenance_warning,
         ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_checkpoint_failure_once(&mut self) {
+        self.checkpoint_failure_injected = true;
     }
 
     fn finish_epoch(tx: &Transaction<'_>, next_epoch: u64) -> Result<usize> {
@@ -805,6 +873,16 @@ impl Store {
         facts: &[FileFacts],
         deleted: &[String],
     ) -> Result<()> {
+        self.inject_rolled_back_publish_with_metadata(facts, deleted, &[])
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_rolled_back_publish_with_metadata(
+        &mut self,
+        facts: &[FileFacts],
+        deleted: &[String],
+        metadata: &[(&str, &str)],
+    ) -> Result<()> {
         let next_epoch = self.epoch()? + 1;
         let tx = self.connection.transaction()?;
         for path in deleted {
@@ -814,6 +892,13 @@ impl Store {
             Self::replace_file(&tx, file, next_epoch)?;
         }
         Self::finish_epoch(&tx, next_epoch)?;
+        for (key, value) in metadata {
+            tx.execute(
+                "INSERT INTO metadata(key,value) VALUES (?1,?2)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, value),
+            )?;
+        }
         tx.rollback()?;
         Ok(())
     }
@@ -6729,6 +6814,40 @@ fn call_result_resolution_enabled(dependent_calls: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn concurrent_publishers_allocate_distinct_serialized_epochs() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("graph.db");
+        let left_store = Store::open(&database).unwrap();
+        let right_store = Store::open(&database).unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+
+        let mut epochs = std::thread::scope(|scope| {
+            let left_barrier = Arc::clone(&barrier);
+            let left = scope.spawn(move || {
+                let mut store = left_store;
+                let facts = crate::parser::parse_file("left.ts", "function left() {}\n").unwrap();
+                left_barrier.wait();
+                store.publish([Ok(facts)], &[], &[]).unwrap().0
+            });
+            let right_barrier = Arc::clone(&barrier);
+            let right = scope.spawn(move || {
+                let mut store = right_store;
+                let facts = crate::parser::parse_file("right.ts", "function right() {}\n").unwrap();
+                right_barrier.wait();
+                store.publish([Ok(facts)], &[], &[]).unwrap().0
+            });
+            vec![left.join().unwrap(), right.join().unwrap()]
+        });
+        epochs.sort_unstable();
+
+        assert_eq!(epochs, [1, 2]);
+        let store = Store::open(&database).unwrap();
+        assert_eq!(store.epoch().unwrap(), 2);
+        assert_eq!(store.indexed_files().unwrap().len(), 2);
+    }
 
     #[test]
     fn c_macro_expansion_substitutes_nested_designated_initializers() {
