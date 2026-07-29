@@ -1,11 +1,22 @@
 [package]
 name = "structurely"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 description = "Local-first semantic code intelligence for coding agents"
 repository = "https://github.com/coder-company/structurely"
+readme = "README.md"
+keywords = ["code-intelligence", "mcp", "static-analysis", "codegraph", "sqlite"]
+categories = ["command-line-utilities", "development-tools"]
 rust-version = "1.88"
+include = [
+    "/src/**",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/LICENSE",
+    "/tests/**",
+]
 
 [dependencies]
 anyhow = "1.0"

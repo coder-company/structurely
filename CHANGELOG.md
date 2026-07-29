@@ -3,6 +3,25 @@
 All notable changes are documented here. Structurely follows semantic
 versioning after the initial `0.1.0` release.
 
+## 0.2.0 — 2026-07-29
+
+- Reach 25/25 behavioral compatibility with pinned CodeGraph 1.5.0 while
+  preserving source-backed, bounded context output.
+- Expand semantic extraction across 23 language dialects and add tested
+  framework flows for React, Express, React Router, FastAPI, Django, NestJS,
+  Vue, Svelte, Astro, ArkUI, and OpenHarmony.
+- Add atomic graph epochs, deterministic snapshots, incremental convergence,
+  resource budgets, fail-closed project configuration, and forward-safe schema
+  migration.
+- Harden storage with symbolic-link rejection, read-only query connections,
+  corruption quarantine, writer coordination, and recoverable daemon
+  reconciliation.
+- Add idempotent project-local integrations for Codex, Claude Code, and Cursor.
+- Consolidate launch evidence and rewrite task-focused installation, command,
+  configuration, operations, compatibility, and release documentation.
+- Measure 2.375× faster indexing, 10.537× faster median queries, and 84.60%
+  lower peak memory than the pinned CodeGraph baseline.
+
 ## 0.1.1 — 2026-07-27
 
 - Correct the Unix release archive path and package through a locally testable,
