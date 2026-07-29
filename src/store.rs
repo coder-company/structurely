@@ -5057,7 +5057,7 @@ fn sqlite_open_path(path: &Path) -> Result<PathBuf> {
         let name = path
             .file_name()
             .ok_or_else(|| anyhow::anyhow!("graph database path has no file name"))?;
-        return Ok(parent.join(name));
+        Ok(parent.join(name))
     }
 
     #[cfg(not(target_os = "macos"))]
