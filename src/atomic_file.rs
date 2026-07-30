@@ -106,9 +106,14 @@ fn sync_parent(_parent: &Path) -> io::Result<()> {
 #[cfg(windows)]
 fn replace(source: &Path, destination: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
+    use std::{thread, time::Duration};
     use windows_sys::Win32::Storage::FileSystem::{
         MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
     };
+
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const RETRY_ATTEMPTS: usize = 20;
 
     fn wide(path: &Path) -> io::Result<Vec<u16>> {
         let mut encoded = path.as_os_str().encode_wide().collect::<Vec<_>>();
@@ -124,19 +129,29 @@ fn replace(source: &Path, destination: &Path) -> io::Result<()> {
 
     let source = wide(source)?;
     let destination = wide(destination)?;
-    // SAFETY: both buffers are NUL-terminated and remain alive for the call.
-    let result = unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if result == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
+    for attempt in 0..RETRY_ATTEMPTS {
+        // SAFETY: both buffers are NUL-terminated and remain alive for the call.
+        let result = unsafe {
+            MoveFileExW(
+                source.as_ptr(),
+                destination.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if result != 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        let retryable = matches!(
+            error.raw_os_error(),
+            Some(code) if code == ERROR_ACCESS_DENIED || code == ERROR_SHARING_VIOLATION
+        );
+        if !retryable || attempt + 1 == RETRY_ATTEMPTS {
+            return Err(error);
+        }
+        thread::sleep(Duration::from_millis(25));
     }
+    unreachable!("the bounded Windows publication loop always returns")
 }
 
 #[cfg(test)]
