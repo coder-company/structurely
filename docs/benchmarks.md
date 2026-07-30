@@ -75,7 +75,9 @@ Use clones at the exact commits in `fixtures/real-repositories.json`. The
 performance ceilings are deliberately wider than the recorded launch
 measurements so ordinary machine variation does not look like a regression.
 The script copies each repository before changing its configured incremental
-file, so the supplied clones remain untouched.
+file, so the supplied clones remain untouched. See the
+[four-repository launch run](../benchmarks/real-repositories-2026-07-30/README.md)
+for checked-in measurements.
 
 ## Measure compatibility and usefulness
 

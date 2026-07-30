@@ -3,7 +3,7 @@
 All notable changes are documented here. Structurely follows semantic
 versioning after the initial `0.1.0` release.
 
-## 0.2.0 — 2026-07-29
+## 0.2.0 — 2026-07-30
 
 - Reach 25/25 behavioral compatibility with pinned CodeGraph 1.5.0 while
   preserving source-backed, bounded context output.
@@ -17,6 +17,15 @@ versioning after the initial `0.1.0` release.
   corruption quarantine, writer coordination, and recoverable daemon
   reconciliation.
 - Add idempotent project-local integrations for Codex, Claude Code, and Cursor.
+- Add local research, impact and path tracing, durable memories, sessions,
+  recaps, and team workspaces across both CLI and MCP, with no cloud sync.
+- Add fail-safe durable-state backup and restore, content-index corruption
+  recovery, dependency-policy gates, and a native installer round-trip test.
+- Beat the pinned Perseus retrieval baseline at rank one (4/5 versus 3/5) and
+  top-ten recall (5/5 versus 4/5), with a clean-runner regression gate.
+- Avoid global graph rematerialization for source-only edits whose
+  resolution-bearing facts are unchanged; pinned-repository improvements range
+  from 2.60× to 21.91×.
 - Consolidate launch evidence and rewrite task-focused installation, command,
   configuration, operations, compatibility, and release documentation.
 - Measure 2.375× faster indexing, 10.537× faster median queries, and 84.60%

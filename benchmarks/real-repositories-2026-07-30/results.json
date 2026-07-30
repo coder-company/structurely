@@ -1,0 +1,75 @@
+{
+  "passed": true,
+  "structurelyCommit": "bd2faf03f072bd20bd614778e23bae3bdfbdd048",
+  "binarySha256": "1422b9f5462003de8f3e1f0f952327a9c60f9a9329660863a4945e716c6668d3",
+  "environment": {
+    "os": "Linux 6.17.0-1019-aws x86_64",
+    "rustc": "1.92.0"
+  },
+  "repositories": [
+    {
+      "name": "express",
+      "commit": "a3714473feb3d2908add734d340e7755fd85e0a3",
+      "freshIndexWallMs": 753.655,
+      "freshIndexPeakRssKiB": 29932,
+      "indexedFiles": 141,
+      "contentFiles": 165,
+      "contentChunks": 425,
+      "symbols": 563,
+      "relationships": 583,
+      "storageBytes": 5251072,
+      "queryP50Ms": 6.037,
+      "queryP95Ms": 13.465,
+      "incrementalSyncWallMs": 172.905,
+      "incrementalEngineMs": 90
+    },
+    {
+      "name": "lightrag",
+      "commit": "44db36fe080645ba97ded719d44b42c7dee1f54a",
+      "freshIndexWallMs": 9190.377,
+      "freshIndexPeakRssKiB": 94376,
+      "indexedFiles": 514,
+      "contentFiles": 673,
+      "contentChunks": 3548,
+      "symbols": 8138,
+      "relationships": 21295,
+      "storageBytes": 68972544,
+      "queryP50Ms": 7.995,
+      "queryP95Ms": 11.973,
+      "incrementalSyncWallMs": 308.402,
+      "incrementalEngineMs": 101
+    },
+    {
+      "name": "graphiti",
+      "commit": "526dcad7a300f3c5c506ff96a68bcdc7ca9f97ed",
+      "freshIndexWallMs": 2309.563,
+      "freshIndexPeakRssKiB": 38848,
+      "indexedFiles": 255,
+      "contentFiles": 326,
+      "contentChunks": 1120,
+      "symbols": 2793,
+      "relationships": 10569,
+      "storageBytes": 23646208,
+      "queryP50Ms": 6.431,
+      "queryP95Ms": 7.505,
+      "incrementalSyncWallMs": 147.852,
+      "incrementalEngineMs": 54
+    },
+    {
+      "name": "vue",
+      "commit": "b5f8518379b77c3b62a7a9d2b52f6c76cda09bd5",
+      "freshIndexWallMs": 5611.258,
+      "freshIndexPeakRssKiB": 83088,
+      "indexedFiles": 537,
+      "contentFiles": 630,
+      "contentChunks": 2605,
+      "symbols": 5315,
+      "relationships": 53782,
+      "storageBytes": 70733824,
+      "queryP50Ms": 5.005,
+      "queryP95Ms": 5.745,
+      "incrementalSyncWallMs": 238.006,
+      "incrementalEngineMs": 82
+    }
+  ]
+}
