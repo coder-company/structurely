@@ -171,6 +171,11 @@ enum Command {
         #[command(subcommand)]
         command: MemoryCommand,
     },
+    /// Back up or restore authoritative durable state.
+    State {
+        #[command(subcommand)]
+        command: StateCommand,
+    },
     /// Export a deterministic JSON snapshot of the graph.
     Snapshot {
         /// Initialized project root.
@@ -412,6 +417,32 @@ enum MemoryCommand {
         id: String,
         #[arg(long, default_value = ".")]
         path: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum StateCommand {
+    /// Create a consistent standalone state database snapshot.
+    Backup {
+        /// Destination snapshot file.
+        destination: PathBuf,
+        /// Project root containing durable state.
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        /// Replace an existing destination file.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Validate and atomically replace live state from a snapshot.
+    Restore {
+        /// Source snapshot file.
+        source: PathBuf,
+        /// Project root whose durable state will be replaced.
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        /// Confirm replacement of the live state database.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -662,6 +693,31 @@ fn main() -> Result<()> {
                         "id": id,
                         "forgotten": store.forget(&id)?,
                     }))?
+                );
+            }
+        },
+        Command::State { command } => match command {
+            StateCommand::Backup {
+                destination,
+                path,
+                force,
+            } => {
+                let store = structurely::state::StateStore::open(path)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&store.backup(destination, force)?)?
+                );
+            }
+            StateCommand::Restore {
+                source,
+                path,
+                force,
+            } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&structurely::state::StateStore::restore(
+                        path, source, force
+                    )?)?
                 );
             }
         },

@@ -97,6 +97,20 @@ fn cli_workflows_are_persistent_evidence_backed_and_bounded() {
         ],
     );
     let memory_id = string(&memory, "id");
+    let backup = run_json(project.path(), &["state", "backup", "state-backup.db"]);
+    assert!(backup["bytes"].as_u64().unwrap() > 0);
+    run_json(
+        project.path(),
+        &["workspace", "create", "Discarded after restore"],
+    );
+    run_json(
+        project.path(),
+        &["state", "restore", "state-backup.db", "--force"],
+    );
+    let workspaces = run_json(project.path(), &["workspace", "list"]);
+    assert_eq!(workspaces.as_array().unwrap().len(), 1);
+    assert_eq!(workspaces[0]["id"], workspace_id);
+
     let recalled = run_json(
         project.path(),
         &["memory", "recall", &workspace_id, "rename"],

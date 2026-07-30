@@ -1,13 +1,18 @@
 use crate::engine::PROJECT_DIR;
 use anyhow::{Context, Result};
+use fs2::FileExt;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::{
-    fs,
+    fs::{self, OpenOptions},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+mod backup;
+
+pub use backup::{StateBackupReport, StateRestoreReport};
 
 const DATABASE_FILE: &str = "state.db";
 const SCHEMA_VERSION: i64 = 1;
@@ -26,6 +31,7 @@ static ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub struct StateStore {
     path: PathBuf,
     connection: Connection,
+    _coordination_lock: fs::File,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -119,6 +125,7 @@ impl StateStore {
         fs::create_dir_all(&directory)
             .with_context(|| format!("create state directory {}", directory.display()))?;
         reject_symlink(&directory)?;
+        let coordination_lock = state_coordination_lock(&directory, false)?;
         let path = directory.join(DATABASE_FILE);
         reject_symlink(&path)?;
         let connection = Connection::open_with_flags(
@@ -129,7 +136,11 @@ impl StateStore {
         )
         .with_context(|| format!("open durable state {}", path.display()))?;
         configure_connection(&connection)?;
-        let mut store = Self { path, connection };
+        let mut store = Self {
+            path,
+            connection,
+            _coordination_lock: coordination_lock,
+        };
         store.migrate()?;
         Ok(store)
     }
@@ -140,6 +151,10 @@ impl StateStore {
         if !path.is_file() {
             return Ok(None);
         }
+        let directory = path
+            .parent()
+            .context("durable state has no parent directory")?;
+        let coordination_lock = state_coordination_lock(directory, false)?;
         reject_symlink(&path)?;
         let connection = Connection::open_with_flags(
             &path,
@@ -150,11 +165,31 @@ impl StateStore {
         connection.pragma_update(None, "query_only", "ON")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.pragma_update(None, "busy_timeout", 5_000)?;
-        Ok(Some(Self { path, connection }))
+        Ok(Some(Self {
+            path,
+            connection,
+            _coordination_lock: coordination_lock,
+        }))
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Creates a consistent, standalone snapshot of durable state.
+    pub fn backup(&self, destination: impl AsRef<Path>, force: bool) -> Result<StateBackupReport> {
+        backup::backup(self, destination.as_ref(), force)
+    }
+
+    /// Validates and atomically restores a standalone durable-state snapshot.
+    ///
+    /// No `StateStore` may be open for `root` while this operation runs.
+    pub fn restore(
+        root: impl AsRef<Path>,
+        source: impl AsRef<Path>,
+        force: bool,
+    ) -> Result<StateRestoreReport> {
+        backup::restore(root.as_ref(), source.as_ref(), force)
     }
 
     pub fn create_workspace(&self, name: &str) -> Result<Workspace> {
@@ -797,6 +832,26 @@ fn reject_symlink(path: &Path) -> Result<()> {
         Err(error) => return Err(error.into()),
     }
     Ok(())
+}
+
+fn state_coordination_lock(directory: &Path, exclusive: bool) -> Result<fs::File> {
+    let path = directory.join("state.lock");
+    reject_symlink(&path)?;
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("open durable-state coordination lock {}", path.display()))?;
+    if exclusive {
+        lock.try_lock_exclusive().context(
+            "cannot restore durable state while another Structurely process is using it",
+        )?;
+    } else {
+        FileExt::lock_shared(&lock).context("coordinate durable-state access")?;
+    }
+    Ok(lock)
 }
 
 #[cfg(test)]

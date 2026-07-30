@@ -32,6 +32,23 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_result
 }
 
+/// Publishes a completed temporary file over `path`.
+///
+/// Both paths must share a parent directory. The temporary file is synced
+/// before the atomic replacement and the directory is synced afterwards.
+pub(crate) fn publish_temporary(temporary: &Path, path: &Path) -> io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    if temporary.parent().unwrap_or_else(|| Path::new(".")) != parent {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "atomic publication requires a temporary file in the destination directory",
+        ));
+    }
+    fs::File::open(temporary)?.sync_all()?;
+    replace(temporary, path)?;
+    sync_parent(parent)
+}
+
 fn create_temporary(path: &Path) -> io::Result<(PathBuf, fs::File)> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let name = path

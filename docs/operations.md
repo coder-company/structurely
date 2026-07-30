@@ -184,8 +184,20 @@ The source tree is authoritative for `graph.db` and `content.db`; both are
 reproducible derived data. `state.db` is authoritative for workspace history
 and memory, so back it up before removing `.structurely`.
 
-If a derived index is corrupt, stop watchers, preserve `state.db`, move the
-specific project's graph and content databases aside, and run
-`structurely init /path/to/project`. Do not copy live SQLite files without
-their WAL state. Retain moved databases when filing a bug only when they
-contain no sensitive data you are unable to share.
+```bash
+structurely state backup /safe/path/state-backup.db --path /path/to/project
+structurely state restore /safe/path/state-backup.db \
+  --path /path/to/project --force
+```
+
+Do not copy a live SQLite file directly because committed state may still be
+in its WAL. The backup command creates a validated standalone snapshot.
+Restore validates and stages the snapshot, requires explicit `--force`, and
+atomically replaces live state only while no other Structurely process is
+using it.
+
+Graph and content indexes detect SQLite corruption when opened for writing.
+Structurely preserves the corrupt database and sidecars in a timestamped
+recovery directory, rebuilds the derived index, and reports the recovery in
+status and sync output. Retain recovered databases when filing a bug only when
+they contain no sensitive data you are unable to share.

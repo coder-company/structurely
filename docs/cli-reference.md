@@ -113,6 +113,17 @@ structurely memory forget <memory-id> [--path <project>]
 Recall is full-text ranked and remains scoped to one workspace. `forget`
 permanently removes the selected memory.
 
+Create or restore a consistent backup of the authoritative state database:
+
+```bash
+structurely state backup /safe/path/state-backup.db [--path <project>] [--force]
+structurely state restore /safe/path/state-backup.db --path <project> --force
+```
+
+Backup includes committed WAL state. Restore validates the schema, SQLite
+integrity, and foreign keys before atomically replacing the live database, and
+refuses to race another process using project state.
+
 Workspaces, sessions, recaps, and memories remain local to the project.
 Structurely does not expose a cloud synchronization command.
 
