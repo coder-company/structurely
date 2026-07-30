@@ -352,7 +352,7 @@ mod tests {
         let preserved = store.create_workspace("Preserved").unwrap();
 
         let report = store.backup(&snapshot, false).unwrap();
-        assert_eq!(report.path, snapshot.canonicalize().unwrap());
+        assert_eq!(report.path, canonicalize_portable(&snapshot).unwrap());
         assert!(report.bytes > 0);
         store.create_workspace("Created later").unwrap();
         drop(store);
