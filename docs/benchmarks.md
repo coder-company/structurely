@@ -52,6 +52,31 @@ python3 scripts/compare_benchmarks.py \
 The comparator fails when configured regressions exceed their budgets. Its unit
 tests live in `scripts/test_compare_benchmarks.py`.
 
+## Validate pinned real repositories
+
+The real-repository harness checks semantic behavior and records fresh-index
+time, peak RSS, total local storage, content coverage, repeated query latency,
+and one-file incremental-sync work:
+
+```bash
+python3 scripts/acceptance_repositories.py \
+  --structurely target/release/structurely \
+  --repository express=/path/to/express \
+  --repository lightrag=/path/to/LightRAG \
+  --repository graphiti=/path/to/graphiti \
+  --repository vue=/path/to/vue \
+  --only express --only lightrag --only graphiti --only vue \
+  --query-samples 5 \
+  --enforce-performance-limits \
+  --output /tmp/structurely-real-repositories.json
+```
+
+Use clones at the exact commits in `fixtures/real-repositories.json`. The
+performance ceilings are deliberately wider than the recorded launch
+measurements so ordinary machine variation does not look like a regression.
+The script copies each repository before changing its configured incremental
+file, so the supplied clones remain untouched.
+
 ## Measure compatibility and usefulness
 
 Performance does not establish correctness. Run the differential MCP gate from
@@ -78,7 +103,7 @@ python3 scripts/benchmark_perseus_acceptance.py \
 
 It fails unless Structurely exposes every named workflow, indexes at least as
 many useful repository files as the pinned Perseus run, has chunk retrieval,
-ranks `src/atomic_file.rs` first for “atomic file publication,” matches or
-beats Perseus rank-one recall, and exceeds its top-ten recall. This is a
+ranks `src/atomic_file.rs` first for “atomic file publication,” beats Perseus
+rank-one recall, and exceeds its top-ten recall. This is a
 regression gate against a fixed baseline, not a fresh hosted-service latency
 comparison.

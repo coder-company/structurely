@@ -5,6 +5,14 @@
       "url": "https://github.com/expressjs/express",
       "commit": "a3714473feb3d2908add734d340e7755fd85e0a3",
       "minimumIndexedFiles": 140,
+      "incrementalFile": "examples/view-locals/index.js",
+      "performanceLimits": {
+        "freshIndexWallMs": 5000,
+        "freshIndexPeakRssKiB": 262144,
+        "queryP95Ms": 100,
+        "storageBytes": 67108864,
+        "incrementalSyncWallMs": 2000
+      },
       "assertions": [
         {
           "command": "search",
@@ -31,6 +39,14 @@
       "url": "https://github.com/HKUDS/LightRAG",
       "commit": "44db36fe080645ba97ded719d44b42c7dee1f54a",
       "minimumIndexedFiles": 500,
+      "incrementalFile": "lightrag/api/routers/graph_routes.py",
+      "performanceLimits": {
+        "freshIndexWallMs": 30000,
+        "freshIndexPeakRssKiB": 524288,
+        "queryP95Ms": 100,
+        "storageBytes": 268435456,
+        "incrementalSyncWallMs": 10000
+      },
       "assertions": [
         {
           "command": "search",
@@ -55,6 +71,14 @@
       "url": "https://github.com/getzep/graphiti",
       "commit": "526dcad7a300f3c5c506ff96a68bcdc7ca9f97ed",
       "minimumIndexedFiles": 250,
+      "incrementalFile": "server/graph_service/routers/retrieve.py",
+      "performanceLimits": {
+        "freshIndexWallMs": 10000,
+        "freshIndexPeakRssKiB": 262144,
+        "queryP95Ms": 100,
+        "storageBytes": 134217728,
+        "incrementalSyncWallMs": 5000
+      },
       "assertions": [
         {
           "command": "search",
@@ -132,6 +156,14 @@
       "url": "https://github.com/vuejs/core",
       "commit": "b5f8518379b77c3b62a7a9d2b52f6c76cda09bd5",
       "minimumIndexedFiles": 530,
+      "incrementalFile": "packages-private/sfc-playground/src/App.vue",
+      "performanceLimits": {
+        "freshIndexWallMs": 30000,
+        "freshIndexPeakRssKiB": 524288,
+        "queryP95Ms": 100,
+        "storageBytes": 268435456,
+        "incrementalSyncWallMs": 10000
+      },
       "assertions": [
         {
           "command": "search",

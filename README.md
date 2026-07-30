@@ -135,7 +135,9 @@ the [full Perseus protocol and results](benchmarks/perseus-2026-07-29/README.md)
 The checked-in [Perseus acceptance gate](docs/acceptance.md#verify-the-perseus-advantage)
 also enforces repository-wide content coverage, chunk retrieval, workflow
 availability, and the expected first-place result for “atomic file
-publication.”
+publication.” The current gate ranks the expected file first for 4/5 queries
+and within the top ten for 5/5, beating the pinned Perseus result of 3/5 and
+4/5 respectively.
 
 ## Supported languages
 
