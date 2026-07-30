@@ -1,0 +1,10 @@
+{
+  "name": "structurely-dashboard-tests",
+  "private": true,
+  "scripts": {
+    "test:dashboard": "playwright test tests/dashboard_ui.spec.js"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.0"
+  }
+}

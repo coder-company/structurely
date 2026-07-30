@@ -17,6 +17,7 @@ include = [
     "/README.md",
     "/LICENSE",
     "/tests/**",
+    "!/tests/*.js",
 ]
 
 [dependencies]

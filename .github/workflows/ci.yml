@@ -36,6 +36,12 @@ jobs:
           node --check dashboard/app.js
           python3 scripts/test_dashboard_ui.py
 
+      - name: Verify dashboard in Chromium
+        run: |
+          npm ci --ignore-scripts
+          npx playwright install chromium
+          npm run test:dashboard
+
       - name: Audit dependencies, licenses, and sources
         uses: EmbarkStudios/cargo-deny-action@c3bbe7e4e3f7baeee1a3dd9aec0a3b2aded580fb # v2.1.1
         with:
