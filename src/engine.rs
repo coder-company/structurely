@@ -2006,6 +2006,27 @@ mod tests {
     }
 
     #[test]
+    fn semantic_search_prefers_the_owning_module_over_a_descriptive_test_name() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("project_config.rs"),
+            "struct ProjectConfig;\nfn custom_extensions() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("engine.rs"),
+            "fn project_config_controls_custom_extensions() {}\n",
+        )
+        .unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+
+        let hits = engine
+            .search("project config custom extensions", 10)
+            .unwrap();
+        assert_eq!(hits[0].symbol.file, "project_config.rs");
+    }
+
+    #[test]
     fn graph_model_upgrade_forces_semantic_reindex() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(

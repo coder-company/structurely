@@ -63,6 +63,17 @@ def rank(path: str, files: list[str]) -> int | None:
         return None
 
 
+def relevance_gates(
+    rank_one: int, top_ten: int, baseline_comparison: dict[str, Any]
+) -> dict[str, bool]:
+    return {
+        "rank_one_better": rank_one
+        > baseline_comparison["rank_one"]["perseus"],
+        "top_ten_better": top_ten
+        > baseline_comparison["top_ten_expected_file_recall"]["perseus"],
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--structurely", required=True, type=Path)
@@ -125,10 +136,7 @@ def main() -> int:
         >= perseus["indexed_files"],
         "chunk_retrieval_available": sync["content_chunks"] > 0,
         "atomic_publication_rank_one": atomic_rank == 1,
-        "rank_one_not_worse": rank_one
-        >= baseline_relevance["rank_one"]["perseus"],
-        "top_ten_better": top_ten
-        > baseline_relevance["top_ten_expected_file_recall"]["perseus"],
+        **relevance_gates(rank_one, top_ten, baseline_relevance),
     }
     report = {
         "passed": all(gates.values()),

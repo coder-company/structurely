@@ -45,6 +45,20 @@ class PerseusAcceptanceTests(unittest.TestCase):
         self.assertEqual(benchmark.rank("a.rs", ["a.rs", "b.rs"]), 1)
         self.assertIsNone(benchmark.rank("missing.rs", ["a.rs", "b.rs"]))
 
+    def test_relevance_gates_require_strict_wins(self) -> None:
+        baseline = {
+            "rank_one": {"perseus": 3},
+            "top_ten_expected_file_recall": {"perseus": 4},
+        }
+        self.assertEqual(
+            benchmark.relevance_gates(3, 5, baseline),
+            {"rank_one_better": False, "top_ten_better": True},
+        )
+        self.assertEqual(
+            benchmark.relevance_gates(4, 5, baseline),
+            {"rank_one_better": True, "top_ten_better": True},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

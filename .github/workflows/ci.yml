@@ -78,3 +78,10 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release --locked
+
+      - name: Enforce Perseus retrieval advantage
+        run: |
+          python3 scripts/benchmark_perseus_acceptance.py \
+            --structurely target/release/structurely \
+            --project . \
+            --output /tmp/structurely-perseus-acceptance.json

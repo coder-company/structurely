@@ -18,9 +18,10 @@ python3 -m unittest \
 python3 scripts/check_docs.py
 ```
 
-CI runs the cross-platform Rust checks on Linux, macOS, and Windows. Linux CI
-also verifies the semantic fixture and requires a one-file incremental update
-to become visible within 300 milliseconds.
+CI runs on the `coder-company` self-hosted Linux runner pool. It verifies the
+semantic fixture, requires a one-file incremental update to become visible
+within 300 milliseconds, and enforces the pinned Perseus retrieval advantage.
+Release-tag builds separately exercise the supported native packaging targets.
 
 ## Verify semantic quality
 
@@ -115,6 +116,6 @@ exits unsuccessfully unless all gates pass:
 - repository content coverage meets the pinned Perseus file count and produces
   retrievable chunks;
 - `src/atomic_file.rs` ranks first for “atomic file publication”;
-- rank-one recall is no worse than Perseus and top-ten recall is better.
+- rank-one and top-ten recall both beat the pinned Perseus baseline.
 
 Cloud synchronization is intentionally outside Structurely's local-first scope.

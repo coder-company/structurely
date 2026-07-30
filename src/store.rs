@@ -4894,11 +4894,7 @@ impl Store {
             let name = symbol.name.to_lowercase();
             let qualified_name = symbol.qualified_name.to_lowercase();
             let file_terms = identifier_segments(&symbol.file);
-            let file_matches = terms
-                .iter()
-                .filter(|term| file_terms.contains(*term))
-                .count();
-            score += file_matches as f64 * 4.0;
+            score += file_name_affinity(&terms, &file_terms);
             if name == normalized_query || qualified_name == normalized_query {
                 score += 10.0;
             } else if terms.contains(&name) {
@@ -7057,6 +7053,37 @@ fn search_terms(query: &str) -> Vec<String> {
     }
 }
 
+fn file_name_affinity(query_terms: &[String], file_terms: &[String]) -> f64 {
+    query_terms
+        .iter()
+        .map(|query_term| {
+            if file_terms.contains(query_term) {
+                7.0
+            } else if file_terms
+                .iter()
+                .any(|file_term| morphologically_related(query_term, file_term))
+            {
+                5.0
+            } else {
+                0.0
+            }
+        })
+        .sum()
+}
+
+fn morphologically_related(left: &str, right: &str) -> bool {
+    let shorter_len = left.len().min(right.len());
+    if shorter_len < 6 {
+        return false;
+    }
+    let common_prefix = left
+        .bytes()
+        .zip(right.bytes())
+        .take_while(|(left, right)| left == right)
+        .count();
+    common_prefix >= 6 && common_prefix.saturating_mul(5) >= shorter_len.saturating_mul(4)
+}
+
 fn call_result_resolution_enabled(dependent_calls: usize) -> bool {
     dependent_calls <= CALL_RESULT_DEPENDENT_CAP
 }
@@ -7210,6 +7237,19 @@ mod tests {
             search_terms("How does AuthService login_user work?"),
             ["authservice", "auth", "service", "login", "user"]
         );
+    }
+
+    #[test]
+    fn file_name_affinity_rewards_exact_and_conservative_morphological_matches() {
+        let query = search_terms("benchmark comparator regression gate");
+        let comparator = identifier_segments("scripts/compare_benchmarks.py");
+        let unrelated = identifier_segments("scripts/benchmark_perseus_acceptance.py");
+
+        assert_eq!(file_name_affinity(&query, &comparator), 10.0);
+        assert_eq!(file_name_affinity(&query, &unrelated), 7.0);
+        assert!(morphologically_related("comparator", "compare"));
+        assert!(!morphologically_related("atomic", "atom"));
+        assert!(!morphologically_related("project", "protocol"));
     }
 
     #[test]
