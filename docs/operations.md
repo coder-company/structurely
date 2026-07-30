@@ -22,11 +22,11 @@ Rerunning an installer upgrades or repairs the installation. Pin a release
 instead of resolving the latest published tag:
 
 ```bash
-STRUCTURELY_VERSION=v0.2.0 sh scripts/install.sh
+STRUCTURELY_VERSION=v0.3.0 sh scripts/install.sh
 ```
 
 ```powershell
-$env:STRUCTURELY_VERSION = "v0.2.0"
+$env:STRUCTURELY_VERSION = "v0.3.0"
 ./install.ps1
 ```
 

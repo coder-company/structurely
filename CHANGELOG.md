@@ -3,6 +3,29 @@
 All notable changes are documented here. Structurely follows semantic
 versioning after the initial `0.1.0` release.
 
+## 0.3.0 — 2026-07-30
+
+- Add a responsive private console for index health, semantic search,
+  repository research, impact analysis, path tracing, workspaces, sessions,
+  recaps, and memory.
+- Add an authenticated loopback-only bridge with one-time ten-minute pairing,
+  256-bit tab tokens, exact origin allowlisting, private-network preflights,
+  bounded bodies, brute-force protection, and request-rate limits.
+- Keep repository code, indexes, queries, sessions, recaps, and memory off
+  Structurely, Vercel, and Cloudflare infrastructure; hosted deployments
+  contain only five static shell and security-header files.
+- Add verified Vercel and Cloudflare Pages CLI deployment, local export,
+  provider dependency/authentication checks, HTTP verification, and staging
+  cleanup without silently installing provider tools.
+- Add bridge status, reconnect, token rotation, stop, and removal workflows
+  with owner-only local state on Unix.
+- Add interactive installer and project-setup choices for Vercel, Cloudflare,
+  local-only, or skip while keeping CI and redirected installs non-blocking.
+- Add native bridge lifecycle, provider-contract, installer, accessibility,
+  privacy, browser API, packaging, and latency regression gates.
+- Measure authenticated loopback p95 latency of 17.871 ms for index health and
+  3.945 ms for semantic search on the checked-in benchmark machine.
+
 ## 0.2.0 — 2026-07-30
 
 - Reach 25/25 behavioral compatibility with pinned CodeGraph 1.5.0 while

@@ -31,7 +31,7 @@ structurely --version
 The installer detects your platform, downloads the latest native release,
 verifies its SHA-256 checksum, smoke-tests it, and installs it for your user.
 You do not need Rust or administrator access. Set
-`STRUCTURELY_VERSION=v0.2.0` before the command to install a specific release.
+`STRUCTURELY_VERSION=v0.3.0` before the command to install a specific release.
 
 ## Set up your project
 
