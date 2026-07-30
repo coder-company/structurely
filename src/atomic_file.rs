@@ -114,7 +114,14 @@ fn replace(source: &Path, destination: &Path) -> io::Result<()> {
     const RETRY_ATTEMPTS: usize = 20;
 
     if !destination.exists() {
-        return fs::rename(source, destination);
+        // Creating a second name for the completed inode is atomic and avoids
+        // Windows rename failures caused by transient non-share-delete handles.
+        // Both paths are required to share a parent, so the link cannot cross
+        // volumes. Once published, failure to remove the staging name does not
+        // affect the durable destination.
+        fs::hard_link(source, destination)?;
+        let _ = fs::remove_file(source);
+        return Ok(());
     }
 
     fn wide(path: &Path) -> io::Result<Vec<u16>> {
