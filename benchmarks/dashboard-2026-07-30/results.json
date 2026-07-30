@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "project": "/home/chaitanya/codevault/structurely",
+  "iterations": 30,
+  "transport": "authenticated-loopback-http",
+  "cloud_requests": 0,
+  "status_p50_ms": 13.943,
+  "status_p95_ms": 17.871,
+  "search_p50_ms": 3.072,
+  "search_p95_ms": 3.945,
+  "ceilings": {
+    "status_p95_ms": 50.0,
+    "search_p95_ms": 100.0
+  }
+}

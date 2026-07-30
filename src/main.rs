@@ -520,15 +520,9 @@ fn main() -> Result<()> {
         } => {
             let client = structurely::integrations::AgentClient::parse(&client)?;
             let executable = std::env::current_exe()?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&structurely::setup::run(
-                    path,
-                    client,
-                    executable,
-                    replace_codegraph
-                )?)?
-            );
+            let report = structurely::setup::run(path, client, executable, replace_codegraph)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            structurely::dashboard::offer_after_setup(std::path::Path::new(&report.project));
         }
         Command::Init { path } => {
             let (_, report) = Engine::init(path)?;

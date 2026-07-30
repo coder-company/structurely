@@ -31,6 +31,9 @@ jobs:
       - name: Check Unix installer
         run: sh -n scripts/install.sh
 
+      - name: Check dashboard shell
+        run: node --check dashboard/app.js
+
       - name: Audit dependencies, licenses, and sources
         uses: EmbarkStudios/cargo-deny-action@c3bbe7e4e3f7baeee1a3dd9aec0a3b2aded580fb # v2.1.1
         with:
@@ -44,6 +47,9 @@ jobs:
 
       - name: Verify daemon lifecycle
         run: cargo test --test daemon_cli --locked -- --nocapture
+
+      - name: Verify private dashboard contract
+        run: cargo test --test dashboard_cli --locked -- --nocapture
 
       - name: Verify semantic quality fixture
         shell: bash
@@ -89,6 +95,14 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release --locked
+
+      - name: Enforce dashboard bridge budget
+        run: |
+          target/release/structurely init . >/dev/null
+          python3 scripts/benchmark_dashboard.py \
+            --binary target/release/structurely \
+            --project . \
+            --output /tmp/structurely-dashboard-benchmark.json
 
       - name: Verify native installer round-trip
         run: python3 scripts/test_installer.py --binary target/release/structurely

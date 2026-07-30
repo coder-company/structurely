@@ -44,6 +44,17 @@ Use `claude` or `cursor` instead of `codex` when needed. This one command
 indexes the project, starts the background indexer, installs the project-local
 MCP entry, and verifies that everything is ready.
 
+Interactive setup also offers an optional private dashboard. Deploy only its
+static shell to Vercel or Cloudflare Pages, or run it entirely on localhost:
+
+```bash
+structurely dashboard serve --path .
+```
+
+The browser pairs directly with a token-protected loopback bridge. Source,
+indexes, queries, sessions, recaps, and memory never pass through the hosting
+provider. See the [private dashboard guide](docs/dashboard.md).
+
 ```bash
 structurely explore "authentication flow"
 structurely research "how releases are verified"
@@ -155,6 +166,7 @@ tested scope and intentional limits.
 - [Get command syntax and examples](docs/cli-reference.md)
 - [Configure files and indexing](docs/configuration.md)
 - [Install, operate, and troubleshoot Structurely](docs/operations.md)
+- [Run or deploy the private dashboard](docs/dashboard.md)
 - [Connect through MCP](docs/compatibility.md)
 - [Understand the architecture](docs/architecture.md)
 - [Review release verification](docs/releases.md)

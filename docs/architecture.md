@@ -233,6 +233,8 @@ Symbol.
 - `content` owns repository-wide scanning, chunking, and full-text retrieval.
 - `state` owns durable workspaces, sessions, recaps, and memory.
 - `workflow` composes graph and content retrieval for research.
+- `dashboard` adapts bounded engine and state operations to an authenticated,
+  loopback-only browser bridge and owns static-shell export and deployment.
 - `engine` owns scan, incremental invalidation, resolution, and publication.
 - `mcp` adapts JSON-RPC/MCP requests to the engine.
 - `main` adapts command-line commands to the same engine.

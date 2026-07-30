@@ -23,3 +23,7 @@
   operating on extracted facts.
 - **Agent surface** — Structurely's CLI commands and `structurely_*` MCP tools
   presented to coding agents.
+- **Dashboard shell** — static, provider-hostable HTML, CSS, and JavaScript
+  containing no project data or credentials.
+- **Dashboard bridge** — the token-paired loopback-only Adapter that exposes
+  bounded engine and state operations to one local browser session.

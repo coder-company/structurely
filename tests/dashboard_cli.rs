@@ -160,6 +160,19 @@ fn dashboard_bridge_pairs_once_and_enforces_auth_and_origins() {
         .0,
         401
     );
+    for _ in 0..8 {
+        assert_eq!(
+            request(
+                address,
+                "POST",
+                "/api/v1/pair",
+                &[("Content-Type", "application/json")],
+                "{\"code\":\"invalid\"}",
+            )
+            .0,
+            401
+        );
+    }
     assert_eq!(
         request(
             address,
@@ -169,7 +182,52 @@ fn dashboard_bridge_pairs_once_and_enforces_auth_and_origins() {
             &format!("{{\"code\":\"{next_code}\"}}"),
         )
         .0,
-        200
+        429
+    );
+    let reconnected = cli_json(&[
+        "dashboard",
+        "reconnect",
+        "--path",
+        project.path().to_str().unwrap(),
+    ]);
+    assert_eq!(reconnected["generation"], 3);
+    let next_code = reconnected["pairing_code"].as_str().unwrap();
+    let repaired = request(
+        address,
+        "POST",
+        "/api/v1/pair",
+        &[("Content-Type", "application/json")],
+        &format!("{{\"code\":\"{next_code}\"}}"),
+    );
+    assert_eq!(repaired.0, 200);
+    let next_token = serde_json::from_str::<Value>(&repaired.1).unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let next_authorization = format!("Bearer {next_token}");
+    for _ in 0..120 {
+        assert_eq!(
+            request(
+                address,
+                "GET",
+                "/api/v1/status",
+                &[("Authorization", &next_authorization)],
+                "",
+            )
+            .0,
+            200
+        );
+    }
+    assert_eq!(
+        request(
+            address,
+            "GET",
+            "/api/v1/status",
+            &[("Authorization", &next_authorization)],
+            "",
+        )
+        .0,
+        429
     );
     let stopped = cli_json(&[
         "dashboard",
@@ -213,6 +271,76 @@ fn dashboard_export_contains_only_static_shell_assets() {
         assert!(!contents
             .windows(b"Authorization: Bearer".len())
             .any(|window| window == b"Authorization: Bearer"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn dashboard_deploy_uses_provider_cli_and_verifies_static_shell() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for provider in ["vercel", "cloudflare"] {
+        let directory = tempfile::tempdir().unwrap();
+        let bin = directory.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let log = directory.path().join("provider.log");
+        let provider_cli = if provider == "vercel" {
+            "vercel"
+        } else {
+            "wrangler"
+        };
+        fs::write(
+            bin.join(provider_cli),
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'test 1.0'; exit 0; fi\nprintf '%s\\n' \"$*\" > '{}'\necho 'https://private-console.example'\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            bin.join("curl"),
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'curl test'; fi\nexit 0\n",
+        )
+        .unwrap();
+        for executable in [bin.join(provider_cli), bin.join("curl")] {
+            fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let output = Command::new(env!("CARGO_BIN_EXE_structurely"))
+            .args([
+                "dashboard",
+                "deploy",
+                provider,
+                "--project-name",
+                "private-console",
+            ])
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["provider"], provider);
+        assert_eq!(report["verified"], true);
+        assert_eq!(report["data_uploaded"], false);
+        let arguments = fs::read_to_string(&log).unwrap();
+        assert!(arguments.contains("private-console"));
+        assert!(arguments.contains("structurely-dashboard-"));
+        let temporary = arguments
+            .split_whitespace()
+            .find(|argument| argument.contains("structurely-dashboard-"))
+            .unwrap();
+        assert!(
+            !std::path::Path::new(temporary).exists(),
+            "deployment staging directory was not cleaned"
+        );
     }
 }
 

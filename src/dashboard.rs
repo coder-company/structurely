@@ -9,8 +9,9 @@ use crate::{
 use anyhow::{Context, Result};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
+    collections::VecDeque,
     fs,
-    io::{Read, Write},
+    io::{IsTerminal, Read, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream},
     path::PathBuf,
     process::{Command, Stdio},
@@ -25,6 +26,8 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 const MAX_REQUEST_BYTES: u64 = 64 * 1024;
 const MAX_ORIGIN_BYTES: usize = 512;
 const MAX_ALLOWED_ORIGINS: usize = 16;
+const MAX_PAIR_FAILURES: u8 = 8;
+const MAX_REQUESTS_PER_MINUTE: usize = 120;
 const DEFAULT_PORT: u16 = 4765;
 const DEFAULT_PROJECT_NAME: &str = "structurely-dashboard";
 const STATE_FILE: &str = "dashboard.json";
@@ -78,6 +81,68 @@ pub struct DashboardStatus {
 pub struct DashboardStop {
     pub stopped: bool,
     pub removed_state: bool,
+}
+
+pub fn offer_after_setup(project: &std::path::Path) {
+    let selection = match std::env::var("STRUCTURELY_DASHBOARD_SETUP") {
+        Ok(value) if value != "prompt" => Some(value),
+        Ok(_) => prompt_dashboard_selection(),
+        Err(_) if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() => {
+            prompt_dashboard_selection()
+        }
+        Err(_) => None,
+    };
+    let Some(selection) = selection else {
+        return;
+    };
+    match selection.trim().to_ascii_lowercase().as_str() {
+        "" | "skip" | "4" => {}
+        "local" | "local-only" | "3" => {
+            eprintln!(
+                "\nPrivate dashboard (local only):\n  structurely dashboard serve --path \"{}\"\n",
+                project.display()
+            );
+        }
+        "vercel" | "1" => offer_deployment("vercel", project),
+        "cloudflare" | "2" => offer_deployment("cloudflare", project),
+        other => eprintln!(
+            "Dashboard setup choice {other:?} is invalid; use vercel, cloudflare, local, or skip."
+        ),
+    }
+}
+
+fn prompt_dashboard_selection() -> Option<String> {
+    eprintln!(
+        "\nDeploy your private dashboard shell?\n  1. Vercel\n  2. Cloudflare Pages\n  \
+         3. Local only\n  4. Skip\n\nRepository data always stays in the local bridge."
+    );
+    eprint!("Choice [4]: ");
+    let _ = std::io::stderr().flush();
+    let mut choice = String::new();
+    match std::io::stdin().read_line(&mut choice) {
+        Ok(_) => Some(choice),
+        Err(error) => {
+            eprintln!("Could not read dashboard choice: {error}");
+            None
+        }
+    }
+}
+
+fn offer_deployment(provider: &str, project: &std::path::Path) {
+    match deploy(provider, None) {
+        Ok(report) => eprintln!(
+            "\nDashboard deployed: {}\nStart the private bridge:\n  structurely dashboard serve \
+             --path \"{}\" --allow-origin \"{}\"\n",
+            report.url,
+            project.display(),
+            report.url
+        ),
+        Err(error) => eprintln!(
+            "\nStructurely setup succeeded, but optional {provider} dashboard deployment failed: \
+             {error:#}\nInstall and authenticate the provider CLI, then retry:\n  structurely \
+             dashboard deploy {provider}\n"
+        ),
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -337,6 +402,8 @@ struct Bridge {
     address: SocketAddr,
     generation: Mutex<u64>,
     started_unix_ms: u128,
+    failed_pair_attempts: Mutex<u8>,
+    request_times: Mutex<VecDeque<Instant>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -460,6 +527,8 @@ pub fn serve(options: BridgeOptions) -> Result<BridgeReady> {
         address,
         generation: Mutex::new(1),
         started_unix_ms,
+        failed_pair_attempts: Mutex::new(0),
+        request_times: Mutex::new(VecDeque::new()),
     };
     bridge.write_state()?;
     let ready = BridgeReady {
@@ -537,6 +606,11 @@ impl Bridge {
             _ if !self.authorized(&request) => {
                 json_error(StatusCode(401), "pairing is required", origin.as_deref())
             }
+            _ if !self.within_rate_limit() => json_error(
+                StatusCode(429),
+                "dashboard request rate exceeded",
+                origin.as_deref(),
+            ),
             (&Method::Get, "/api/v1/status") => self.engine_response(origin.as_deref(), |engine| {
                 serde_json::to_value(engine.status()?).map_err(Into::into)
             }),
@@ -623,9 +697,23 @@ impl Bridge {
         let Some(expected) = pairing.as_deref() else {
             return json_error(StatusCode(409), "pairing code was already used", origin);
         };
+        let mut failures = match self.failed_pair_attempts.lock() {
+            Ok(failures) => failures,
+            Err(_) => return json_error(StatusCode(500), "pairing state is unavailable", origin),
+        };
+        if *failures >= MAX_PAIR_FAILURES {
+            return json_error(
+                StatusCode(429),
+                "too many invalid pairing attempts; rotate the token locally",
+                origin,
+            );
+        }
         if !constant_time_eq(expected.as_bytes(), body.code.as_bytes()) {
+            *failures = failures.saturating_add(1);
             return json_error(StatusCode(401), "pairing code is invalid", origin);
         }
+        *failures = 0;
+        drop(failures);
         *pairing = None;
         drop(pairing);
         if self.write_state().is_err() {
@@ -660,6 +748,21 @@ impl Bridge {
 
     fn request_origin_allowed(&self, origin: Option<&str>) -> bool {
         origin.is_none_or(|origin| self.origin_allowed(origin))
+    }
+
+    fn within_rate_limit(&self) -> bool {
+        let Ok(mut requests) = self.request_times.lock() else {
+            return false;
+        };
+        let cutoff = Instant::now() - Duration::from_secs(60);
+        while requests.front().is_some_and(|request| *request < cutoff) {
+            requests.pop_front();
+        }
+        if requests.len() >= MAX_REQUESTS_PER_MINUTE {
+            return false;
+        }
+        requests.push_back(Instant::now());
+        true
     }
 
     fn origin_allowed(&self, origin: &str) -> bool {
@@ -719,6 +822,14 @@ impl Bridge {
             .token
             .lock()
             .map_err(|_| anyhow::anyhow!("dashboard token lock is poisoned"))? = next_token;
+        *self
+            .failed_pair_attempts
+            .lock()
+            .map_err(|_| anyhow::anyhow!("dashboard pairing lock is poisoned"))? = 0;
+        self.request_times
+            .lock()
+            .map_err(|_| anyhow::anyhow!("dashboard rate-limit lock is poisoned"))?
+            .clear();
         let mut generation = self
             .generation
             .lock()

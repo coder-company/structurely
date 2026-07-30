@@ -25,8 +25,15 @@ access to the indexed project.
 
 The `projectPath` MCP argument can select another local project. Configure the
 server only for trusted local clients and use operating-system permissions to
-limit which files its process can read. Structurely is not a network service
-and does not provide authentication or tenant isolation.
+limit which files its process can read.
+
+The optional dashboard bridge is a network service restricted to an operating
+system loopback address. It requires one-time pairing and a random bearer token,
+enforces an explicit origin allowlist, and bounds request bodies. It is not a
+multi-tenant service and must never be exposed through a reverse proxy, tunnel,
+container port publication, or remote bind. A Vercel or Cloudflare deployment
+contains only static assets; project data flows directly from the local bridge
+to the paired browser tab. See `docs/dashboard.md` for the complete boundary.
 
 Supported releases and the current `main` branch receive security fixes.
 Release archives provide checksums and GitHub build-provenance attestations as

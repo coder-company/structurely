@@ -32,6 +32,13 @@ $env:STRUCTURELY_VERSION = "v0.2.0"
 
 Confirm the installed binary with `structurely --version`.
 
+Interactive installers offer an optional private dashboard after the binary is
+verified. Redirected input and CI do not prompt. Set
+`STRUCTURELY_DASHBOARD_SETUP` to `vercel`, `cloudflare`, `local`, `skip`, or
+`prompt` for explicit automation. A dashboard deployment failure does not roll
+back the successful binary installation. See the [private dashboard
+guide](dashboard.md).
+
 ## Shared daemon
 
 Start one lock-protected indexer per project:
@@ -129,6 +136,11 @@ Durable workspace, session, recap, and memory data remains in
 `<project>/.structurely/state.db`.
 
 Structurely does not expose a cloud synchronization command or endpoint.
+
+An optional Vercel or Cloudflare deployment uploads only the dashboard's static
+HTML, CSS, JavaScript, and security-header files. Repository data is read from
+the token-paired loopback bridge directly by the browser and is not sent to the
+hosting provider.
 
 The native installation commands contact GitHub to fetch a release archive and
 its checksum. GitHub Actions contacts GitHub services to publish and attest

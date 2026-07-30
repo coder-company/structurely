@@ -151,6 +151,35 @@ structurely integrations uninstall <codex|claude|cursor> --path <project>
 These commands update only the project-local `structurely` MCP entry. They
 preserve unrelated settings.
 
+## Run the private dashboard
+
+```bash
+structurely dashboard serve --path <project> [--port <port>] \
+  [--allow-origin <https-origin>]...
+structurely dashboard status --path <project>
+structurely dashboard reconnect --path <project>
+structurely dashboard rotate-token --path <project>
+structurely dashboard stop --path <project>
+structurely dashboard remove --path <project>
+```
+
+`serve` binds only to loopback and prints a one-time pairing code. Hosted
+origins must be explicitly allowed. `reconnect` and `rotate-token` invalidate
+every existing browser token. See the [dashboard security and privacy
+guide](dashboard.md).
+
+Export or deploy only the static shell:
+
+```bash
+structurely dashboard export <empty-directory>
+structurely dashboard deploy <vercel|cloudflare> \
+  [--project-name <provider-project>]
+```
+
+Provider deployment requires an installed, authenticated `vercel` or
+`wrangler` CLI and `curl` for post-deployment verification. Structurely does
+not install provider tools or upload project data.
+
 ## Run the MCP server
 
 ```bash
