@@ -113,6 +113,10 @@ fn replace(source: &Path, destination: &Path) -> io::Result<()> {
     const ERROR_SHARING_VIOLATION: i32 = 32;
     const RETRY_ATTEMPTS: usize = 20;
 
+    if !destination.exists() {
+        return fs::rename(source, destination);
+    }
+
     fn wide(path: &Path) -> io::Result<Vec<u16>> {
         let mut encoded = path.as_os_str().encode_wide().collect::<Vec<_>>();
         if encoded.contains(&0) {
