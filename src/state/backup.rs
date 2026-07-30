@@ -36,10 +36,11 @@ pub(super) fn backup(
     let destination = validated_destination(destination)?;
     reject_symlink(&destination)?;
     reject_existing(&destination, force, "backup destination")?;
-    let temporary = temporary_path(&destination)?;
+    let snapshot_temporary = temporary_path(&destination)?;
+    let mut publication_temporary = None;
 
     let result = (|| {
-        let temporary_sql = temporary
+        let temporary_sql = snapshot_temporary
             .to_str()
             .context("backup destination must be valid UTF-8")?;
         store
@@ -51,9 +52,16 @@ pub(super) fn backup(
                     destination.display()
                 )
             })?;
-        validate_database(&temporary)?;
-        let bytes = bounded_size(&temporary)?;
-        publish_temporary(&temporary, &destination)
+        validate_database(&snapshot_temporary)?;
+
+        // SQLite's Windows VFS can retain a non-share-delete handle after a
+        // successful VACUUM/validation cycle. Publish an exact, fsynced copy
+        // that SQLite has never opened so atomic rename remains portable.
+        let publication = temporary_path(&destination)?;
+        publication_temporary = Some(publication.clone());
+        copy_bounded(&snapshot_temporary, &publication)?;
+        let bytes = bounded_size(&publication)?;
+        publish_temporary(&publication, &destination)
             .with_context(|| format!("publish state backup {}", destination.display()))?;
         Ok(StateBackupReport {
             path: destination,
@@ -61,8 +69,9 @@ pub(super) fn backup(
         })
     })();
 
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
+    let _ = fs::remove_file(&snapshot_temporary);
+    if let Some(publication) = publication_temporary {
+        let _ = fs::remove_file(publication);
     }
     result
 }
@@ -327,6 +336,11 @@ mod tests {
         let store = StateStore::open(root.path()).unwrap();
         store.create_workspace("Original").unwrap();
         store.backup(&snapshot, false).unwrap();
+        assert_eq!(
+            fs::read_dir(backup_directory.path()).unwrap().count(),
+            1,
+            "backup publication left a staging file"
+        );
 
         let backup_error = store.backup(&snapshot, false).unwrap_err().to_string();
         assert!(backup_error.contains("--force"));
