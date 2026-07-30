@@ -1567,6 +1567,51 @@ mod tests {
     }
 
     #[test]
+    fn source_only_edits_skip_identical_graph_rematerialization() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("main.ts");
+        fs::write(
+            &path,
+            "function target() {}\nfunction caller() { target(); }\n",
+        )
+        .unwrap();
+        let (mut engine, _) = Engine::init(temp.path()).unwrap();
+        let before = engine.snapshot().unwrap();
+
+        fs::write(
+            &path,
+            "function target() {}\nfunction caller() { target(); }\n// documentation only\n",
+        )
+        .unwrap();
+        let report = engine.sync().unwrap();
+        let after = engine.snapshot().unwrap();
+
+        assert_eq!(report.files_changed, 1);
+        assert_eq!(report.symbols_changed, 0);
+        assert_eq!(report.relationships_resolved, 0);
+        assert_eq!(report.resolution_ms, 0);
+        assert_eq!(after.relationships, before.relationships);
+        assert_eq!(
+            after
+                .symbols
+                .iter()
+                .filter(|symbol| symbol.name == "target" || symbol.name == "caller")
+                .collect::<Vec<_>>(),
+            before
+                .symbols
+                .iter()
+                .filter(|symbol| symbol.name == "target" || symbol.name == "caller")
+                .collect::<Vec<_>>()
+        );
+        assert!(after
+            .symbols
+            .iter()
+            .zip(&before.symbols)
+            .any(|(after, before)| after.end_byte > before.end_byte));
+        assert_ne!(after.files[0].content_hash, before.files[0].content_hash);
+    }
+
+    #[test]
     fn path_trace_returns_the_shortest_evidence_bearing_route() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(

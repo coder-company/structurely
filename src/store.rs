@@ -25,6 +25,33 @@ const JOURNAL_SIZE_LIMIT_BYTES: u64 = 16 * 1024 * 1024;
 const INLINE_CALLBACK_DEPTH_CAP: usize = 16;
 const CALL_RESULT_DEPENDENT_CAP: usize = 100_000;
 
+fn semantic_fingerprint(file: &FileFacts) -> String {
+    let mut facts = file.clone();
+    facts.content_hash.clear();
+    for symbol in &mut facts.symbols {
+        symbol.start_byte = 0;
+        symbol.end_byte = 0;
+        symbol.start_line = 0;
+        symbol.end_line = 0;
+    }
+    sort_debug(&mut facts.fastapi.routers);
+    sort_debug(&mut facts.fastapi.aliases);
+    sort_debug(&mut facts.fastapi.factories);
+    sort_debug(&mut facts.fastapi.mounts);
+    sort_debug(&mut facts.fastapi.routes);
+    sort_debug(&mut facts.fastapi.dependencies);
+    sort_debug(&mut facts.fastapi.dependency_aliases);
+    sort_debug(&mut facts.fastapi.dependency_factories);
+    sort_debug(&mut facts.fastapi.dependency_type_aliases);
+    blake3::hash(format!("{facts:?}").as_bytes())
+        .to_hex()
+        .to_string()
+}
+
+fn sort_debug<T: std::fmt::Debug>(values: &mut [T]) {
+    values.sort_by_cached_key(|value| format!("{value:?}"));
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("graph changed concurrently; retry publication")]
 pub(crate) struct ConcurrentPublication;
@@ -221,6 +248,7 @@ impl Store {
                 id INTEGER PRIMARY KEY,
                 path TEXT NOT NULL UNIQUE,
                 content_hash TEXT NOT NULL,
+                semantic_fingerprint TEXT NOT NULL DEFAULT '',
                 language TEXT NOT NULL,
                 indexed_epoch INTEGER NOT NULL
             );
@@ -407,6 +435,18 @@ impl Store {
             INSERT OR IGNORE INTO metadata(key, value) VALUES ('graph_epoch', '0');
             ",
         )?;
+        let file_columns = self
+            .connection
+            .prepare("PRAGMA table_info(files)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<HashSet<_>>>()?;
+        if !file_columns.contains("semantic_fingerprint") {
+            self.connection.execute(
+                "ALTER TABLE files
+                 ADD COLUMN semantic_fingerprint TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
         let relationship_columns = self
             .connection
             .prepare("PRAGMA table_info(relationships)")?
@@ -767,18 +807,57 @@ impl Store {
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("graph epoch overflow"))?;
         let staging_started = Instant::now();
+        let mut graph_changed = !deleted.is_empty();
         for path in deleted {
             Self::delete_file(&tx, path)?;
         }
         let mut symbols_changed = 0;
         for file in facts {
             let file = file?;
-            symbols_changed += file.symbols.len();
-            Self::replace_file(&tx, &file, next_epoch)?;
+            let fingerprint = semantic_fingerprint(&file);
+            let existing = tx
+                .query_row(
+                    "SELECT semantic_fingerprint FROM files WHERE path=?1",
+                    [&file.path],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            if existing.as_deref() == Some(fingerprint.as_str()) {
+                tx.execute(
+                    "UPDATE files SET content_hash=?1,indexed_epoch=?2 WHERE path=?3",
+                    params![file.content_hash, next_epoch, file.path],
+                )?;
+                for symbol in &file.symbols {
+                    tx.execute(
+                        "UPDATE symbols
+                         SET start_byte=?1,end_byte=?2,start_line=?3,end_line=?4
+                         WHERE public_id=?5",
+                        params![
+                            symbol.start_byte as i64,
+                            symbol.end_byte as i64,
+                            symbol.start_line as i64,
+                            symbol.end_line as i64,
+                            symbol.id
+                        ],
+                    )?;
+                }
+            } else {
+                graph_changed = true;
+                symbols_changed += file.symbols.len();
+                Self::replace_file(&tx, &file, &fingerprint, next_epoch)?;
+            }
         }
         let staging_ms = staging_started.elapsed().as_millis();
         let resolution_started = Instant::now();
-        let relationships_resolved = Self::finish_epoch(&tx, next_epoch)?;
+        let relationships_resolved = if graph_changed {
+            Self::finish_epoch(&tx, next_epoch)?
+        } else {
+            tx.execute(
+                "UPDATE metadata SET value=?1 WHERE key='graph_epoch'",
+                [next_epoch.to_string()],
+            )?;
+            0
+        };
         for (key, value) in metadata {
             tx.execute(
                 "INSERT INTO metadata(key,value) VALUES (?1,?2)
@@ -924,7 +1003,8 @@ impl Store {
             Self::delete_file(&tx, path)?;
         }
         for file in facts {
-            Self::replace_file(&tx, file, next_epoch)?;
+            let fingerprint = semantic_fingerprint(file);
+            Self::replace_file(&tx, file, &fingerprint, next_epoch)?;
         }
         Self::finish_epoch(&tx, next_epoch)?;
         for (key, value) in metadata {
@@ -954,14 +1034,22 @@ impl Store {
         Ok(())
     }
 
-    fn replace_file(tx: &Transaction<'_>, file: &FileFacts, epoch: u64) -> Result<()> {
+    fn replace_file(
+        tx: &Transaction<'_>,
+        file: &FileFacts,
+        semantic_fingerprint: &str,
+        epoch: u64,
+    ) -> Result<()> {
         Self::delete_file(tx, &file.path)?;
         tx.prepare_cached(
-            "INSERT INTO files(path, content_hash, language, indexed_epoch) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO files(
+                path,content_hash,semantic_fingerprint,language,indexed_epoch
+             ) VALUES (?1,?2,?3,?4,?5)",
         )?
         .execute(params![
             file.path,
             file.content_hash,
+            semantic_fingerprint,
             file.language.to_string(),
             epoch
         ])?;
@@ -7100,6 +7188,19 @@ fn ensure_query_cardinality<T>(items: &[T], label: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::parse_file;
+
+    #[test]
+    fn semantic_fingerprint_ignores_trailing_comments_and_fact_order() {
+        let source = "from alpha import First\n\
+                      from beta import Second\n\
+                      def run():\n\
+                          return First(Second())\n";
+        let first = parse_file("main.py", source).unwrap();
+        let second = parse_file("main.py", &(source.to_owned() + "\n# documentation\n")).unwrap();
+
+        assert_eq!(semantic_fingerprint(&first), semantic_fingerprint(&second));
+    }
     use std::sync::{Arc, Barrier};
 
     #[test]
