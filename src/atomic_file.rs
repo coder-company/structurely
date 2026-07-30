@@ -44,7 +44,9 @@ pub(crate) fn publish_temporary(temporary: &Path, path: &Path) -> io::Result<()>
             "atomic publication requires a temporary file in the destination directory",
         ));
     }
-    let file = fs::File::open(temporary)?;
+    // Windows requires a writable handle for FlushFileBuffers, which backs
+    // File::sync_all. A read-only File::open handle fails with access denied.
+    let file = OpenOptions::new().read(true).write(true).open(temporary)?;
     file.sync_all()?;
     drop(file);
     replace(temporary, path)?;
@@ -114,14 +116,7 @@ fn replace(source: &Path, destination: &Path) -> io::Result<()> {
     const RETRY_ATTEMPTS: usize = 20;
 
     if !destination.exists() {
-        // Creating a second name for the completed inode is atomic and avoids
-        // Windows rename failures caused by transient non-share-delete handles.
-        // Both paths are required to share a parent, so the link cannot cross
-        // volumes. Once published, failure to remove the staging name does not
-        // affect the durable destination.
-        fs::hard_link(source, destination)?;
-        let _ = fs::remove_file(source);
-        return Ok(());
+        return fs::rename(source, destination);
     }
 
     fn wide(path: &Path) -> io::Result<Vec<u16>> {
