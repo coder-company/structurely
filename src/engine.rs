@@ -1,6 +1,6 @@
 use crate::{
     budget::ResourceBudget,
-    content::{ContentHit, ContentIndex},
+    content::{is_corrupt_content_index, ContentHit, ContentIndex},
     inventory::{InventoryStale, ProjectInventory},
     model::{Evidence, RelationshipKind},
     parser::parse_file_as,
@@ -235,7 +235,7 @@ impl Engine {
         ensure_project_directory(&root, false)?;
         let database = root.join(PROJECT_DIR).join(DATABASE_FILE);
         let mut writer_lock = Some(writer_coordination_lock(&database, false)?);
-        let (store, storage_recovery) = match Store::open(&database) {
+        let (store, mut storage_recovery) = match Store::open(&database) {
             Ok(store) => (store, None),
             Err(error) if is_corrupt_database(&error) => {
                 drop(writer_lock.take());
@@ -260,7 +260,26 @@ impl Engine {
             }
             Err(error) => return Err(error),
         };
-        let content = Some(ContentIndex::open(&root)?);
+        let content_database = root.join(PROJECT_DIR).join("content.db");
+        let content = match ContentIndex::open(&root) {
+            Ok(content) => Some(content),
+            Err(error) if is_corrupt_content_index(&error) => {
+                let recovery = quarantine_database_set(&content_database)
+                    .with_context(|| format!("preserve corrupt content index: {error}"))?;
+                let content = ContentIndex::open(&root)
+                    .with_context(|| format!("rebuild content index after {error}"))?;
+                let message = format!(
+                    "corrupt content index was preserved at {} and rebuilt",
+                    recovery.display()
+                );
+                storage_recovery = Some(match storage_recovery {
+                    Some(existing) => format!("{existing}; {message}"),
+                    None => message,
+                });
+                Some(content)
+            }
+            Err(error) => return Err(error),
+        };
         Ok(Self {
             root,
             store,
@@ -2147,6 +2166,48 @@ mod tests {
             .unwrap()
             .contains("corrupt graph database was preserved"));
         assert!(!engine.search("main", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn corrupt_content_index_is_preserved_and_rebuilt_before_sync() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("README.md"),
+            "# Recovery\n\nDurable repository content.\n",
+        )
+        .unwrap();
+        fs::write(temp.path().join("main.rs"), "fn main() {}\n").unwrap();
+        let (engine, _) = Engine::init(temp.path()).unwrap();
+        drop(engine);
+
+        let content_database = temp.path().join(PROJECT_DIR).join("content.db");
+        fs::write(&content_database, b"not a sqlite database").unwrap();
+
+        let mut engine = Engine::open(temp.path()).unwrap();
+        let status = engine.status().unwrap();
+        assert!(status
+            .storage_recovery
+            .as_deref()
+            .unwrap()
+            .contains("corrupt content index was preserved"));
+
+        let report = engine.sync().unwrap();
+        assert_eq!(report.content_files_indexed, 2);
+        assert!(engine
+            .content_search("durable repository content", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.path == "README.md"));
+
+        let preserved = fs::read_dir(temp.path().join(PROJECT_DIR))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path().join("content.db"))
+            .find(|path| {
+                path.is_file() && fs::read(path).ok().as_deref() == Some(b"not a sqlite database")
+            })
+            .expect("corrupt content index should be preserved in a recovery directory");
+        assert!(preserved.is_file());
     }
 
     #[test]

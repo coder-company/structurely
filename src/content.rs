@@ -22,6 +22,10 @@ pub struct ContentIndex {
     connection: Connection,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("content index is corrupt: {0}")]
+struct CorruptContentIndex(String);
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ContentSyncReport {
     pub files_seen: usize,
@@ -67,7 +71,9 @@ impl ContentIndex {
         reject_symlink(&path)?;
         let connection = Connection::open_with_flags(
             &path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .with_context(|| format!("open repository content index {}", path.display()))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
@@ -76,6 +82,7 @@ impl ContentIndex {
         connection.pragma_update(None, "busy_timeout", 5_000)?;
         let mut index = Self { root, connection };
         index.migrate()?;
+        validate_integrity(&index.connection)?;
         Ok(index)
     }
 
@@ -86,8 +93,11 @@ impl ContentIndex {
             return Ok(None);
         }
         reject_symlink(&path)?;
-        let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .with_context(|| format!("open repository content index {}", path.display()))?;
+        let connection = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .with_context(|| format!("open repository content index {}", path.display()))?;
         validate_schema(&connection)?;
         connection.pragma_update(None, "query_only", "ON")?;
         connection.pragma_update(None, "busy_timeout", 5_000)?;
@@ -455,6 +465,36 @@ fn validate_schema(connection: &Connection) -> Result<()> {
         "content index schema {version} is newer than supported schema {SCHEMA_VERSION}"
     );
     Ok(())
+}
+
+fn validate_integrity(connection: &Connection) -> Result<()> {
+    let result =
+        connection.query_row("PRAGMA quick_check(1)", [], |row| row.get::<_, String>(0))?;
+    if result != "ok" {
+        return Err(CorruptContentIndex(result).into());
+    }
+    Ok(())
+}
+
+pub(crate) fn is_corrupt_content_index(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        if cause.downcast_ref::<CorruptContentIndex>().is_some() {
+            return true;
+        }
+        cause
+            .downcast_ref::<rusqlite::Error>()
+            .is_some_and(|error| {
+                matches!(
+                    error,
+                    rusqlite::Error::SqliteFailure(sqlite, _)
+                        if matches!(
+                            sqlite.code,
+                            rusqlite::ErrorCode::DatabaseCorrupt
+                                | rusqlite::ErrorCode::NotADatabase
+                        )
+                )
+            })
+    })
 }
 
 #[cfg(test)]
