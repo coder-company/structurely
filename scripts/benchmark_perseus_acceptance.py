@@ -92,7 +92,7 @@ def main() -> int:
     perseus = baseline["perseus"]
     baseline_relevance = baseline["comparison"]
 
-    sync = json.loads(run([str(binary), "sync", str(project)]).stdout)
+    sync = json.loads(run([str(binary), "init", str(project)]).stdout)
     help_text = run([str(binary), "--help"]).stdout
     workflows = workflow_coverage(help_text)
 
