@@ -3,12 +3,25 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: Native runner to probe without publishing a release
+        required: true
+        type: choice
+        default: windows-latest
+        options:
+          - windows-latest
+          - macos-latest
+          - macos-15-intel
+          - ubuntu-latest
 
 permissions:
   contents: read
 
 jobs:
   build:
+    if: github.event_name == 'push'
     name: ${{ matrix.name }}
     timeout-minutes: 30
     strategy:
@@ -66,6 +79,7 @@ jobs:
 
   publish:
     name: Publish verified release
+    if: github.event_name == 'push'
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -103,3 +117,18 @@ jobs:
             --verify-tag \
             --generate-notes \
             --title "Structurely $GITHUB_REF_NAME"
+
+  probe:
+    name: Probe ${{ inputs.runner }}
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Test locked source
+        run: cargo test --all-targets --locked
+
+      - name: Build release binary
+        run: cargo build --release --locked
