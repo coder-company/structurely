@@ -19,9 +19,11 @@ python3 scripts/check_docs.py
 ```
 
 CI runs on the `coder-company` self-hosted Linux runner pool. It verifies the
-semantic fixture, requires a one-file incremental update to become visible
-within 300 milliseconds, and enforces the pinned Perseus retrieval advantage.
-Release-tag builds separately exercise the supported native packaging targets.
+semantic fixture, requires a source-only update to avoid graph
+rematerialization and become durable within one second, and enforces the pinned
+Perseus retrieval advantage. The pinned real-repository harness supplies
+tighter per-project wall budgets. Release-tag builds separately exercise the
+supported native packaging targets.
 
 ## Verify semantic quality
 
