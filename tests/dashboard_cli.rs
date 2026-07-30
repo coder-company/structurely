@@ -329,7 +329,7 @@ fn dashboard_deploy_uses_provider_cli_and_verifies_static_shell() {
         let report: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(report["provider"], provider);
         assert_eq!(report["verified"], true);
-        assert_eq!(report["data_uploaded"], false);
+        assert_eq!(report["project_data_uploaded"], false);
         let arguments = fs::read_to_string(&log).unwrap();
         assert!(arguments.contains("private-console"));
         assert!(arguments.contains("structurely-dashboard-"));

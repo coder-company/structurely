@@ -19,7 +19,8 @@ structurely dashboard serve --path /absolute/project
 ```
 
 Open `http://127.0.0.1:4765`, choose **Connect bridge**, and enter the
-eight-digit pairing code printed by the command. The code can be used once.
+eight-digit pairing code printed by the command. The code can be used once and
+expires after ten minutes.
 The resulting 256-bit token is kept in browser `sessionStorage`, so closing the
 tab discards it. Only the loopback URL is kept in `localStorage`.
 
@@ -49,8 +50,8 @@ The default provider project is `structurely-dashboard`. Override it with
 `--project-name <name>`. Structurely exports into a fresh temporary directory,
 invokes `vercel deploy --prod` or `wrangler pages deploy`, verifies the
 reported HTTPS URL, and removes the temporary directory. The JSON report sets
-`data_uploaded` to `false`; no Structurely project data is included in the
-deployment.
+`project_data_uploaded` to `false`; no Structurely project data is included in
+the deployment.
 
 Allow the exact deployed origin when starting the bridge:
 

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src http://127.0.0.1:* http://localhost:* http://[::1]:*; img-src 'self'; font-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src http://127.0.0.1:* http://localhost:*; img-src 'self'; font-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'">
   <meta name="description" content="A private, local-first control surface for Structurely.">
   <title>Structurely Console</title>
   <link rel="stylesheet" href="./styles.css">
@@ -164,7 +164,7 @@
     <form method="dialog" class="dialog-close-row"><button class="icon-button" value="cancel" aria-label="Close connection dialog">×</button></form>
     <div class="dialog-intro"><p class="eyebrow">Private pairing</p><h2 id="connect-title">Connect to Structurely</h2><p>The dashboard talks directly to a loopback-only bridge. Tokens remain in this browser tab and are cleared when the tab closes.</p></div>
     <form id="connect-form" class="connect-form">
-      <div class="field"><label for="bridge-url">Bridge address</label><input id="bridge-url" name="bridgeUrl" type="url" value="http://127.0.0.1:4765" pattern="http://(127\.0\.0\.1|localhost|\[::1\])(:[0-9]+)?" required><small>Only <code>127.0.0.1</code>, <code>localhost</code>, or <code>::1</code> are accepted.</small></div>
+      <div class="field"><label for="bridge-url">Bridge address</label><input id="bridge-url" name="bridgeUrl" type="url" value="http://127.0.0.1:4765" pattern="http://(127\.0\.0\.1|localhost)(:[0-9]+)?" required><small>Only <code>127.0.0.1</code> or <code>localhost</code> are accepted.</small></div>
       <div class="field"><label for="pair-code">Pairing code</label><input id="pair-code" name="pairCode" type="password" maxlength="256" autocomplete="one-time-code" placeholder="Paste the one-time code" required><small>Find this in the terminal where you started the bridge.</small></div>
       <p id="connect-error" class="form-error" role="alert"></p>
       <button class="button primary wide" type="submit">Pair this tab</button>

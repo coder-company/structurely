@@ -37,7 +37,7 @@ function announce(message) {
 function normalizeBridgeUrl(raw) {
   const url = new URL(raw);
   const allowed = url.protocol === "http:" &&
-    (url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]");
+    (url.hostname === "127.0.0.1" || url.hostname === "localhost");
   if (!allowed || url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
     throw new Error("Use a plain HTTP loopback address such as http://127.0.0.1:47831.");
   }
@@ -57,7 +57,8 @@ async function bridgeRequest(path, options = {}) {
       signal: controller.signal,
       cache: "no-store",
       credentials: "omit",
-      referrerPolicy: "no-referrer"
+      referrerPolicy: "no-referrer",
+      targetAddressSpace: "loopback"
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
@@ -107,7 +108,7 @@ function skeleton() {
 
 function flattenResults(data) {
   if (Array.isArray(data)) return data;
-  for (const key of ["results", "items", "symbols", "files", "sessions", "workspaces", "recaps", "memories", "path", "affected"]) {
+  for (const key of ["results", "items", "symbols", "symbol_findings", "content_findings", "files", "sessions", "workspaces", "recaps", "memories", "path", "steps", "affected"]) {
     if (Array.isArray(data?.[key])) return data[key];
   }
   return data && Object.keys(data).length ? [data] : [];
@@ -174,6 +175,15 @@ async function loadCollection(name) {
   if (!container) return;
   if (!state.token) {
     container.innerHTML = emptyState(`Connect to view ${name}`, "Pair this tab with the local bridge. Nothing is read from cloud storage.");
+    return;
+  }
+  if (name === "memory") {
+    const form = $('[data-tool-form="memory"]');
+    if (form?.checkValidity()) {
+      await runTool(form);
+    } else {
+      container.innerHTML = emptyState("Enter a memory query", "Choose a workspace and describe what you want to recall.");
+    }
     return;
   }
   container.innerHTML = skeleton();

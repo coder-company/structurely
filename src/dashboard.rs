@@ -28,6 +28,7 @@ const MAX_ORIGIN_BYTES: usize = 512;
 const MAX_ALLOWED_ORIGINS: usize = 16;
 const MAX_PAIR_FAILURES: u8 = 8;
 const MAX_REQUESTS_PER_MINUTE: usize = 120;
+const PAIRING_LIFETIME_MS: u128 = 10 * 60 * 1000;
 const DEFAULT_PORT: u16 = 4765;
 const DEFAULT_PROJECT_NAME: &str = "structurely-dashboard";
 const STATE_FILE: &str = "dashboard.json";
@@ -73,6 +74,7 @@ pub struct DashboardStatus {
     pub project: String,
     pub allowed_origins: Vec<String>,
     pub pairing_code: Option<String>,
+    pub pairing_expires_unix_ms: Option<u128>,
     pub generation: u64,
     pub started_unix_ms: u128,
 }
@@ -157,7 +159,7 @@ pub struct DashboardDeployment {
     pub project: String,
     pub url: String,
     pub verified: bool,
-    pub data_uploaded: bool,
+    pub project_data_uploaded: bool,
 }
 
 pub fn export(destination: impl Into<PathBuf>) -> Result<DashboardExport> {
@@ -238,6 +240,7 @@ pub fn deploy(provider: &str, project_name: Option<&str>) -> Result<DashboardDep
         "wrangler"
     };
     require_command(cli, &["--version"])?;
+    require_command(cli, &["whoami"])?;
     require_command("curl", &["--version"])?;
 
     let temporary = temporary_deploy_directory()?;
@@ -300,7 +303,7 @@ pub fn deploy(provider: &str, project_name: Option<&str>) -> Result<DashboardDep
         project: project.to_owned(),
         url,
         verified,
-        data_uploaded: false,
+        project_data_uploaded: false,
     })
 }
 
@@ -404,6 +407,7 @@ struct Bridge {
     started_unix_ms: u128,
     failed_pair_attempts: Mutex<u8>,
     request_times: Mutex<VecDeque<Instant>>,
+    pairing_expires_unix_ms: Mutex<u128>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -529,6 +533,7 @@ pub fn serve(options: BridgeOptions) -> Result<BridgeReady> {
         started_unix_ms,
         failed_pair_attempts: Mutex::new(0),
         request_times: Mutex::new(VecDeque::new()),
+        pairing_expires_unix_ms: Mutex::new(started_unix_ms + PAIRING_LIFETIME_MS),
     };
     bridge.write_state()?;
     let ready = BridgeReady {
@@ -697,6 +702,17 @@ impl Bridge {
         let Some(expected) = pairing.as_deref() else {
             return json_error(StatusCode(409), "pairing code was already used", origin);
         };
+        let pairing_expiry = self
+            .pairing_expires_unix_ms
+            .lock()
+            .map_or(0, |expiry| *expiry);
+        if unix_time_ms() > pairing_expiry {
+            return json_error(
+                StatusCode(410),
+                "pairing code expired; reconnect from the local CLI",
+                origin,
+            );
+        }
         let mut failures = match self.failed_pair_attempts.lock() {
             Ok(failures) => failures,
             Err(_) => return json_error(StatusCode(500), "pairing state is unavailable", origin),
@@ -826,6 +842,11 @@ impl Bridge {
             .failed_pair_attempts
             .lock()
             .map_err(|_| anyhow::anyhow!("dashboard pairing lock is poisoned"))? = 0;
+        *self
+            .pairing_expires_unix_ms
+            .lock()
+            .map_err(|_| anyhow::anyhow!("dashboard pairing expiry lock is poisoned"))? =
+            unix_time_ms() + PAIRING_LIFETIME_MS;
         self.request_times
             .lock()
             .map_err(|_| anyhow::anyhow!("dashboard rate-limit lock is poisoned"))?
@@ -840,17 +861,24 @@ impl Bridge {
     }
 
     fn write_state(&self) -> Result<()> {
+        let pairing_code = self
+            .pairing_code
+            .lock()
+            .map_err(|_| anyhow::anyhow!("dashboard pairing lock is poisoned"))?
+            .clone();
+        let pairing_expires_unix_ms = pairing_code.as_ref().map(|_| {
+            self.pairing_expires_unix_ms
+                .lock()
+                .map_or(0, |expiry| *expiry)
+        });
         let state = DashboardStatus {
             running: true,
             pid: std::process::id(),
             address: self.address,
             project: self.project.display().to_string(),
             allowed_origins: self.allowed_origins.clone(),
-            pairing_code: self
-                .pairing_code
-                .lock()
-                .map_err(|_| anyhow::anyhow!("dashboard pairing lock is poisoned"))?
-                .clone(),
+            pairing_code,
+            pairing_expires_unix_ms,
             generation: *self
                 .generation
                 .lock()
@@ -995,6 +1023,13 @@ fn random_decimal_code() -> Result<String> {
     getrandom::fill(&mut bytes).context("generate dashboard pairing code")?;
     let value = u64::from_le_bytes(bytes) % 100_000_000;
     Ok(format!("{value:08}"))
+}
+
+fn unix_time_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
 }
 
 fn random_token() -> Result<String> {
