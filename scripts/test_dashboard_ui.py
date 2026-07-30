@@ -94,6 +94,25 @@ def main() -> int:
     assert "prefers-reduced-motion" in css
     assert ":focus-visible" in css
     assert "overflow-x" in css
+    assert '<meta name="theme-color" content="#1c1e54">' in html
+    assert 'aria-current="page"' in html
+    assert 'aria-controls="primary-navigation"' in html
+    assert 'font-feature-settings: "ss01"' in css
+    assert 'font-feature-settings: "tnum"' in css
+    for token in [
+        "--bg: #11133b",
+        "--panel: #1c1e54",
+        "--accent: #665efd",
+        "--accent-press: #4434d4",
+        "--cream: #f5e9d4",
+        "border-radius: 9999px",
+        "font-weight: 300",
+        "@media (max-width: 1023px)",
+        "@media (max-width: 767px)",
+        "min-height: 44px",
+    ]:
+        assert token in css, token
+    assert "https://" not in css
     print("Dashboard UI accessibility, privacy, and API contract passed.")
     return 0
 

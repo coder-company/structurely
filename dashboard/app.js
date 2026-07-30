@@ -83,7 +83,12 @@ function setConnection(connected) {
 
 function showView(view) {
   state.view = view;
-  $$(".nav-item").forEach(item => item.classList.toggle("is-active", item.dataset.view === view));
+  $$(".nav-item").forEach(item => {
+    const isActive = item.dataset.view === view;
+    item.classList.toggle("is-active", isActive);
+    if (isActive) item.setAttribute("aria-current", "page");
+    else item.removeAttribute("aria-current");
+  });
   $$(".view").forEach(panel => panel.classList.toggle("is-visible", panel.dataset.viewPanel === view));
   const active = $(`.nav-item[data-view="${view}"]`);
   $("#view-name").textContent = active ? active.textContent.trim().replace(/^\d+/, "") : view;

@@ -10,6 +10,29 @@ configuration required to render the shell. They do not receive repository
 source, graph or content indexes, queries, session history, recaps, memories,
 pairing codes, or bearer tokens.
 
+## Interface system
+
+The console uses Structurely's dark product track: a deep-navy shell, one
+electric-indigo action color, thin editorial headings, tabular figures for
+index metrics, pill-shaped controls, and a warm cream privacy band. It uses
+only local font fallbacks and static assets, so rendering never requires a
+font, image, analytics, or component request to a third party.
+
+Desktop, tablet, and mobile layouts share the same information hierarchy.
+Mobile controls have a minimum 44-pixel target, navigation exposes its current
+page to assistive technology, and reduced-motion preferences disable the
+shell's reveal, shimmer, orbit, and status animations. Empty, loading, error,
+disconnected, and authenticated states are part of the browser contract.
+
+The static contract and real Chromium interaction suite can be run directly:
+
+```bash
+python3 scripts/test_dashboard_ui.py
+npm ci --ignore-scripts
+npx playwright install chromium
+npm run test:dashboard
+```
+
 ## Start locally
 
 Initialize the project, then start the foreground bridge:

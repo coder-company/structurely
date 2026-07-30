@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#1c1e54">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src http://127.0.0.1:* http://localhost:*; img-src 'self'; font-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'">
   <meta name="description" content="A private, local-first control surface for Structurely.">
   <title>Structurely Console</title>
@@ -18,8 +19,8 @@
         <svg viewBox="0 0 28 28" aria-hidden="true"><path d="M4 8.5 14 3l10 5.5v11L14 25 4 19.5v-11Z"/><path d="m9 11 5-2.7 5 2.7v6l-5 2.7L9 17v-6Z"/></svg>
         <span>structurely<small>private console</small></span>
       </a>
-      <nav class="nav-list">
-        <button class="nav-item is-active" data-view="overview"><span class="nav-icon" aria-hidden="true">01</span>Overview</button>
+      <nav class="nav-list" id="primary-navigation">
+        <button class="nav-item is-active" data-view="overview" aria-current="page"><span class="nav-icon" aria-hidden="true">01</span>Overview</button>
         <button class="nav-item" data-view="search"><span class="nav-icon" aria-hidden="true">02</span>Search</button>
         <button class="nav-item" data-view="research"><span class="nav-icon" aria-hidden="true">03</span>Research</button>
         <button class="nav-item" data-view="impact"><span class="nav-icon" aria-hidden="true">04</span>Impact</button>
@@ -38,7 +39,7 @@
 
     <main id="workspace" class="workspace" tabindex="-1">
       <header class="topbar">
-        <button class="mobile-menu" id="mobile-menu" aria-label="Open navigation" aria-expanded="false">
+        <button class="mobile-menu" id="mobile-menu" aria-label="Open navigation" aria-expanded="false" aria-controls="primary-navigation">
           <span></span><span></span>
         </button>
         <div class="breadcrumb"><span>Console</span><i>/</i><strong id="view-name">Overview</strong></div>
