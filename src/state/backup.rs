@@ -253,6 +253,8 @@ fn copy_bounded(source: &Path, destination: &Path) -> Result<()> {
     );
     output.flush()?;
     output.sync_all()?;
+    drop(output);
+    drop(input);
     Ok(())
 }
 

@@ -46,7 +46,9 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Test locked source
-        run: cargo test --all-targets --locked
+        run: |
+          cargo test state::backup::tests --locked
+          cargo test --all-targets --locked
 
       - name: Build release binary
         run: cargo build --release --locked
