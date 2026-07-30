@@ -223,8 +223,16 @@ fn bounded_size(path: &Path) -> Result<u64> {
 
 fn validate_database(path: &Path) -> Result<()> {
     reject_symlink(path)?;
+    // SQLite's NOFOLLOW handling on macOS rejects paths containing the
+    // system's `/var` -> `/private/var` alias even when the database itself is
+    // a regular file. Resolve parent aliases after explicitly rejecting a
+    // symlink at the database path; NOFOLLOW still closes a swap race at the
+    // canonical filename.
+    let sqlite_path = path
+        .canonicalize()
+        .with_context(|| format!("resolve state backup {}", path.display()))?;
     let connection = Connection::open_with_flags(
-        path,
+        &sqlite_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .with_context(|| format!("open state backup {}", path.display()))?;
@@ -249,8 +257,12 @@ fn validate_database(path: &Path) -> Result<()> {
 }
 
 fn checkpoint_live_database(path: &Path) -> Result<()> {
+    reject_symlink(path)?;
+    let sqlite_path = path
+        .canonicalize()
+        .with_context(|| format!("resolve live durable state {}", path.display()))?;
     let connection = Connection::open_with_flags(
-        path,
+        &sqlite_path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .with_context(|| format!("open live durable state {}", path.display()))?;
@@ -384,6 +396,29 @@ mod tests {
             .contains("symlink"));
         drop(store);
         assert!(StateStore::restore(root.path(), &link, true)
+            .unwrap_err()
+            .to_string()
+            .contains("symlink"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validation_allows_parent_aliases_but_not_database_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempdir().unwrap();
+        let backup_directory = tempdir().unwrap();
+        let alias = root.path().join("backup-directory");
+        let snapshot = backup_directory.path().join("state-backup.db");
+        let store = StateStore::open(root.path()).unwrap();
+        store.create_workspace("Portable").unwrap();
+        store.backup(&snapshot, false).unwrap();
+        symlink(backup_directory.path(), &alias).unwrap();
+
+        validate_database(&alias.join("state-backup.db")).unwrap();
+        let linked_database = root.path().join("linked.db");
+        symlink(&snapshot, &linked_database).unwrap();
+        assert!(validate_database(&linked_database)
             .unwrap_err()
             .to_string()
             .contains("symlink"));
