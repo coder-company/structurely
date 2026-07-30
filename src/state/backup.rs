@@ -89,12 +89,11 @@ pub(super) fn restore(root: &Path, source: &Path, force: bool) -> Result<StateRe
         source.display()
     );
     validate_database(source)?;
-    let source = source
-        .canonicalize()
+    let source = canonicalize_portable(source)
         .with_context(|| format!("resolve state backup {}", source.display()))?;
     let bytes = bounded_size(&source)?;
 
-    let root = root.canonicalize()?;
+    let root = canonicalize_portable(root)?;
     let directory = root.join(PROJECT_DIR);
     fs::create_dir_all(&directory)
         .with_context(|| format!("create state directory {}", directory.display()))?;
@@ -103,7 +102,7 @@ pub(super) fn restore(root: &Path, source: &Path, force: bool) -> Result<StateRe
     let destination = directory.join(DATABASE_FILE);
     reject_symlink(&destination)?;
     if destination.exists() {
-        let live = destination.canonicalize()?;
+        let live = canonicalize_portable(&destination)?;
         anyhow::ensure!(
             live != source,
             "state backup and live database must be different files"
@@ -149,11 +148,49 @@ fn validated_destination(path: &Path) -> Result<PathBuf> {
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let parent = parent
-        .canonicalize()
+    let parent = canonicalize_portable(parent)
         .with_context(|| format!("resolve backup directory {}", parent.display()))?;
     reject_symlink(&parent)?;
     Ok(parent.join(file_name))
+}
+
+fn canonicalize_portable(path: &Path) -> Result<PathBuf> {
+    let canonical = path.canonicalize()?;
+    Ok(strip_windows_verbatim_prefix(canonical))
+}
+
+#[cfg(not(windows))]
+fn strip_windows_verbatim_prefix(path: PathBuf) -> PathBuf {
+    path
+}
+
+#[cfg(windows)]
+fn strip_windows_verbatim_prefix(path: PathBuf) -> PathBuf {
+    use std::{
+        ffi::OsString,
+        os::windows::ffi::{OsStrExt, OsStringExt},
+    };
+
+    const VERBATIM: &[u16] = &[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+    const VERBATIM_UNC: &[u16] = &[
+        b'\\' as u16,
+        b'\\' as u16,
+        b'?' as u16,
+        b'\\' as u16,
+        b'U' as u16,
+        b'N' as u16,
+        b'C' as u16,
+        b'\\' as u16,
+    ];
+    let encoded = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    let normalized = if let Some(rest) = encoded.strip_prefix(VERBATIM_UNC) {
+        [vec![b'\\' as u16, b'\\' as u16], rest.to_vec()].concat()
+    } else if let Some(rest) = encoded.strip_prefix(VERBATIM) {
+        rest.to_vec()
+    } else {
+        return path;
+    };
+    PathBuf::from(OsString::from_wide(&normalized))
 }
 
 fn validate_path_bound(path: &Path) -> Result<()> {
