@@ -31,6 +31,11 @@ jobs:
       - name: Check Unix installer
         run: sh -n scripts/install.sh
 
+      - name: Audit dependencies, licenses, and sources
+        uses: EmbarkStudios/cargo-deny-action@c3bbe7e4e3f7baeee1a3dd9aec0a3b2aded580fb # v2.1.1
+        with:
+          command: check
+
       - name: Lint all targets
         run: cargo clippy --all-targets -- -D warnings
 
@@ -78,6 +83,9 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release --locked
+
+      - name: Verify native installer round-trip
+        run: python3 scripts/test_installer.py --binary target/release/structurely
 
       - name: Enforce Perseus retrieval advantage
         run: |

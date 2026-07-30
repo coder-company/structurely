@@ -2,8 +2,9 @@
 
 ## Install and upgrade
 
-The supported installer currently builds the pinned dependency graph with
-Cargo. Rust 1.88 or newer is required.
+The supported installers download a native release archive, verify its SHA-256
+checksum, smoke-test the binary, and publish it atomically into a user-local
+binary directory. Rust and administrator access are not required.
 
 macOS and Linux:
 
@@ -17,9 +18,8 @@ Windows PowerShell:
 irm https://raw.githubusercontent.com/coder-company/structurely/main/install.ps1 | iex
 ```
 
-Both installers use `cargo install --locked --force`, so rerunning the same
-command upgrades or repairs an installation. Pin a release instead of following
-`main`:
+Rerunning an installer upgrades or repairs the installation. Pin a release
+instead of resolving the latest published tag:
 
 ```bash
 STRUCTURELY_VERSION=v0.2.0 sh scripts/install.sh
