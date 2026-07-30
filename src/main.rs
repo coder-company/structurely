@@ -358,6 +358,36 @@ enum DashboardCommand {
         #[arg(long)]
         project_name: Option<String>,
     },
+    /// Show bridge health and the current one-time pairing code.
+    Status {
+        /// Initialized project root.
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+    },
+    /// Invalidate every paired tab and issue a new one-time code.
+    RotateToken {
+        /// Initialized project root.
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+    },
+    /// Issue a fresh pairing code for reconnecting this browser.
+    Reconnect {
+        /// Initialized project root.
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+    },
+    /// Stop the local dashboard bridge.
+    Stop {
+        /// Initialized project root.
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+    },
+    /// Stop the bridge and remove local dashboard control files.
+    Remove {
+        /// Initialized project root.
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -867,6 +897,46 @@ fn main() -> Result<()> {
                     &provider,
                     project_name.as_deref()
                 )?)?
+            );
+        }
+        Command::Dashboard {
+            command: DashboardCommand::Status { path },
+        } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&structurely::dashboard::status(path)?)?
+            );
+        }
+        Command::Dashboard {
+            command: DashboardCommand::RotateToken { path },
+        } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&structurely::dashboard::rotate(path)?)?
+            );
+        }
+        Command::Dashboard {
+            command: DashboardCommand::Reconnect { path },
+        } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&structurely::dashboard::rotate(path)?)?
+            );
+        }
+        Command::Dashboard {
+            command: DashboardCommand::Stop { path },
+        } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&structurely::dashboard::stop(path)?)?
+            );
+        }
+        Command::Dashboard {
+            command: DashboardCommand::Remove { path },
+        } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&structurely::dashboard::remove(path)?)?
             );
         }
         Command::Integrations {

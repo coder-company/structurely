@@ -130,6 +130,54 @@ fn dashboard_bridge_pairs_once_and_enforces_auth_and_origins() {
         204
     );
     assert_eq!(request(address, "GET", "/", &[], "").0, 200);
+
+    let status_report = cli_json(&[
+        "dashboard",
+        "status",
+        "--path",
+        project.path().to_str().unwrap(),
+    ]);
+    assert_eq!(status_report["running"], true);
+    assert_eq!(status_report["generation"], 1);
+    assert!(status_report["pairing_code"].is_null());
+
+    let rotated = cli_json(&[
+        "dashboard",
+        "rotate-token",
+        "--path",
+        project.path().to_str().unwrap(),
+    ]);
+    assert_eq!(rotated["generation"], 2);
+    let next_code = rotated["pairing_code"].as_str().unwrap();
+    assert_eq!(
+        request(
+            address,
+            "GET",
+            "/api/v1/status",
+            &[("Authorization", &authorization)],
+            "",
+        )
+        .0,
+        401
+    );
+    assert_eq!(
+        request(
+            address,
+            "POST",
+            "/api/v1/pair",
+            &[("Content-Type", "application/json")],
+            &format!("{{\"code\":\"{next_code}\"}}"),
+        )
+        .0,
+        200
+    );
+    let stopped = cli_json(&[
+        "dashboard",
+        "stop",
+        "--path",
+        project.path().to_str().unwrap(),
+    ]);
+    assert_eq!(stopped["stopped"], true);
     drop(guard);
 }
 
@@ -176,6 +224,19 @@ fn wait_until_ready(address: &str) {
         thread::sleep(Duration::from_millis(10));
     }
     panic!("dashboard bridge did not accept connections");
+}
+
+fn cli_json(arguments: &[&str]) -> Value {
+    let output = Command::new(env!("CARGO_BIN_EXE_structurely"))
+        .args(arguments)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
 }
 
 fn request(

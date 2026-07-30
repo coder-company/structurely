@@ -3,20 +3,22 @@
 //! The bridge is deliberately loopback-only. A deployed dashboard contains
 //! static UI assets; every repository query is evaluated by this process.
 
-use crate::{state::StateStore, workflow::WorkflowService, Engine};
+use crate::{
+    atomic_file, engine::PROJECT_DIR, state::StateStore, workflow::WorkflowService, Engine,
+};
 use anyhow::{Context, Result};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     fs,
     io::{Read, Write},
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream},
     path::PathBuf,
     process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
-    time::Duration,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
@@ -25,6 +27,9 @@ const MAX_ORIGIN_BYTES: usize = 512;
 const MAX_ALLOWED_ORIGINS: usize = 16;
 const DEFAULT_PORT: u16 = 4765;
 const DEFAULT_PROJECT_NAME: &str = "structurely-dashboard";
+const STATE_FILE: &str = "dashboard.json";
+const STOP_FILE: &str = "dashboard.stop";
+const ROTATE_FILE: &str = "dashboard.rotate";
 
 const INDEX_HTML: &[u8] = include_bytes!("../dashboard/index.html");
 const APP_JS: &[u8] = include_bytes!("../dashboard/app.js");
@@ -55,6 +60,24 @@ pub struct BridgeReady {
     pub address: SocketAddr,
     pub pairing_code: String,
     pub project: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardStatus {
+    pub running: bool,
+    pub pid: u32,
+    pub address: SocketAddr,
+    pub project: String,
+    pub allowed_origins: Vec<String>,
+    pub pairing_code: Option<String>,
+    pub generation: u64,
+    pub started_unix_ms: u128,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DashboardStop {
+    pub stopped: bool,
+    pub removed_state: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -216,6 +239,87 @@ pub fn deploy(provider: &str, project_name: Option<&str>) -> Result<DashboardDep
     })
 }
 
+pub fn status(project: impl Into<PathBuf>) -> Result<Option<DashboardStatus>> {
+    let project = project.into();
+    let project = project
+        .canonicalize()
+        .with_context(|| format!("resolve dashboard project {}", project.display()))?;
+    let path = project.join(PROJECT_DIR).join(STATE_FILE);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("read dashboard state"),
+    };
+    let mut state: DashboardStatus =
+        serde_json::from_slice(&bytes).context("parse dashboard state")?;
+    state.running = bridge_health(state.address);
+    Ok(Some(state))
+}
+
+pub fn rotate(project: impl Into<PathBuf>) -> Result<DashboardStatus> {
+    let project = project.into().canonicalize()?;
+    let current = status(&project)?.context("dashboard bridge is not running")?;
+    anyhow::ensure!(current.running, "dashboard bridge is not running");
+    let rotate = project.join(PROJECT_DIR).join(ROTATE_FILE);
+    fs::write(&rotate, b"rotate\n").context("request dashboard token rotation")?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(next) = status(&project)? {
+            if next.running && next.generation > current.generation {
+                return Ok(next);
+            }
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "dashboard bridge did not rotate its pairing token within 5 seconds"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+pub fn stop(project: impl Into<PathBuf>) -> Result<DashboardStop> {
+    let project = project.into().canonicalize()?;
+    let Some(current) = status(&project)? else {
+        return Ok(DashboardStop {
+            stopped: false,
+            removed_state: false,
+        });
+    };
+    if !current.running {
+        let removed_state = remove_if_present(&project.join(PROJECT_DIR).join(STATE_FILE)).is_ok();
+        return Ok(DashboardStop {
+            stopped: false,
+            removed_state,
+        });
+    }
+    fs::write(project.join(PROJECT_DIR).join(STOP_FILE), b"stop\n")
+        .context("request dashboard bridge stop")?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if status(&project)?.is_none() {
+            return Ok(DashboardStop {
+                stopped: true,
+                removed_state: true,
+            });
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "dashboard bridge did not stop within 5 seconds"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+pub fn remove(project: impl Into<PathBuf>) -> Result<DashboardStop> {
+    let project = project.into().canonicalize()?;
+    let mut report = stop(&project)?;
+    for name in [STATE_FILE, STOP_FILE, ROTATE_FILE] {
+        remove_if_present(&project.join(PROJECT_DIR).join(name))?;
+    }
+    report.removed_state = true;
+    Ok(report)
+}
+
 struct TemporaryDirectory(PathBuf);
 
 impl Drop for TemporaryDirectory {
@@ -227,8 +331,12 @@ impl Drop for TemporaryDirectory {
 struct Bridge {
     project: PathBuf,
     pairing_code: Mutex<Option<String>>,
-    token: String,
+    token: Mutex<String>,
     allowed_origins: Vec<String>,
+    state_path: PathBuf,
+    address: SocketAddr,
+    generation: Mutex<u64>,
+    started_unix_ms: u128,
 }
 
 #[derive(Debug, Deserialize)]
@@ -333,12 +441,27 @@ pub fn serve(options: BridgeOptions) -> Result<BridgeReady> {
     allowed_origins.dedup();
 
     let pairing_code = random_decimal_code()?;
+    let dashboard_directory = project.join(PROJECT_DIR);
+    let state_path = dashboard_directory.join(STATE_FILE);
+    let stop_path = dashboard_directory.join(STOP_FILE);
+    let rotate_path = dashboard_directory.join(ROTATE_FILE);
+    let _ = fs::remove_file(&stop_path);
+    let _ = fs::remove_file(&rotate_path);
+    let started_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
     let bridge = Bridge {
         project: project.clone(),
         pairing_code: Mutex::new(Some(pairing_code.clone())),
-        token: random_token()?,
-        allowed_origins,
+        token: Mutex::new(random_token()?),
+        allowed_origins: allowed_origins.clone(),
+        state_path: state_path.clone(),
+        address,
+        generation: Mutex::new(1),
+        started_unix_ms,
     };
+    bridge.write_state()?;
     let ready = BridgeReady {
         address,
         pairing_code,
@@ -352,6 +475,14 @@ pub fn serve(options: BridgeOptions) -> Result<BridgeReady> {
     ctrlc::set_handler(move || signal.store(true, Ordering::Relaxed))
         .context("install dashboard shutdown handler")?;
     while !stop.load(Ordering::Relaxed) {
+        if stop_path.exists() {
+            stop.store(true, Ordering::Relaxed);
+            break;
+        }
+        if rotate_path.exists() {
+            let _ = fs::remove_file(&rotate_path);
+            bridge.rotate()?;
+        }
         if let Some(request) = server
             .recv_timeout(Duration::from_millis(100))
             .context("receive dashboard request")?
@@ -359,6 +490,9 @@ pub fn serve(options: BridgeOptions) -> Result<BridgeReady> {
             bridge.handle(request);
         }
     }
+    let _ = fs::remove_file(&state_path);
+    let _ = fs::remove_file(&stop_path);
+    let _ = fs::remove_file(&rotate_path);
     Ok(ready)
 }
 
@@ -493,9 +627,21 @@ impl Bridge {
             return json_error(StatusCode(401), "pairing code is invalid", origin);
         }
         *pairing = None;
+        drop(pairing);
+        if self.write_state().is_err() {
+            return json_error(
+                StatusCode(500),
+                "pairing state could not be persisted",
+                origin,
+            );
+        }
+        let token = match self.token.lock() {
+            Ok(token) => token.clone(),
+            Err(_) => return json_error(StatusCode(500), "pairing state is unavailable", origin),
+        };
         json_response(
             StatusCode(200),
-            &serde_json::json!({"token": self.token}),
+            &serde_json::json!({"token": token}),
             origin,
         )
     }
@@ -507,7 +653,9 @@ impl Bridge {
         let Some(token) = value.strip_prefix("Bearer ") else {
             return false;
         };
-        constant_time_eq(token.as_bytes(), self.token.as_bytes())
+        self.token
+            .lock()
+            .is_ok_and(|expected| constant_time_eq(token.as_bytes(), expected.as_bytes()))
     }
 
     fn request_origin_allowed(&self, origin: Option<&str>) -> bool {
@@ -558,6 +706,49 @@ impl Bridge {
             Ok(value) => json_response(StatusCode(200), &value, origin),
             Err(error) => json_error(StatusCode(500), &error.to_string(), origin),
         }
+    }
+
+    fn rotate(&self) -> Result<()> {
+        let next_code = random_decimal_code()?;
+        let next_token = random_token()?;
+        *self
+            .pairing_code
+            .lock()
+            .map_err(|_| anyhow::anyhow!("dashboard pairing lock is poisoned"))? = Some(next_code);
+        *self
+            .token
+            .lock()
+            .map_err(|_| anyhow::anyhow!("dashboard token lock is poisoned"))? = next_token;
+        let mut generation = self
+            .generation
+            .lock()
+            .map_err(|_| anyhow::anyhow!("dashboard generation lock is poisoned"))?;
+        *generation = generation.saturating_add(1);
+        drop(generation);
+        self.write_state()
+    }
+
+    fn write_state(&self) -> Result<()> {
+        let state = DashboardStatus {
+            running: true,
+            pid: std::process::id(),
+            address: self.address,
+            project: self.project.display().to_string(),
+            allowed_origins: self.allowed_origins.clone(),
+            pairing_code: self
+                .pairing_code
+                .lock()
+                .map_err(|_| anyhow::anyhow!("dashboard pairing lock is poisoned"))?
+                .clone(),
+            generation: *self
+                .generation
+                .lock()
+                .map_err(|_| anyhow::anyhow!("dashboard generation lock is poisoned"))?,
+            started_unix_ms: self.started_unix_ms,
+        };
+        atomic_file::write_atomic(&self.state_path, &serde_json::to_vec_pretty(&state)?)
+            .context("write dashboard state")?;
+        restrict_state_permissions(&self.state_path)
     }
 }
 
@@ -780,6 +971,49 @@ fn deployment_url(output: &str) -> Option<String> {
                 .to_owned()
         })
         .rfind(|token| token.starts_with("https://"))
+}
+
+fn bridge_health(address: SocketAddr) -> bool {
+    if !address.ip().is_loopback() {
+        return false;
+    }
+    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(250)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+    if write!(
+        stream,
+        "GET /api/v1/health HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
+    )
+    .is_err()
+    {
+        return false;
+    }
+    let mut response = [0_u8; 64];
+    stream
+        .read(&mut response)
+        .is_ok_and(|read| response[..read].starts_with(b"HTTP/1.1 200"))
+}
+
+fn remove_if_present(path: &std::path::Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
+    }
+}
+
+#[cfg(unix)]
+fn restrict_state_permissions(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .context("restrict dashboard state permissions")
+}
+
+#[cfg(not(unix))]
+fn restrict_state_permissions(_path: &std::path::Path) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
