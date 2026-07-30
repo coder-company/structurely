@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src http://127.0.0.1:* http://localhost:* http://[::1]:*; img-src 'self'; font-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'">
+  <meta name="description" content="A private, local-first control surface for Structurely.">
+  <title>Structurely Console</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#workspace">Skip to workspace</a>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Primary navigation">
+      <a class="brand" href="#overview" aria-label="Structurely Console home">
+        <svg viewBox="0 0 28 28" aria-hidden="true"><path d="M4 8.5 14 3l10 5.5v11L14 25 4 19.5v-11Z"/><path d="m9 11 5-2.7 5 2.7v6l-5 2.7L9 17v-6Z"/></svg>
+        <span>structurely<small>private console</small></span>
+      </a>
+      <nav class="nav-list">
+        <button class="nav-item is-active" data-view="overview"><span class="nav-icon" aria-hidden="true">01</span>Overview</button>
+        <button class="nav-item" data-view="search"><span class="nav-icon" aria-hidden="true">02</span>Search</button>
+        <button class="nav-item" data-view="research"><span class="nav-icon" aria-hidden="true">03</span>Research</button>
+        <button class="nav-item" data-view="impact"><span class="nav-icon" aria-hidden="true">04</span>Impact</button>
+        <button class="nav-item" data-view="trace"><span class="nav-icon" aria-hidden="true">05</span>Path trace</button>
+        <span class="nav-divider" aria-hidden="true"></span>
+        <button class="nav-item" data-view="workspaces"><span class="nav-icon" aria-hidden="true">06</span>Workspaces</button>
+        <button class="nav-item" data-view="sessions"><span class="nav-icon" aria-hidden="true">07</span>Sessions</button>
+        <button class="nav-item" data-view="recaps"><span class="nav-icon" aria-hidden="true">08</span>Recaps</button>
+        <button class="nav-item" data-view="memory"><span class="nav-icon" aria-hidden="true">09</span>Memory</button>
+      </nav>
+      <div class="privacy-note">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7a5 5 0 0 1 10 0v3"/><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M12 14v3"/></svg>
+        <p><strong>Local by design</strong>Your code and index never leave this machine.</p>
+      </div>
+    </aside>
+
+    <main id="workspace" class="workspace" tabindex="-1">
+      <header class="topbar">
+        <button class="mobile-menu" id="mobile-menu" aria-label="Open navigation" aria-expanded="false">
+          <span></span><span></span>
+        </button>
+        <div class="breadcrumb"><span>Console</span><i>/</i><strong id="view-name">Overview</strong></div>
+        <div class="topbar-actions">
+          <button class="command-key" id="command-key" aria-label="Open quick search"><span>Quick search</span><kbd>⌘ K</kbd></button>
+          <button class="connection-chip" id="connection-button" aria-haspopup="dialog">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span id="connection-label">Not connected</span>
+          </button>
+        </div>
+      </header>
+
+      <div id="announcement" class="sr-only" aria-live="polite"></div>
+      <section class="view is-visible" data-view-panel="overview" aria-labelledby="overview-title">
+        <div class="page-heading heading-grid">
+          <div>
+            <p class="eyebrow">Local intelligence layer</p>
+            <h1 id="overview-title">Understand the system<br>before you change it.</h1>
+          </div>
+          <p class="heading-copy">Search code, follow evidence-backed relationships, and preserve decisions across sessions. Everything runs through your loopback bridge.</p>
+        </div>
+        <div class="overview-grid">
+          <section class="hero-status surface">
+            <div class="section-label"><span>Index health</span><span id="health-time">Waiting for bridge</span></div>
+            <div id="health-content" class="health-empty">
+              <div class="signal-orbit" aria-hidden="true"><span></span><i></i></div>
+              <div><h2>Connect your local bridge</h2><p>Pair this dashboard to inspect the active repository without sending data to the cloud.</p></div>
+              <button class="button primary" data-open-connect>Connect bridge</button>
+            </div>
+          </section>
+          <section class="activity-panel">
+            <div class="section-label"><span>Recent activity</span><button class="text-button" data-view-link="sessions">View sessions</button></div>
+            <div id="activity-list" class="activity-list">
+              <div class="empty-compact"><span class="empty-mark" aria-hidden="true"></span><p>Session events will appear here after pairing.</p></div>
+            </div>
+          </section>
+          <section class="quick-actions">
+            <button class="action-tile" data-view-link="search"><span>Search symbols</span><small>Find definitions and references</small><i aria-hidden="true">↗</i></button>
+            <button class="action-tile" data-view-link="research"><span>Research a question</span><small>Gather repository-wide evidence</small><i aria-hidden="true">↗</i></button>
+            <button class="action-tile" data-view-link="impact"><span>Assess a change</span><small>Map downstream impact</small><i aria-hidden="true">↗</i></button>
+          </section>
+          <section class="privacy-panel">
+            <div class="privacy-rule"></div>
+            <p class="eyebrow">Data boundary</p>
+            <h2>Static shell.<br>Local knowledge.</h2>
+            <p>This page can be hosted anywhere. Repository data is requested directly from <code>127.0.0.1</code>, rendered in memory, and never persisted by this dashboard.</p>
+          </section>
+        </div>
+      </section>
+
+      <section class="view" data-view-panel="search" aria-labelledby="search-title">
+        <div class="page-heading tool-heading"><div><p class="eyebrow">Symbol intelligence</p><h1 id="search-title">Search the code graph</h1></div><p class="heading-copy">Find symbols, files, routes, and components in the current index.</p></div>
+        <form class="query-bar" data-tool-form="search">
+          <div class="field grow"><label for="search-query">Search query</label><input id="search-query" name="query" type="search" maxlength="1000" placeholder="e.g. publish_atomic" required autocomplete="off"></div>
+          <div class="field compact"><label for="search-limit">Results</label><select id="search-limit" name="limit"><option>10</option><option>20</option><option>50</option></select></div>
+          <button class="button primary" type="submit">Run search</button>
+        </form>
+        <div class="result-region" data-result="search"></div>
+      </section>
+
+      <section class="view" data-view-panel="research" aria-labelledby="research-title">
+        <div class="page-heading tool-heading"><div><p class="eyebrow">Repository synthesis</p><h1 id="research-title">Research with evidence</h1></div><p class="heading-copy">Ask a focused question and inspect the files and symbols behind the answer.</p></div>
+        <form class="query-bar" data-tool-form="research">
+          <div class="field grow"><label for="research-query">Research question</label><input id="research-query" name="query" maxlength="1000" placeholder="How are releases verified?" required></div>
+          <div class="field compact"><label for="research-files">Max files</label><select id="research-files" name="maxFiles"><option>8</option><option selected>12</option><option>20</option></select></div>
+          <button class="button primary" type="submit">Research</button>
+        </form>
+        <div class="result-region" data-result="research"></div>
+      </section>
+
+      <section class="view" data-view-panel="impact" aria-labelledby="impact-title">
+        <div class="page-heading tool-heading"><div><p class="eyebrow">Change planning</p><h1 id="impact-title">Map downstream impact</h1></div><p class="heading-copy">See which symbols and files are exposed before modifying a contract.</p></div>
+        <form class="query-bar query-grid" data-tool-form="impact">
+          <div class="field"><label for="impact-symbol">Symbol</label><input id="impact-symbol" name="symbol" maxlength="500" placeholder="publish" required></div>
+          <div class="field"><label for="impact-file">File hint <span>optional</span></label><input id="impact-file" name="file" maxlength="500" placeholder="src/store.rs"></div>
+          <div class="field compact"><label for="impact-depth">Depth</label><select id="impact-depth" name="depth"><option>1</option><option selected>2</option><option>4</option><option>8</option></select></div>
+          <button class="button primary" type="submit">Analyze</button>
+        </form>
+        <div class="result-region" data-result="impact"></div>
+      </section>
+
+      <section class="view" data-view-panel="trace" aria-labelledby="trace-title">
+        <div class="page-heading tool-heading"><div><p class="eyebrow">Relationship path</p><h1 id="trace-title">Trace symbol to symbol</h1></div><p class="heading-copy">Follow the shortest bounded, evidence-backed path through the graph.</p></div>
+        <form class="query-bar query-grid trace-form" data-tool-form="trace">
+          <div class="field"><label for="trace-source">Source</label><input id="trace-source" name="source" maxlength="500" placeholder="publish" required></div>
+          <div class="trace-arrow" aria-hidden="true">→</div>
+          <div class="field"><label for="trace-target">Target</label><input id="trace-target" name="target" maxlength="500" placeholder="flush" required></div>
+          <div class="field compact"><label for="trace-depth">Max depth</label><select id="trace-depth" name="depth"><option>4</option><option selected>6</option><option>10</option><option>20</option></select></div>
+          <button class="button primary" type="submit">Trace path</button>
+        </form>
+        <div class="result-region" data-result="trace"></div>
+      </section>
+
+      <section class="view" data-view-panel="workspaces" aria-labelledby="workspaces-title">
+        <div class="page-heading tool-heading"><div><p class="eyebrow">Team context</p><h1 id="workspaces-title">Workspaces</h1></div><button class="button secondary" data-refresh="workspaces">Refresh</button></div>
+        <div class="result-region" data-collection="workspaces"></div>
+      </section>
+      <section class="view" data-view-panel="sessions" aria-labelledby="sessions-title">
+        <div class="page-heading tool-heading"><div><p class="eyebrow">Durable history</p><h1 id="sessions-title">Sessions</h1></div><button class="button secondary" data-refresh="sessions">Refresh</button></div>
+        <div class="result-region" data-collection="sessions"></div>
+      </section>
+      <section class="view" data-view-panel="recaps" aria-labelledby="recaps-title">
+        <div class="page-heading tool-heading"><div><p class="eyebrow">Decision record</p><h1 id="recaps-title">Recaps</h1></div><p class="heading-copy">Generate a deterministic summary from one local session.</p></div>
+        <form class="query-bar" data-tool-form="recap">
+          <div class="field grow"><label for="recap-session">Session ID</label><input id="recap-session" name="session" maxlength="256" placeholder="session_…" required></div>
+          <button class="button primary" type="submit">Generate recap</button>
+        </form>
+        <div class="result-region" data-result="recap"></div>
+      </section>
+      <section class="view" data-view-panel="memory" aria-labelledby="memory-title">
+        <div class="page-heading tool-heading"><div><p class="eyebrow">Local knowledge</p><h1 id="memory-title">Memory</h1></div><button class="button secondary" data-refresh="memory">Refresh</button></div>
+        <form class="query-bar" data-tool-form="memory">
+          <div class="field"><label for="memory-workspace">Workspace ID</label><input id="memory-workspace" name="workspace" maxlength="256" placeholder="workspace_…" required></div>
+          <div class="field grow"><label for="memory-query">Recall knowledge</label><input id="memory-query" name="query" maxlength="1000" placeholder="What did we decide about atomic writes?" required></div>
+          <button class="button primary" type="submit">Recall</button>
+        </form>
+        <div class="result-region" data-collection="memory"></div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="connect-dialog" class="connect-dialog" aria-labelledby="connect-title">
+    <form method="dialog" class="dialog-close-row"><button class="icon-button" value="cancel" aria-label="Close connection dialog">×</button></form>
+    <div class="dialog-intro"><p class="eyebrow">Private pairing</p><h2 id="connect-title">Connect to Structurely</h2><p>The dashboard talks directly to a loopback-only bridge. Tokens remain in this browser tab and are cleared when the tab closes.</p></div>
+    <form id="connect-form" class="connect-form">
+      <div class="field"><label for="bridge-url">Bridge address</label><input id="bridge-url" name="bridgeUrl" type="url" value="http://127.0.0.1:4765" pattern="http://(127\.0\.0\.1|localhost|\[::1\])(:[0-9]+)?" required><small>Only <code>127.0.0.1</code>, <code>localhost</code>, or <code>::1</code> are accepted.</small></div>
+      <div class="field"><label for="pair-code">Pairing code</label><input id="pair-code" name="pairCode" type="password" maxlength="256" autocomplete="one-time-code" placeholder="Paste the one-time code" required><small>Find this in the terminal where you started the bridge.</small></div>
+      <p id="connect-error" class="form-error" role="alert"></p>
+      <button class="button primary wide" type="submit">Pair this tab</button>
+    </form>
+    <div class="dialog-security"><span aria-hidden="true"></span><p><strong>No cloud sync</strong>Vercel, Cloudflare, and Structurely do not receive repository content through this console.</p></div>
+  </dialog>
+</body>
+</html>
