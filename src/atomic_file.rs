@@ -107,9 +107,7 @@ fn sync_parent(_parent: &Path) -> io::Result<()> {
 fn replace(source: &Path, destination: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use std::{thread, time::Duration};
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-    };
+    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING};
 
     const ERROR_ACCESS_DENIED: i32 = 5;
     const ERROR_SHARING_VIOLATION: i32 = 32;
@@ -135,7 +133,7 @@ fn replace(source: &Path, destination: &Path) -> io::Result<()> {
             MoveFileExW(
                 source.as_ptr(),
                 destination.as_ptr(),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                MOVEFILE_REPLACE_EXISTING,
             )
         };
         if result != 0 {
