@@ -253,6 +253,13 @@ fn validate_database(path: &Path) -> Result<()> {
         !has_foreign_key_errors,
         "state backup failed foreign-key validation"
     );
+    // Close explicitly before atomic publication. Windows does not allow the
+    // validated staging database to be renamed while SQLite still owns a file
+    // handle, even though Unix permits it.
+    connection
+        .close()
+        .map_err(|(_, error)| error)
+        .context("close validated state backup")?;
     Ok(())
 }
 
