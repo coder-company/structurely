@@ -217,6 +217,11 @@ enum Command {
         #[command(subcommand)]
         command: DaemonCommand,
     },
+    /// Run or deploy the private local-first dashboard.
+    Dashboard {
+        #[command(subcommand)]
+        command: DashboardCommand,
+    },
     /// Configure a coding agent to use Structurely over MCP.
     Integrations {
         #[command(subcommand)]
@@ -323,6 +328,35 @@ enum IntegrationCommand {
         /// Project root whose agent configuration to update.
         #[arg(long, default_value = ".")]
         path: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum DashboardCommand {
+    /// Serve the token-paired bridge on the loopback interface.
+    Serve {
+        /// Initialized project root.
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        /// Loopback port. Use 0 to select an available port.
+        #[arg(long, default_value_t = 4765)]
+        port: u16,
+        /// Hosted dashboard origin allowed to call the local bridge.
+        #[arg(long = "allow-origin")]
+        allowed_origins: Vec<String>,
+    },
+    /// Write the static dashboard shell to a directory.
+    Export {
+        /// Empty output directory to create.
+        destination: PathBuf,
+    },
+    /// Deploy only the static shell to Vercel or Cloudflare Pages.
+    Deploy {
+        /// Provider name: vercel or cloudflare.
+        provider: String,
+        /// Provider project name. Defaults to structurely-dashboard.
+        #[arg(long)]
+        project_name: Option<String>,
     },
 }
 
@@ -797,6 +831,43 @@ fn main() -> Result<()> {
             command: DaemonCommand::Run { path, debounce_ms },
         } => {
             structurely::daemon::run(path, Duration::from_millis(debounce_ms.max(10)))?;
+        }
+        Command::Dashboard {
+            command:
+                DashboardCommand::Serve {
+                    path,
+                    port,
+                    allowed_origins,
+                },
+        } => {
+            structurely::dashboard::serve(structurely::dashboard::BridgeOptions {
+                project: path,
+                port,
+                allowed_origins,
+            })?;
+        }
+        Command::Dashboard {
+            command: DashboardCommand::Export { destination },
+        } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&structurely::dashboard::export(destination)?)?
+            );
+        }
+        Command::Dashboard {
+            command:
+                DashboardCommand::Deploy {
+                    provider,
+                    project_name,
+                },
+        } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&structurely::dashboard::deploy(
+                    &provider,
+                    project_name.as_deref()
+                )?)?
+            );
         }
         Command::Integrations {
             command: IntegrationCommand::Install { client, path },

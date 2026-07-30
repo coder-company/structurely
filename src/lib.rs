@@ -2,6 +2,7 @@ mod atomic_file;
 pub mod budget;
 pub mod content;
 pub mod daemon;
+pub mod dashboard;
 pub mod engine;
 pub mod integrations;
 mod inventory;
