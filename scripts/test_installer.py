@@ -36,6 +36,23 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def publish_release(binary: Path, release: Path) -> Path:
+    run(
+        [
+            "sh",
+            "scripts/package-unix.sh",
+            str(binary),
+            "linux-x86_64",
+            str(release),
+        ]
+    )
+    archive = release / "structurely-linux-x86_64.tar.gz"
+    (release / "SHA256SUMS").write_text(
+        f"{sha256(archive)}  {archive.name}\n", encoding="utf-8"
+    )
+    return archive
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", required=True, type=Path)
@@ -49,20 +66,7 @@ def main() -> None:
         release = root / "release"
         install = root / "install"
         release.mkdir()
-        run(
-            [
-                "sh",
-                "scripts/package-unix.sh",
-                str(binary),
-                "linux-x86_64",
-                str(release),
-            ]
-        )
-        archive = release / "structurely-linux-x86_64.tar.gz"
-        checksum = sha256(archive)
-        (release / "SHA256SUMS").write_text(
-            f"{checksum}  {archive.name}\n", encoding="utf-8"
-        )
+        archive = publish_release(binary, release)
 
         handler = lambda *values: QuietHandler(  # noqa: E731
             *values, directory=str(release)
@@ -80,6 +84,7 @@ def main() -> None:
             }
             installed = run(["sh", "scripts/install.sh"], env=environment)
             assert "Installed structurely " in installed.stdout
+            assert "Optional private dashboard" not in installed.stdout
             destination = install / "structurely"
             assert destination.is_file()
             version = run([str(destination), "--version"]).stdout.strip()
@@ -99,12 +104,72 @@ def main() -> None:
             assert rejected.returncode != 0
             assert "Checksum verification failed" in rejected.stderr
             assert sha256(destination) == original
+
+            fake_log = root / "fake-dashboard.log"
+            fake = root / "fake-structurely"
+            fake.write_text(
+                """#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+  echo "structurely 0.0.0-test"
+  exit 0
+fi
+printf '%s\\n' "$*" >> "$STRUCTURELY_TEST_LOG"
+if [ "${STRUCTURELY_TEST_DEPLOY_FAIL:-}" = "1" ]; then exit 42; fi
+""",
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+            publish_release(fake, release)
+
+            fake_environment = {
+                **environment,
+                "STRUCTURELY_TEST_LOG": str(fake_log),
+            }
+            noninteractive = run(
+                ["sh", "scripts/install.sh"], env=fake_environment
+            )
+            assert "Optional private dashboard" not in noninteractive.stdout
+            assert not fake_log.exists()
+
+            cloudflare = run(
+                ["sh", "scripts/install.sh"],
+                env={
+                    **fake_environment,
+                    "STRUCTURELY_DASHBOARD_SETUP": "cloudflare",
+                },
+            )
+            assert "will not install npm packages" in cloudflare.stdout
+            assert fake_log.read_text(encoding="utf-8").splitlines()[-1] == (
+                "dashboard deploy cloudflare"
+            )
+
+            failed = run(
+                ["sh", "scripts/install.sh"],
+                env={
+                    **fake_environment,
+                    "STRUCTURELY_DASHBOARD_SETUP": "vercel",
+                    "STRUCTURELY_TEST_DEPLOY_FAIL": "1",
+                },
+            )
+            assert "Structurely itself remains installed" in failed.stderr
+            assert (install / "structurely").is_file()
+
+            local = run(
+                ["sh", "scripts/install.sh"],
+                env={
+                    **fake_environment,
+                    "STRUCTURELY_DASHBOARD_SETUP": "local",
+                },
+            )
+            assert "structurely dashboard serve" in local.stdout
         finally:
             server.shutdown()
             server.server_close()
             thread.join()
 
-    print("native installer round-trip and checksum-failure preservation passed")
+    print(
+        "native installer round-trip, preservation, and dashboard setup contract passed"
+    )
 
 
 if __name__ == "__main__":

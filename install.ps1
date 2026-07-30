@@ -72,6 +72,65 @@ try {
     Write-Host "Binary: $destination"
     Write-Host ""
     Write-Host "Next: cd your-project; structurely setup codex"
+
+    $dashboardSetup = $env:STRUCTURELY_DASHBOARD_SETUP
+    if (-not $dashboardSetup) {
+        $isCi = -not [string]::IsNullOrWhiteSpace($env:CI)
+        $isInteractive = [Environment]::UserInteractive -and
+            -not [Console]::IsInputRedirected -and
+            -not [Console]::IsOutputRedirected
+        $dashboardSetup = if ($isCi -or -not $isInteractive) { "skip" } else { "prompt" }
+    }
+    $dashboardSetup = $dashboardSetup.ToLowerInvariant()
+
+    if ($dashboardSetup -eq "prompt") {
+        Write-Host ""
+        Write-Host "Optional private dashboard (repository data remains on this machine):"
+        Write-Host "  1) Deploy static shell to Cloudflare Pages"
+        Write-Host "  2) Deploy static shell to Vercel"
+        Write-Host "  3) Use locally only"
+        Write-Host "  4) Skip"
+        $choice = Read-Host "Choose [1-4, default 4]"
+        $dashboardSetup = switch ($choice.ToLowerInvariant()) {
+            { $_ -in @("1", "cloudflare") } { "cloudflare"; break }
+            { $_ -in @("2", "vercel") } { "vercel"; break }
+            { $_ -in @("3", "local") } { "local"; break }
+            default { "skip" }
+        }
+    }
+
+    switch ($dashboardSetup) {
+        { $_ -in @("cloudflare", "vercel") } {
+            Write-Host ""
+            Write-Host "Deploying the static dashboard shell to $dashboardSetup."
+            Write-Host "This installer will not install npm packages or provider CLIs."
+            Write-Host "The selected provider CLI must already be installed and authenticated."
+            try {
+                & $destination dashboard deploy $dashboardSetup
+                $dashboardStatus = $LASTEXITCODE
+            } catch {
+                $dashboardStatus = 1
+                Write-Warning "Dashboard command could not run: $($_.Exception.Message)"
+            }
+            if ($dashboardStatus -eq 0) {
+                Write-Host "Dashboard deployment completed."
+            } else {
+                Write-Warning "Dashboard deployment failed (exit $dashboardStatus); Structurely itself remains installed."
+                Write-Host "Retry later: structurely dashboard deploy $dashboardSetup"
+            }
+            break
+        }
+        "local" {
+            Write-Host ""
+            Write-Host "Dashboard selected for local-only use."
+            Write-Host "Start it when ready: structurely dashboard serve"
+            break
+        }
+        "skip" { break }
+        default {
+            Write-Warning "Ignoring invalid STRUCTURELY_DASHBOARD_SETUP=$dashboardSetup (expected cloudflare, vercel, local, skip, or prompt)."
+        }
+    }
 } finally {
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $temporary
 }

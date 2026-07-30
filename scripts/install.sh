@@ -101,3 +101,54 @@ case ":$PATH:" in
   *) printf '\nAdd Structurely to PATH:\n  export PATH="%s:$PATH"\n' "$INSTALL_DIR" ;;
 esac
 printf '\nNext: cd your-project && structurely setup codex\n'
+
+dashboard_setup="${STRUCTURELY_DASHBOARD_SETUP:-}"
+if [ -z "$dashboard_setup" ]; then
+  if [ -n "${CI:-}" ] || [ ! -t 0 ] || [ ! -t 1 ]; then
+    dashboard_setup="skip"
+  else
+    dashboard_setup="prompt"
+  fi
+fi
+
+if [ "$dashboard_setup" = "prompt" ]; then
+  printf '\nOptional private dashboard (repository data remains on this machine):\n'
+  printf '%s\n' \
+    '  1) Deploy static shell to Cloudflare Pages' \
+    '  2) Deploy static shell to Vercel' \
+    '  3) Use locally only' \
+    '  4) Skip'
+  printf 'Choose [1-4, default 4]: '
+  IFS= read -r dashboard_choice || dashboard_choice=""
+  case "$dashboard_choice" in
+    1|cloudflare) dashboard_setup="cloudflare" ;;
+    2|vercel) dashboard_setup="vercel" ;;
+    3|local) dashboard_setup="local" ;;
+    *) dashboard_setup="skip" ;;
+  esac
+fi
+
+case "$dashboard_setup" in
+  cloudflare|vercel)
+    printf '\nDeploying the static dashboard shell to %s.\n' "$dashboard_setup"
+    printf '%s\n' \
+      'This installer will not install npm packages or provider CLIs.' \
+      'The selected provider CLI must already be installed and authenticated.'
+    if "$INSTALL_DIR/structurely" dashboard deploy "$dashboard_setup"; then
+      printf 'Dashboard deployment completed.\n'
+    else
+      dashboard_status=$?
+      printf 'Dashboard deployment failed (exit %s); Structurely itself remains installed.\n' "$dashboard_status" >&2
+      printf 'Retry later: structurely dashboard deploy %s\n' "$dashboard_setup" >&2
+    fi
+    ;;
+  local)
+    printf '\nDashboard selected for local-only use.\n'
+    printf 'Start it when ready: structurely dashboard serve\n'
+    ;;
+  skip|"")
+    ;;
+  *)
+    printf 'Ignoring invalid STRUCTURELY_DASHBOARD_SETUP=%s (expected cloudflare, vercel, local, skip, or prompt).\n' "$dashboard_setup" >&2
+    ;;
+esac
