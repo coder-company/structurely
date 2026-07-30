@@ -44,7 +44,9 @@ pub(crate) fn publish_temporary(temporary: &Path, path: &Path) -> io::Result<()>
             "atomic publication requires a temporary file in the destination directory",
         ));
     }
-    fs::File::open(temporary)?.sync_all()?;
+    let file = fs::File::open(temporary)?;
+    file.sync_all()?;
+    drop(file);
     replace(temporary, path)?;
     sync_parent(parent)
 }
