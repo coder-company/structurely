@@ -1,5 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::fmt::Write as _;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -11,6 +13,9 @@ use structurely::{budget::ResourceBudget, mcp, Engine};
 #[derive(Parser)]
 #[command(name = "structurely", version, about)]
 struct Cli {
+    /// Force machine-readable JSON for commands with an interactive summary.
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -521,12 +526,17 @@ enum StateCommand {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let human_output = !cli.json && std::io::stdout().is_terminal();
     match cli.command {
         Command::Doctor { path, client } => {
             let client = structurely::integrations::AgentClient::parse(&client)?;
             let executable = std::env::current_exe()?;
             let report = structurely::doctor::run(path, client, executable)?;
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            if human_output {
+                print!("{}", format_doctor_human(&report));
+            } else {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            }
             if !report.healthy {
                 std::process::exit(report.exit_code());
             }
@@ -539,7 +549,11 @@ fn main() -> Result<()> {
             let client = structurely::integrations::AgentClient::parse(&client)?;
             let executable = std::env::current_exe()?;
             let report = structurely::setup::run(path, client, executable, replace_codegraph)?;
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            if human_output {
+                print!("{}", format_setup_human(&report));
+            } else {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            }
             structurely::dashboard::offer_after_setup(std::path::Path::new(&report.project));
         }
         Command::Init { path } => {
@@ -992,6 +1006,71 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn format_setup_human(report: &structurely::setup::SetupReport) -> String {
+    let mut output = String::new();
+    let daemon = report
+        .daemon
+        .status
+        .state
+        .as_ref()
+        .map(|state| format!("running (PID {})", state.pid))
+        .unwrap_or_else(|| "running".to_owned());
+    let _ = writeln!(output);
+    let _ = writeln!(output, "  Structurely is ready.");
+    let _ = writeln!(output);
+    let _ = writeln!(output, "  Project     {}", report.project);
+    let _ = writeln!(
+        output,
+        "  Index       epoch {}, {} files scanned",
+        report.index.epoch, report.index.files_scanned
+    );
+    let _ = writeln!(output, "  Freshness   {daemon}");
+    let _ = writeln!(
+        output,
+        "  Agent       {} ({})",
+        report.integration.client, report.integration.config
+    );
+    let _ = writeln!(output);
+    let _ = writeln!(output, "  Next");
+    let _ = writeln!(output, "    Restart your coding agent, then run:");
+    let _ = writeln!(
+        output,
+        "    structurely doctor --client {} \"{}\"",
+        report.integration.client, report.project
+    );
+    output
+}
+
+fn format_doctor_human(report: &structurely::doctor::DoctorReport) -> String {
+    let mut output = String::new();
+    let _ = writeln!(output);
+    let _ = writeln!(output, "  Structurely doctor");
+    let _ = writeln!(output, "  Project  {}", report.project);
+    let _ = writeln!(output, "  Client   {}", report.client);
+    let _ = writeln!(output);
+    for check in &report.checks {
+        let label = match check.level {
+            structurely::doctor::CheckLevel::Pass => "pass",
+            structurely::doctor::CheckLevel::Warn => "warn",
+            structurely::doctor::CheckLevel::Fail => "fail",
+        };
+        let _ = writeln!(output, "  {label:>4}  {:<12} {}", check.name, check.detail);
+        if let Some(remedy) = &check.remedy {
+            let _ = writeln!(output, "                    {remedy}");
+        }
+    }
+    let _ = writeln!(output);
+    if report.healthy {
+        let _ = writeln!(output, "  Ready. Required checks passed.");
+    } else {
+        let _ = writeln!(
+            output,
+            "  Not ready. Follow the remedies above and rerun doctor."
+        );
+    }
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1020,5 +1099,11 @@ mod tests {
             &"q".repeat(ResourceBudget::MAX_QUERY_BYTES + 1),
         ])
         .is_err());
+    }
+
+    #[test]
+    fn global_json_flag_is_accepted_before_or_after_the_command() {
+        assert!(Cli::try_parse_from(["structurely", "--json", "doctor"]).is_ok());
+        assert!(Cli::try_parse_from(["structurely", "doctor", "--json"]).is_ok());
     }
 }

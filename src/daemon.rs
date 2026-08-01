@@ -103,8 +103,22 @@ fn detach_background_process(command: &mut Command) {
     command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
 }
 
-#[cfg(not(windows))]
-fn detach_background_process(_command: &mut Command) {}
+#[cfg(unix)]
+fn detach_background_process(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    // Start a new session so closing the terminal that launched `setup` does
+    // not deliver SIGHUP to the freshness daemon. `pre_exec` is the only
+    // std-supported point between fork and exec; setsid is async-signal-safe.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
 
 pub fn stop(project: impl AsRef<Path>) -> Result<DaemonStop> {
     let project = project_root(project.as_ref())?;
