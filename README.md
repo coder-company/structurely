@@ -33,7 +33,7 @@ verifies its SHA-256 checksum, smoke-tests it, and publishes it atomically for
 your user. Rerun the same command to upgrade or repair an installation; a
 failed download or checksum never replaces the working binary. You do not
 need Rust or administrator access. Set
-`STRUCTURELY_VERSION=v0.3.0` before the command to install a specific release.
+`STRUCTURELY_VERSION=v0.4.0` before the command to install a specific release.
 
 ## Set up your project
 
@@ -110,8 +110,11 @@ structurely memory remember <workspace-id> \
   --tags architecture,storage
 ```
 
-All commands return JSON. Workspace state is project-local and survives index
-rebuilds. Use `structurely trace <source> <target>` for a bounded,
+Commands return JSON for reliable agent and script consumption. Interactive
+`setup` and `doctor` runs use a concise terminal summary; pass `--json` to
+either command to force the machine-readable report. Workspace state is
+project-local and survives index rebuilds. Use
+`structurely trace <source> <target>` for a bounded,
 evidence-backed relationship path and `structurely impact <symbol>` before
 changing a shared symbol.
 

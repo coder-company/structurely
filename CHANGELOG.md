@@ -3,6 +3,24 @@
 All notable changes are documented here. Structurely follows semantic
 versioning after the initial `0.1.0` release.
 
+## 0.4.0 — 2026-08-01
+
+- Add `structurely doctor`, a read-only readiness report for the project,
+  index, freshness, background indexer, coding-agent integration, and optional
+  dashboard, with actionable remedies and automation-safe exit codes.
+- Give interactive `setup` and `doctor` runs concise human summaries while
+  preserving JSON for pipes, CI, and an explicit global `--json` option.
+- Redesign the Unix and PowerShell installers around a restrained four-stage
+  experience with download retries, checksum verification, binary smoke tests,
+  atomic replacement, upgrade detection, PATH guidance, and clear next steps.
+- Keep optional dashboard deployment private and recoverable: only the static
+  shell is hosted, provider tools are never silently installed, and deployment
+  failure cannot undo a successful Structurely installation.
+- Detach the Unix freshness daemon from its launching terminal so project setup
+  remains healthy after that terminal or installer session exits.
+- Add native installer regressions for failed-checksum preservation,
+  non-interactive behavior, dashboard choices, and a real Windows round trip.
+
 ## 0.3.0 — 2026-07-30
 
 - Add a responsive private console for index health, semantic search,
