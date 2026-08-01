@@ -4,6 +4,18 @@ Structurely prints machine-readable JSON unless a command explicitly returns
 source-backed text. Run `structurely <command> --help` for the installed
 version's exact options.
 
+## Diagnose readiness
+
+```bash
+structurely doctor [project] [--client <codex|claude|cursor>]
+```
+
+`doctor` is read-only. It reports project accessibility, graph availability,
+working-tree freshness, daemon health, the selected coding-agent integration,
+and optional dashboard state. Required failures return exit status `2`; every
+failure includes a remediation command. Dashboard absence is healthy because
+the dashboard is optional.
+
 ## Set up a project
 
 ```bash

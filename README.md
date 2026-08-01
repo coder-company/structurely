@@ -29,8 +29,10 @@ structurely --version
 ```
 
 The installer detects your platform, downloads the latest native release,
-verifies its SHA-256 checksum, smoke-tests it, and installs it for your user.
-You do not need Rust or administrator access. Set
+verifies its SHA-256 checksum, smoke-tests it, and publishes it atomically for
+your user. Rerun the same command to upgrade or repair an installation; a
+failed download or checksum never replaces the working binary. You do not
+need Rust or administrator access. Set
 `STRUCTURELY_VERSION=v0.3.0` before the command to install a specific release.
 
 ## Set up your project
@@ -38,11 +40,14 @@ You do not need Rust or administrator access. Set
 ```bash
 cd /path/to/project
 structurely setup codex
+structurely doctor --client codex
 ```
 
 Use `claude` or `cursor` instead of `codex` when needed. This one command
 indexes the project, starts the background indexer, installs the project-local
 MCP entry, and verifies that everything is ready.
+`doctor` returns one machine-readable health report for the index, freshness
+daemon, coding-agent integration, and optional dashboard.
 
 Interactive setup also offers an optional private dashboard. Deploy only its
 static shell to Vercel or Cloudflare Pages, or run it entirely on localhost:

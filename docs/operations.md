@@ -32,12 +32,36 @@ $env:STRUCTURELY_VERSION = "v0.3.0"
 
 Confirm the installed binary with `structurely --version`.
 
+The installer uses four explicit stages: platform detection, release download,
+checksum and startup verification, and atomic publication. Rerunning it reports
+whether the binary was upgraded, repaired, or freshly installed. A failure
+before publication preserves the existing executable.
+
+Customize automation with these environment variables:
+
+- `STRUCTURELY_VERSION` pins a release tag;
+- `STRUCTURELY_INSTALL_DIR` selects the binary directory;
+- `STRUCTURELY_DASHBOARD_SETUP` selects `vercel`, `cloudflare`, `local`,
+  `skip`, or `prompt`;
+- `NO_COLOR` or `STRUCTURELY_NO_COLOR` disables terminal styling.
+
 Interactive installers offer an optional private dashboard after the binary is
 verified. Redirected input and CI do not prompt. Set
 `STRUCTURELY_DASHBOARD_SETUP` to `vercel`, `cloudflare`, `local`, `skip`, or
 `prompt` for explicit automation. A dashboard deployment failure does not roll
 back the successful binary installation. See the [private dashboard
 guide](dashboard.md).
+
+After project setup, run the non-mutating health check:
+
+```bash
+structurely doctor --client codex /absolute/project
+```
+
+It exits with status `0` when the required project, index, daemon, and selected
+agent integration checks pass. Warnings such as a stopped optional dashboard
+do not fail the command. Required failures return status `2` and include an
+actionable `remedy` in the JSON report.
 
 ## Shared daemon
 

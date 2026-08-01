@@ -17,6 +17,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Diagnose project, indexer, agent, and dashboard readiness.
+    Doctor {
+        /// Project root to inspect.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Coding-agent integration to verify: codex, claude, or cursor.
+        #[arg(long, default_value = "codex")]
+        client: String,
+    },
     /// Index a project, start freshness, and connect a coding agent.
     Setup {
         /// Agent name: codex, claude, or cursor.
@@ -513,6 +522,15 @@ enum StateCommand {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Doctor { path, client } => {
+            let client = structurely::integrations::AgentClient::parse(&client)?;
+            let executable = std::env::current_exe()?;
+            let report = structurely::doctor::run(path, client, executable)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if !report.healthy {
+                std::process::exit(report.exit_code());
+            }
+        }
         Command::Setup {
             client,
             path,
