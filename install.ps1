@@ -8,9 +8,61 @@ $installDir = if ($env:STRUCTURELY_INSTALL_DIR) {
     Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "Programs\Structurely\bin"
 }
 
+$useColor = [Environment]::UserInteractive -and
+    -not [Console]::IsOutputRedirected -and
+    [string]::IsNullOrWhiteSpace($env:NO_COLOR) -and
+    [string]::IsNullOrWhiteSpace($env:STRUCTURELY_NO_COLOR)
+
+function Write-StyledLine {
+    param(
+        [Parameter(Mandatory = $true)][string]$Text,
+        [ConsoleColor]$Color = [ConsoleColor]::Gray
+    )
+    if ($useColor) {
+        Write-Host $Text -ForegroundColor $Color
+    } else {
+        Write-Output $Text
+    }
+}
+
+function Write-Step {
+    param([int]$Number, [string]$Label)
+    Write-StyledLine "[$Number/4] $Label" Cyan
+}
+
+function Write-Detail {
+    param([string]$Text)
+    Write-StyledLine "      $Text" DarkGray
+}
+
+function Write-Verified {
+    param([string]$Text)
+    Write-StyledLine "      verified $Text" Green
+}
+
+function Get-ReleaseFile {
+    param([string]$Uri, [string]$OutFile)
+    $lastError = $null
+    foreach ($attempt in 1..3) {
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $OutFile
+            return
+        } catch {
+            $lastError = $_
+            if ($attempt -lt 3) { Start-Sleep -Seconds $attempt }
+        }
+    }
+    throw "Could not download $Uri after three attempts: $($lastError.Exception.Message)"
+}
+
+Write-Output ""
+Write-StyledLine "  Structurely" White
+Write-StyledLine "  Local-first code intelligence for coding agents" DarkGray
+Write-Output ""
+
 $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
 if ($architecture -ne "X64") {
-    throw "Structurely does not yet publish a native Windows $architecture binary."
+    throw "No native Structurely release is available for Windows/$architecture."
 }
 
 $asset = "structurely-windows-x86_64.zip"
@@ -26,52 +78,87 @@ if ($env:STRUCTURELY_RELEASE_BASE_URL) {
 $temporary = Join-Path ([System.IO.Path]::GetTempPath()) ("structurely-install-" + [Guid]::NewGuid())
 New-Item -ItemType Directory -Path $temporary | Out-Null
 try {
-    Write-Host "Downloading Structurely $version for Windows/x86_64..."
+    Write-Step 1 "Detect platform"
+    Write-Detail "Target       windows/x86_64"
+    Write-Detail "Destination  $(Join-Path $installDir 'structurely.exe')"
+    Write-Detail "Release      $version"
+
+    Write-Step 2 "Download release"
+    Write-Detail $asset
     $archive = Join-Path $temporary $asset
     $checksums = Join-Path $temporary "SHA256SUMS"
-    Invoke-WebRequest -UseBasicParsing -Uri "$releaseUrl/$asset" -OutFile $archive
-    Invoke-WebRequest -UseBasicParsing -Uri "$releaseUrl/SHA256SUMS" -OutFile $checksums
+    Get-ReleaseFile "$releaseUrl/$asset" $archive
+    Get-ReleaseFile "$releaseUrl/SHA256SUMS" $checksums
 
+    Write-Step 3 "Verify and stage"
     $escapedAsset = [Regex]::Escape($asset)
     $checksumLine = Get-Content $checksums | Where-Object { $_ -match "^[0-9a-fA-F]{64}\s+\*?$escapedAsset$" } | Select-Object -First 1
     if (-not $checksumLine) {
-        throw "SHA256SUMS does not contain $asset."
+        throw "SHA256SUMS does not contain $asset. The existing installation was not changed."
     }
     $expected = ($checksumLine -split "\s+")[0].ToLowerInvariant()
     $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
     if ($actual -ne $expected) {
-        throw "Checksum verification failed for $asset."
+        throw "Checksum verification failed for $asset. The existing installation was not changed."
     }
+    Write-Verified "SHA-256 checksum"
 
     $package = Join-Path $temporary "package"
     Expand-Archive -Path $archive -DestinationPath $package
-    $binary = Get-ChildItem -Path $package -Filter "structurely.exe" -File -Recurse | Select-Object -First 1
-    if (-not $binary) {
-        throw "The release archive does not contain structurely.exe."
+    $binary = Join-Path $package "structurely.exe"
+    if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
+        throw "The verified release archive does not contain a regular Structurely binary."
     }
-    & $binary.FullName --version | Out-Null
+    $installedVersion = (& $binary --version | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($installedVersion)) {
+        throw "The downloaded binary could not start on this machine."
+    }
+    Write-Verified "$installedVersion starts correctly"
 
-    New-Item -ItemType Directory -Force -Path $installDir | Out-Null
     $destination = Join-Path $installDir "structurely.exe"
+    $previousVersion = ""
+    if (Test-Path -LiteralPath $destination -PathType Leaf) {
+        try { $previousVersion = (& $destination --version | Out-String).Trim() } catch { $previousVersion = "" }
+    }
+
+    Write-Step 4 "Install atomically"
+    New-Item -ItemType Directory -Force -Path $installDir | Out-Null
     $staged = Join-Path $installDir ("structurely.new." + $PID + ".exe")
-    Copy-Item $binary.FullName $staged
+    Copy-Item $binary $staged
     Move-Item -Force $staged $destination
+    if ($previousVersion -and $previousVersion -ne $installedVersion) {
+        Write-Detail "Updated      $previousVersion -> $installedVersion"
+    } elseif ($previousVersion) {
+        Write-Detail "Reinstalled  $installedVersion"
+    } else {
+        Write-Detail "Installed    $installedVersion"
+    }
+    Write-Detail "Binary       $destination"
 
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     $segments = @($userPath -split ";" | Where-Object { $_ })
     if ($segments -notcontains $installDir) {
         $newPath = (@($segments) + $installDir) -join ";"
         [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
-        Write-Host "Added $installDir to your user PATH. Open a new terminal to use it."
+        $pathUpdated = $true
+    } else {
+        $pathUpdated = $false
     }
     if (($env:Path -split ";") -notcontains $installDir) {
         $env:Path = "$installDir;$env:Path"
     }
 
-    Write-Host "Installed $(& $destination --version)"
-    Write-Host "Binary: $destination"
-    Write-Host ""
-    Write-Host "Next: cd your-project; structurely setup codex"
+    Write-Output ""
+    Write-StyledLine "  Structurely is ready." Green
+    if ($pathUpdated) {
+        Write-Output ""
+        Write-StyledLine "  PATH updated" White
+        Write-Detail "Open a new terminal before using structurely elsewhere."
+    }
+    Write-Output ""
+    Write-StyledLine "  Start in a repository" White
+    Write-Output "    cd your-project"
+    Write-Output "    structurely setup codex"
 
     $dashboardSetup = $env:STRUCTURELY_DASHBOARD_SETUP
     if (-not $dashboardSetup) {
@@ -84,27 +171,31 @@ try {
     $dashboardSetup = $dashboardSetup.ToLowerInvariant()
 
     if ($dashboardSetup -eq "prompt") {
-        Write-Host ""
-        Write-Host "Optional private dashboard (repository data remains on this machine):"
-        Write-Host "  1) Deploy static shell to Cloudflare Pages"
-        Write-Host "  2) Deploy static shell to Vercel"
-        Write-Host "  3) Use locally only"
-        Write-Host "  4) Skip"
-        $choice = Read-Host "Choose [1-4, default 4]"
+        Write-Output ""
+        Write-StyledLine "  Optional private dashboard" White
+        Write-Detail "The shell may be hosted; repository data always stays on this machine."
+        Write-Output ""
+        Write-Output "    1  Local only        Start it yourself when needed"
+        Write-Output "    2  Cloudflare Pages  Deploy the static shell"
+        Write-Output "    3  Vercel           Deploy the static shell"
+        Write-Output "    4  Not now          Finish installation"
+        Write-Output ""
+        $choice = Read-Host "  Choose [1-4, default 4]"
         $dashboardSetup = switch ($choice.ToLowerInvariant()) {
-            { $_ -in @("1", "cloudflare") } { "cloudflare"; break }
-            { $_ -in @("2", "vercel") } { "vercel"; break }
-            { $_ -in @("3", "local") } { "local"; break }
+            { $_ -in @("1", "local") } { "local"; break }
+            { $_ -in @("2", "cloudflare") } { "cloudflare"; break }
+            { $_ -in @("3", "vercel") } { "vercel"; break }
             default { "skip" }
         }
     }
 
     switch ($dashboardSetup) {
         { $_ -in @("cloudflare", "vercel") } {
-            Write-Host ""
-            Write-Host "Deploying the static dashboard shell to $dashboardSetup."
-            Write-Host "This installer will not install npm packages or provider CLIs."
-            Write-Host "The selected provider CLI must already be installed and authenticated."
+            Write-Output ""
+            Write-StyledLine "  Dashboard deployment" White
+            Write-Detail "Provider      $dashboardSetup"
+            Write-Detail "Upload        Static shell only; no repository data"
+            Write-Detail "Requirement   Authenticated provider CLI already installed"
             try {
                 & $destination dashboard deploy $dashboardSetup
                 $dashboardStatus = $LASTEXITCODE
@@ -113,24 +204,25 @@ try {
                 Write-Warning "Dashboard command could not run: $($_.Exception.Message)"
             }
             if ($dashboardStatus -eq 0) {
-                Write-Host "Dashboard deployment completed."
+                Write-Verified "dashboard deployment"
             } else {
-                Write-Warning "Dashboard deployment failed (exit $dashboardStatus); Structurely itself remains installed."
-                Write-Host "Retry later: structurely dashboard deploy $dashboardSetup"
+                Write-Warning "Dashboard deployment failed (exit $dashboardStatus); Structurely remains installed."
+                Write-Detail "Retry with: structurely dashboard deploy $dashboardSetup"
             }
             break
         }
         "local" {
-            Write-Host ""
-            Write-Host "Dashboard selected for local-only use."
-            Write-Host "Start it when ready: structurely dashboard serve"
+            Write-Output ""
+            Write-StyledLine "  Dashboard ready for local use" White
+            Write-Output "    structurely dashboard serve"
             break
         }
         "skip" { break }
         default {
-            Write-Warning "Ignoring invalid STRUCTURELY_DASHBOARD_SETUP=$dashboardSetup (expected cloudflare, vercel, local, skip, or prompt)."
+            Write-Warning "Ignoring STRUCTURELY_DASHBOARD_SETUP=$dashboardSetup; expected cloudflare, vercel, local, skip, or prompt."
         }
     }
+    Write-Output ""
 } finally {
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $temporary
 }

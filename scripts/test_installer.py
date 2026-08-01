@@ -83,7 +83,18 @@ def main() -> None:
                 "STRUCTURELY_INSTALL_DIR": str(install),
             }
             installed = run(["sh", "scripts/install.sh"], env=environment)
-            assert "Installed structurely " in installed.stdout
+            for stage in [
+                "[1/4] Detect platform",
+                "[2/4] Download release",
+                "[3/4] Verify and stage",
+                "[4/4] Install atomically",
+            ]:
+                assert stage in installed.stdout
+            assert "verified SHA-256 checksum" in installed.stdout
+            assert "Structurely is ready." in installed.stdout
+            assert "Start in a repository" in installed.stdout
+            assert "structurely setup codex" in installed.stdout
+            assert "\x1b" not in installed.stdout
             assert "Optional private dashboard" not in installed.stdout
             destination = install / "structurely"
             assert destination.is_file()
@@ -138,7 +149,9 @@ if [ "${STRUCTURELY_TEST_DEPLOY_FAIL:-}" = "1" ]; then exit 42; fi
                     "STRUCTURELY_DASHBOARD_SETUP": "cloudflare",
                 },
             )
-            assert "will not install npm packages" in cloudflare.stdout
+            assert "Dashboard deployment" in cloudflare.stdout
+            assert "Static shell only; no repository data" in cloudflare.stdout
+            assert "Authenticated provider CLI already installed" in cloudflare.stdout
             assert fake_log.read_text(encoding="utf-8").splitlines()[-1] == (
                 "dashboard deploy cloudflare"
             )
@@ -151,7 +164,7 @@ if [ "${STRUCTURELY_TEST_DEPLOY_FAIL:-}" = "1" ]; then exit 42; fi
                     "STRUCTURELY_TEST_DEPLOY_FAIL": "1",
                 },
             )
-            assert "Structurely itself remains installed" in failed.stderr
+            assert "Structurely remains installed" in failed.stderr
             assert (install / "structurely").is_file()
 
             local = run(
@@ -162,6 +175,40 @@ if [ "${STRUCTURELY_TEST_DEPLOY_FAIL:-}" = "1" ]; then exit 42; fi
                 },
             )
             assert "structurely dashboard serve" in local.stdout
+
+            unsupported = subprocess.run(
+                ["sh", "scripts/install.sh"],
+                check=False,
+                text=True,
+                capture_output=True,
+                env={**environment, "STRUCTURELY_OS": "Plan9"},
+            )
+            assert unsupported.returncode != 0
+            assert "No native release is available for Plan9" in unsupported.stderr
+
+            invalid_dashboard = run(
+                ["sh", "scripts/install.sh"],
+                env={
+                    **fake_environment,
+                    "STRUCTURELY_DASHBOARD_SETUP": "unknown-provider",
+                },
+            )
+            assert "Ignoring STRUCTURELY_DASHBOARD_SETUP" in (
+                invalid_dashboard.stderr
+            )
+
+            powershell = Path("install.ps1").read_text(encoding="utf-8")
+            for contract in [
+                'Write-Step 1 "Detect platform"',
+                'Write-Step 2 "Download release"',
+                'Write-Step 3 "Verify and stage"',
+                'Write-Step 4 "Install atomically"',
+                "The existing installation was not changed",
+                "Static shell only; no repository data",
+                "Structurely is ready.",
+                "STRUCTURELY_NO_COLOR",
+            ]:
+                assert contract in powershell
         finally:
             server.shutdown()
             server.server_close()
