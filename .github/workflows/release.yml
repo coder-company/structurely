@@ -51,6 +51,11 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked
 
+      - name: Verify Windows installer round-trip
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/test_installer.ps1 -Binary "${{ matrix.binary }}"
+
       - name: Package Unix archive
         if: runner.os != 'Windows'
         shell: bash
@@ -134,3 +139,8 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release --locked
+
+      - name: Verify Windows installer round-trip
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/test_installer.ps1 -Binary target/release/structurely.exe
