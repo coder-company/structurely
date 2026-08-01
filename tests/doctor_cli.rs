@@ -1,38 +1,56 @@
 use serde_json::Value;
 use std::{
+    fs::File,
+    io::{Read, Seek},
     path::Path,
-    process::{Command, Stdio},
+    process::Command,
     thread,
     time::{Duration, Instant},
 };
 use tempfile::TempDir;
 
 fn cli(project: &Path, arguments: &[&str]) -> std::process::Output {
+    let mut stdout = tempfile::tempfile().unwrap();
+    let mut stderr = tempfile::tempfile().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_structurely"))
         .args(arguments)
         .current_dir(project)
         .env("STRUCTURELY_DASHBOARD_SETUP", "skip")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(stdout.try_clone().unwrap())
+        .stderr(stderr.try_clone().unwrap())
         .spawn()
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         if child.try_wait().unwrap().is_some() {
-            return child.wait_with_output().unwrap();
+            let status = child.wait().unwrap();
+            return std::process::Output {
+                status,
+                stdout: read_capture(&mut stdout),
+                stderr: read_capture(&mut stderr),
+            };
         }
         if Instant::now() >= deadline {
             child.kill().unwrap();
-            let output = child.wait_with_output().unwrap();
+            child.wait().unwrap();
+            let captured_stdout = read_capture(&mut stdout);
+            let captured_stderr = read_capture(&mut stderr);
             panic!(
                 "command timed out: {}\nstdout: {}\nstderr: {}",
                 arguments.join(" "),
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
+                String::from_utf8_lossy(&captured_stdout),
+                String::from_utf8_lossy(&captured_stderr)
             );
         }
         thread::sleep(Duration::from_millis(25));
     }
+}
+
+fn read_capture(file: &mut File) -> Vec<u8> {
+    file.rewind().unwrap();
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).unwrap();
+    bytes
 }
 
 #[test]
