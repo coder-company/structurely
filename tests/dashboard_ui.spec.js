@@ -67,7 +67,7 @@ test("collapses without horizontal overflow on a mobile viewport", async ({
 });
 
 test("shows actionable connection recovery", async ({ page }) => {
-  await expect(page.locator(".setup-steps li")).toHaveCount(3);
+  await expect(page.locator(".setup-steps li")).toHaveCount(2);
   await page.evaluate(() => renderConnectionIssue({ status: 401 }));
   await expect(page.locator("#health-content")).toContainText("Pairing expired");
   await expect(page.locator("#health-content")).toContainText("structurely dashboard reconnect --path .");

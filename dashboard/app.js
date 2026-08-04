@@ -142,7 +142,7 @@ function showView(view) {
 }
 
 function emptyState(title, copy) {
-  return `<div class="result-empty"><div><span class="empty-mark" aria-hidden="true"></span><h2>${escapeHtml(title)}</h2><p>${escapeHtml(copy)}</p></div></div>`;
+  return `<div class="result-empty"><div><span class="empty-mark" aria-hidden="true"></span><h2>${escapeHtml(title)}</h2>${copy ? `<p>${escapeHtml(copy)}</p>` : ""}</div></div>`;
 }
 
 function errorState(error) {
@@ -283,7 +283,7 @@ function renderResults(container, data, label, kind = "generic") {
   if (kind === "trace") { container.innerHTML = renderTraceResult(data); return; }
   const items = flattenResults(data);
   if (!items.length) {
-    container.innerHTML = emptyState(`No ${label.toLowerCase()} found`, "Try a more specific query or refresh the local index.");
+    container.innerHTML = emptyState(`No ${label.toLowerCase()} found`);
     return;
   }
   if (["workspaces", "sessions", "memory", "recap"].includes(kind)) {
@@ -328,7 +328,7 @@ async function loadCollection(name) {
   const container = $(`[data-collection="${name}"]`);
   if (!container) return;
   if (!state.token) {
-    container.innerHTML = emptyState(`Connect to view ${name}`, "Pair this tab with the local bridge. Nothing is read from cloud storage.");
+    container.innerHTML = emptyState("Connection required");
     return;
   }
   if (name === "memory") {
@@ -336,7 +336,7 @@ async function loadCollection(name) {
     if (form?.checkValidity()) {
       await runTool(form);
     } else {
-      container.innerHTML = emptyState("Enter a memory query", "Choose a workspace and describe what you want to recall.");
+      container.innerHTML = emptyState("Enter a memory query");
     }
     return;
   }
@@ -434,7 +434,7 @@ async function refreshStatus() {
     const pending = Number(status.pending_files || 0);
     const skipped = Number(status.skipped_files || 0);
     const indexState = [status.state || status.status || "ready", pending ? `${pending} pending` : "", skipped ? `${skipped} skipped` : ""].filter(Boolean).join(" · ");
-    $("#health-content").innerHTML = `<p class="eyebrow">Bridge authenticated</p><h2><span>Healthy.</span> ${escapeHtml(root)}</h2>
+    $("#health-content").innerHTML = `<h2>${escapeHtml(root)}</h2>
       <div class="metric-grid">
         <div class="metric"><span>Index state</span><strong>${escapeHtml(indexState)}</strong></div>
         <div class="metric"><span>Files</span><strong>${escapeHtml(files)}</strong></div>
@@ -525,19 +525,19 @@ function openConnection() {
 
 function hydrateEmptyStates() {
   const copy = {
-    search: ["Search the current index", "Enter a symbol, route, component, or file name to begin."],
-    research: ["Ask a repository question", "Structurely will gather bounded evidence from symbols and file content."],
-    impact: ["Plan a change with confidence", "Enter the symbol you may change to see affected code."],
-    trace: ["Find a relationship path", "Choose a source and target symbol to trace their connection."],
-    memory: ["Recall local knowledge", "Pair the bridge and search memories saved in this workspace."],
-    recap: ["Generate a session recap", "Enter a session ID to summarize its local event history."]
+    search: ["Enter a query"],
+    research: ["Enter a question"],
+    impact: ["Enter a symbol"],
+    trace: ["Enter source and target symbols"],
+    memory: ["Enter a memory query"],
+    recap: ["Enter a session ID"]
   };
   for (const [name, content] of Object.entries(copy)) {
     const container = name === "memory" ? $('[data-collection="memory"]') : $(`[data-result="${name}"]`);
     container.innerHTML = emptyState(content[0], content[1]);
   }
   for (const name of ["workspaces", "sessions"]) {
-    $(`[data-collection="${name}"]`).innerHTML = emptyState(`Connect to view ${name}`, "This data is held by your local Structurely state store.");
+    $(`[data-collection="${name}"]`).innerHTML = emptyState("Connection required");
   }
 }
 
