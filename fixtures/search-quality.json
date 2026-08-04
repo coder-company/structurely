@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "queries": [
+    {"query": "dashboard token pairing security", "expected": "src/dashboard.rs", "maximumRank": 1, "category": "security"},
+    {"query": "durable workspace memory", "expected": "src/state.rs", "maximumRank": 1, "category": "durable-state"},
+    {"query": "tsconfig alias resolution implementation", "expected": "src/project_resolution.rs", "maximumRank": 1, "category": "project-resolution"},
+    {"query": "installer checksum verification", "expected": "scripts/test_installer.py", "maximumRank": 1, "category": "distribution"},
+    {"query": "source snapshot symlink safety", "expected": "src/source.rs", "maximumRank": 1, "category": "security"},
+    {"query": "react state runtime relationship", "expected": "src/engine.rs", "maximumRank": 1, "category": "framework"},
+    {"query": "repository content chunking", "expected": "src/content.rs", "maximumRank": 1, "category": "content"},
+    {"query": "doctor integration health", "expected": "src/doctor.rs", "maximumRank": 1, "category": "operations"},
+    {"query": "atomic file publication", "expected": "src/atomic_file.rs", "maximumRank": 1, "category": "storage"},
+    {"query": "MCP JSON RPC dispatch", "expected": "src/mcp.rs", "maximumRank": 1, "category": "protocol"},
+    {"query": "daemon watcher freshness", "expected": "src/daemon.rs", "maximumRank": 1, "category": "operations"},
+    {"query": "C preprocessor compilation database", "expected": "src/engine.rs", "maximumRank": 1, "category": "language"}
+  ]
+}

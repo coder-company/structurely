@@ -2,9 +2,11 @@
   "name": "structurely-dashboard-tests",
   "private": true,
   "scripts": {
-    "test:dashboard": "playwright test tests/dashboard_ui.spec.js"
+    "test:dashboard": "playwright test tests/dashboard_ui.spec.js",
+    "test:dashboard:live": "playwright test tests/dashboard_live.spec.js"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.10.2",
     "@playwright/test": "1.62.0"
   }
 }

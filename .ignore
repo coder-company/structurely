@@ -1,0 +1,2 @@
+# Evaluation prompts must not become retrieval evidence.
+fixtures/search-quality.json

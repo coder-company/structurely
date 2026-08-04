@@ -177,6 +177,16 @@ impl Store {
         &self.path
     }
 
+    pub(crate) fn graph_counts(&self) -> Result<(usize, usize)> {
+        let symbols = self
+            .connection
+            .query_row("SELECT COUNT(*) FROM symbols", [], |row| row.get(0))?;
+        let relationships =
+            self.connection
+                .query_row("SELECT COUNT(*) FROM relationships", [], |row| row.get(0))?;
+        Ok((symbols, relationships))
+    }
+
     pub(crate) fn metadata_value(&self, key: &str) -> Result<Option<String>> {
         self.connection
             .query_row("SELECT value FROM metadata WHERE key=?1", [key], |row| {

@@ -7,7 +7,7 @@ use std::{
     thread,
     time::Duration,
 };
-use structurely::Engine;
+use structurely::{state::StateStore, Engine};
 
 struct ChildGuard(Child);
 
@@ -27,6 +27,24 @@ fn dashboard_bridge_pairs_once_and_enforces_auth_and_origins() {
     )
     .unwrap();
     Engine::init(project.path()).unwrap();
+    let state = StateStore::open(project.path()).unwrap();
+    let workspace = state.create_workspace("Release work").unwrap();
+    let session = state
+        .create_session(&workspace.id, "Verify publication")
+        .unwrap();
+    drop(state);
+    let mut state = StateStore::open(project.path()).unwrap();
+    state
+        .append_event(&session.id, "decision", "Keep publication atomic.")
+        .unwrap();
+    state
+        .remember(
+            &workspace.id,
+            "Publication uses an atomic rename.",
+            &["storage".to_owned()],
+        )
+        .unwrap();
+    drop(state);
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_structurely"))
         .args([
@@ -111,10 +129,111 @@ fn dashboard_bridge_pairs_once_and_enforces_auth_and_origins() {
         "",
     );
     assert_eq!(status.0, 200, "{}", status.1);
-    assert_eq!(
-        serde_json::from_str::<Value>(&status.1).unwrap()["indexed_files"],
-        1
+    let status_json = serde_json::from_str::<Value>(&status.1).unwrap();
+    assert_eq!(status_json["indexed_files"], 1);
+    assert_eq!(status_json["symbols"], 2);
+    assert_eq!(status_json["relationships"], 1);
+
+    let post_json = |path: &str, body: &str| {
+        let response = request(
+            address,
+            "POST",
+            path,
+            &[
+                ("Origin", "https://console.example"),
+                ("Authorization", &authorization),
+                ("Content-Type", "application/json"),
+            ],
+            body,
+        );
+        assert_eq!(response.0, 200, "{path}: {}", response.1);
+        serde_json::from_str::<Value>(&response.1).unwrap()
+    };
+    let search = post_json("/api/v1/search", r#"{"query":"publish","limit":10}"#);
+    assert_eq!(search[0]["symbol"]["name"], "publish_atomically");
+    assert!(search[0]["score"].is_number());
+    let research = post_json(
+        "/api/v1/research",
+        r#"{"query":"atomic publication","max_files":8}"#,
     );
+    assert!(research["graph_epoch"].is_number());
+    assert!(research["symbol_findings"].is_array());
+    assert!(research["content_findings"].is_array());
+    assert!(research["files"].is_array());
+    assert!(post_json(
+        "/api/v1/impact",
+        r#"{"symbol":"publish_atomically","depth":2}"#
+    )
+    .is_array());
+    let trace = post_json(
+        "/api/v1/trace",
+        r#"{"source":"publish_atomically","target":"publish_atomically","depth":4}"#,
+    );
+    assert!(trace["status"].is_string());
+    assert!(trace["path"].is_array());
+    let workspaces = request(
+        address,
+        "GET",
+        "/api/v1/workspaces",
+        &[
+            ("Origin", "https://console.example"),
+            ("Authorization", &authorization),
+        ],
+        "",
+    );
+    assert_eq!(workspaces.0, 200, "{}", workspaces.1);
+    assert_eq!(
+        serde_json::from_str::<Value>(&workspaces.1).unwrap()[0]["id"],
+        workspace.id
+    );
+    let sessions = post_json("/api/v1/sessions", r#"{"limit":20}"#);
+    assert_eq!(sessions[0]["id"], session.id);
+    let memory = post_json(
+        "/api/v1/memory",
+        &format!(
+            r#"{{"workspace":"{}","query":"atomic rename","limit":10}}"#,
+            workspace.id
+        ),
+    );
+    assert_eq!(memory[0]["memory"]["workspace_id"], workspace.id);
+    let recap = post_json(
+        "/api/v1/recap",
+        &format!(r#"{{"session":"{}"}}"#, session.id),
+    );
+    assert_eq!(recap["session_id"], session.id);
+    assert_eq!(recap["event_count"], 1);
+    let created_workspace = post_json("/api/v1/workspaces", r#"{"name":"Dashboard workflow"}"#);
+    let created_session = post_json(
+        "/api/v1/sessions/create",
+        &format!(
+            r#"{{"workspace":"{}","title":"Connected workflow"}}"#,
+            created_workspace["id"].as_str().unwrap()
+        ),
+    );
+    let created_event = post_json(
+        "/api/v1/sessions/events",
+        &format!(
+            r#"{{"session":"{}","kind":"decision","body":"Keep evidence visible."}}"#,
+            created_session["id"].as_str().unwrap()
+        ),
+    );
+    assert_eq!(created_event["sequence"], 1);
+    let completed = post_json(
+        "/api/v1/sessions/complete",
+        &format!(
+            r#"{{"session":"{}"}}"#,
+            created_session["id"].as_str().unwrap()
+        ),
+    );
+    assert_eq!(completed["status"], "completed");
+    let remembered = post_json(
+        "/api/v1/memories",
+        &format!(
+            r#"{{"workspace":"{}","body":"Evidence stays inspectable.","tags":["dashboard","ux"]}}"#,
+            created_workspace["id"].as_str().unwrap()
+        ),
+    );
+    assert_eq!(remembered["tags"][0], "dashboard");
     assert_eq!(
         request(
             address,
@@ -258,8 +377,10 @@ fn dashboard_export_contains_only_static_shell_assets() {
         [
             "_headers",
             "app.js",
+            "favicon.svg",
             "index.html",
             "styles.css",
+            "theme.js",
             "vercel.json"
         ]
     );

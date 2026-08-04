@@ -3,48 +3,41 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
-  <meta name="theme-color" content="#1c1e54">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#fbfaf4">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src http://127.0.0.1:* http://localhost:*; img-src 'self'; font-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'">
   <meta name="description" content="A private, local-first control surface for Structurely.">
   <title>Structurely Console</title>
+  <link rel="icon" href="./favicon.svg" type="image/svg+xml">
+  <script src="./theme.js"></script>
   <link rel="stylesheet" href="./styles.css">
   <script src="./app.js" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#workspace">Skip to workspace</a>
   <div class="app-shell">
-    <aside class="sidebar" aria-label="Primary navigation">
+    <header class="sidebar">
       <a class="brand" href="#overview" aria-label="Structurely Console home">
         <svg viewBox="0 0 28 28" aria-hidden="true"><path d="M4 8.5 14 3l10 5.5v11L14 25 4 19.5v-11Z"/><path d="m9 11 5-2.7 5 2.7v6l-5 2.7L9 17v-6Z"/></svg>
-        <span>structurely<small>private console</small></span>
+        <span>Structurely<small>Local console</small></span>
       </a>
       <nav class="nav-list" id="primary-navigation">
         <button class="nav-item is-active" data-view="overview" aria-current="page"><span class="nav-icon" aria-hidden="true">01</span>Overview</button>
         <button class="nav-item" data-view="search"><span class="nav-icon" aria-hidden="true">02</span>Search</button>
-        <button class="nav-item" data-view="research"><span class="nav-icon" aria-hidden="true">03</span>Research</button>
-        <button class="nav-item" data-view="impact"><span class="nav-icon" aria-hidden="true">04</span>Impact</button>
-        <button class="nav-item" data-view="trace"><span class="nav-icon" aria-hidden="true">05</span>Path trace</button>
-        <span class="nav-divider" aria-hidden="true"></span>
-        <button class="nav-item" data-view="workspaces"><span class="nav-icon" aria-hidden="true">06</span>Workspaces</button>
-        <button class="nav-item" data-view="sessions"><span class="nav-icon" aria-hidden="true">07</span>Sessions</button>
-        <button class="nav-item" data-view="recaps"><span class="nav-icon" aria-hidden="true">08</span>Recaps</button>
-        <button class="nav-item" data-view="memory"><span class="nav-icon" aria-hidden="true">09</span>Memory</button>
+        <button class="nav-item" data-section="analyze"><span class="nav-icon" aria-hidden="true">03</span>Analyze</button>
+        <button class="nav-item" data-section="knowledge"><span class="nav-icon" aria-hidden="true">04</span>Knowledge</button>
       </nav>
-      <div class="privacy-note">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7a5 5 0 0 1 10 0v3"/><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M12 14v3"/></svg>
-        <p><strong>Local by design</strong>Your code and index never leave this machine.</p>
-      </div>
-    </aside>
+    </header>
 
     <main id="workspace" class="workspace" tabindex="-1">
       <header class="topbar">
-        <button class="mobile-menu" id="mobile-menu" aria-label="Open navigation" aria-expanded="false" aria-controls="primary-navigation">
-          <span></span><span></span>
-        </button>
-        <div class="breadcrumb"><span>Console</span><i>/</i><strong id="view-name">Overview</strong></div>
+        <div class="navigation-context">
+          <div class="breadcrumb"><span>Console</span><i>/</i><strong id="view-name">Overview</strong></div>
+          <nav class="context-navigation" id="context-navigation" aria-label="Section navigation"></nav>
+        </div>
         <div class="topbar-actions">
           <button class="command-key" id="command-key" aria-label="Open quick search"><span>Quick search</span><kbd>⌘ K</kbd></button>
+          <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch color theme">Theme</button>
           <button class="connection-chip" id="connection-button" aria-haspopup="dialog">
             <span class="status-dot" aria-hidden="true"></span>
             <span id="connection-label">Not connected</span>
@@ -56,8 +49,8 @@
       <section class="view is-visible" data-view-panel="overview" aria-labelledby="overview-title">
         <div class="page-heading heading-grid">
           <div>
-            <p class="eyebrow">Local intelligence layer</p>
-            <h1 id="overview-title">Understand the system<br>before you change it.</h1>
+            <p class="eyebrow">Local intelligence</p>
+            <h1 id="overview-title">Understand the system before you change it.</h1>
           </div>
           <p class="heading-copy">Search code, follow evidence-backed relationships, and preserve decisions across sessions. Everything runs through your loopback bridge.</p>
         </div>
@@ -66,7 +59,7 @@
             <div class="section-label"><span>Index health</span><span id="health-time">Waiting for bridge</span></div>
             <div id="health-content" class="health-empty">
               <div class="signal-orbit" aria-hidden="true"><span></span><i></i></div>
-              <div><h2>Connect your local bridge</h2><p>Pair this dashboard to inspect the active repository without sending data to the cloud.</p></div>
+              <div class="onboarding"><h2>Connect your local bridge</h2><p>Repository data stays on this machine.</p><ol class="setup-steps"><li><span>1</span><div><strong>Start the bridge</strong><code>structurely dashboard serve --path .</code></div></li><li><span>2</span><div><strong>Pair this tab</strong><small>Enter the one-time code printed in your terminal.</small></div></li><li><span>3</span><div><strong>Explore the project</strong><small>Begin with Search or ask a repository question.</small></div></li></ol></div>
               <button class="button primary" data-open-connect>Connect bridge</button>
             </div>
           </section>
@@ -135,10 +128,27 @@
 
       <section class="view" data-view-panel="workspaces" aria-labelledby="workspaces-title">
         <div class="page-heading tool-heading"><div><p class="eyebrow">Team context</p><h1 id="workspaces-title">Workspaces</h1></div><button class="button secondary" data-refresh="workspaces">Refresh</button></div>
+        <form class="query-bar" data-state-form="workspace">
+          <div class="field grow"><label for="workspace-name">Workspace name</label><input id="workspace-name" name="name" maxlength="200" placeholder="Compiler reliability" required></div>
+          <button class="button primary" type="submit">Create workspace</button>
+        </form>
         <div class="result-region" data-collection="workspaces"></div>
       </section>
       <section class="view" data-view-panel="sessions" aria-labelledby="sessions-title">
         <div class="page-heading tool-heading"><div><p class="eyebrow">Durable history</p><h1 id="sessions-title">Sessions</h1></div><button class="button secondary" data-refresh="sessions">Refresh</button></div>
+        <div class="workflow-forms">
+          <form class="query-bar" data-state-form="session">
+            <div class="field"><label for="session-workspace">Workspace ID</label><input id="session-workspace" name="workspace" maxlength="256" placeholder="ws_…" required></div>
+            <div class="field grow"><label for="session-title">Session title</label><input id="session-title" name="title" maxlength="500" placeholder="Harden atomic publication" required></div>
+            <button class="button primary" type="submit">Start session</button>
+          </form>
+          <form class="query-bar query-grid event-form" data-state-form="event">
+            <div class="field"><label for="event-session">Session ID</label><input id="event-session" name="session" maxlength="256" placeholder="session_…" required></div>
+            <div class="field"><label for="event-kind">Event type</label><select id="event-kind" name="kind"><option value="decision">Decision</option><option value="note">Note</option><option value="outcome">Outcome</option><option value="risk">Risk</option></select></div>
+            <div class="field grow"><label for="event-body">What happened</label><input id="event-body" name="body" maxlength="64000" placeholder="Keep rename and fsync in one seam." required></div>
+            <button class="button primary" type="submit">Add event</button>
+          </form>
+        </div>
         <div class="result-region" data-collection="sessions"></div>
       </section>
       <section class="view" data-view-panel="recaps" aria-labelledby="recaps-title">
@@ -155,6 +165,12 @@
           <div class="field"><label for="memory-workspace">Workspace ID</label><input id="memory-workspace" name="workspace" maxlength="256" placeholder="workspace_…" required></div>
           <div class="field grow"><label for="memory-query">Recall knowledge</label><input id="memory-query" name="query" maxlength="1000" placeholder="What did we decide about atomic writes?" required></div>
           <button class="button primary" type="submit">Recall</button>
+        </form>
+        <form class="query-bar memory-write" data-state-form="memory">
+          <div class="field"><label for="remember-workspace">Workspace ID</label><input id="remember-workspace" name="workspace" maxlength="256" placeholder="ws_…" required></div>
+          <div class="field grow"><label for="remember-body">Knowledge to preserve</label><input id="remember-body" name="body" maxlength="64000" placeholder="Atomic publication lives in src/atomic_file.rs." required></div>
+          <div class="field"><label for="remember-tags">Tags <span>comma separated</span></label><input id="remember-tags" name="tags" maxlength="1000" placeholder="architecture, storage"></div>
+          <button class="button secondary" type="submit">Remember</button>
         </form>
         <div class="result-region" data-collection="memory"></div>
       </section>
