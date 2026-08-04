@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import http.server
 import os
+import platform
 import subprocess
 import tempfile
 import threading
@@ -36,17 +37,35 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def publish_release(binary: Path, release: Path) -> Path:
+PLATFORMS = {
+    "linux-x86_64": ("Linux", "x86_64"),
+    "macos-aarch64": ("Darwin", "arm64"),
+    "macos-x86_64": ("Darwin", "x86_64"),
+}
+
+
+def native_platform() -> str:
+    system = platform.system()
+    machine = platform.machine().lower()
+    normalized = "aarch64" if machine in {"arm64", "aarch64"} else "x86_64"
+    product = "macos" if system == "Darwin" else "linux" if system == "Linux" else ""
+    candidate = f"{product}-{normalized}"
+    if candidate not in PLATFORMS:
+        raise SystemExit(f"unsupported Unix installer test host: {system}/{machine}")
+    return candidate
+
+
+def publish_release(binary: Path, release: Path, target: str) -> Path:
     run(
         [
             "sh",
             "scripts/package-unix.sh",
             str(binary),
-            "linux-x86_64",
+            target,
             str(release),
         ]
     )
-    archive = release / "structurely-linux-x86_64.tar.gz"
+    archive = release / f"structurely-{target}.tar.gz"
     (release / "SHA256SUMS").write_text(
         f"{sha256(archive)}  {archive.name}\n", encoding="utf-8"
     )
@@ -56,6 +75,7 @@ def publish_release(binary: Path, release: Path) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", required=True, type=Path)
+    parser.add_argument("--platform", choices=sorted(PLATFORMS), default=native_platform())
     args = parser.parse_args()
     binary = args.binary.resolve()
     if not binary.is_file():
@@ -66,7 +86,7 @@ def main() -> None:
         release = root / "release"
         install = root / "install"
         release.mkdir()
-        archive = publish_release(binary, release)
+        archive = publish_release(binary, release, args.platform)
 
         handler = lambda *values: QuietHandler(  # noqa: E731
             *values, directory=str(release)
@@ -77,6 +97,8 @@ def main() -> None:
         try:
             environment = {
                 **os.environ,
+                "STRUCTURELY_OS": PLATFORMS[args.platform][0],
+                "STRUCTURELY_ARCH": PLATFORMS[args.platform][1],
                 "STRUCTURELY_RELEASE_BASE_URL": (
                     f"http://127.0.0.1:{server.server_port}"
                 ),
@@ -130,7 +152,7 @@ if [ "${STRUCTURELY_TEST_DEPLOY_FAIL:-}" = "1" ]; then exit 42; fi
                 encoding="utf-8",
             )
             fake.chmod(0o755)
-            publish_release(fake, release)
+            publish_release(fake, release, args.platform)
 
             fake_environment = {
                 **environment,

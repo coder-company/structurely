@@ -37,7 +37,9 @@ const ROTATE_FILE: &str = "dashboard.rotate";
 
 const INDEX_HTML: &[u8] = include_bytes!("../dashboard/index.html");
 const APP_JS: &[u8] = include_bytes!("../dashboard/app.js");
+const THEME_JS: &[u8] = include_bytes!("../dashboard/theme.js");
 const STYLES_CSS: &[u8] = include_bytes!("../dashboard/styles.css");
+const FAVICON_SVG: &[u8] = include_bytes!("../dashboard/favicon.svg");
 const CSP: &str = "default-src 'self'; connect-src http://127.0.0.1:* http://localhost:*; \
     img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; \
     base-uri 'none'; frame-ancestors 'none'; form-action 'none'";
@@ -186,7 +188,9 @@ pub fn export(destination: impl Into<PathBuf>) -> Result<DashboardExport> {
     let files = [
         ("index.html", INDEX_HTML),
         ("app.js", APP_JS),
+        ("theme.js", THEME_JS),
         ("styles.css", STYLES_CSS),
+        ("favicon.svg", FAVICON_SVG),
     ];
     for (name, contents) in files {
         fs::write(destination.join(name), contents)
@@ -219,7 +223,9 @@ pub fn export(destination: impl Into<PathBuf>) -> Result<DashboardExport> {
         files: vec![
             "index.html".to_owned(),
             "app.js".to_owned(),
+            "theme.js".to_owned(),
             "styles.css".to_owned(),
+            "favicon.svg".to_owned(),
             "_headers".to_owned(),
             "vercel.json".to_owned(),
         ],
@@ -467,6 +473,37 @@ struct RecapRequest {
     session: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct CreateWorkspaceRequest {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateSessionRequest {
+    workspace: String,
+    title: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionEventRequest {
+    session: String,
+    kind: String,
+    body: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompleteSessionRequest {
+    session: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RememberRequest {
+    workspace: String,
+    body: String,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
 fn default_search_limit() -> usize {
     20
 }
@@ -601,7 +638,13 @@ impl Bridge {
                 asset_response(INDEX_HTML, "text/html; charset=utf-8")
             }
             (&Method::Get, "/app.js") => asset_response(APP_JS, "text/javascript; charset=utf-8"),
+            (&Method::Get, "/theme.js") => {
+                asset_response(THEME_JS, "text/javascript; charset=utf-8")
+            }
             (&Method::Get, "/styles.css") => asset_response(STYLES_CSS, "text/css; charset=utf-8"),
+            (&Method::Get, "/favicon.svg") => {
+                asset_response(FAVICON_SVG, "image/svg+xml; charset=utf-8")
+            }
             (&Method::Get, "/api/v1/health") => json_response(
                 StatusCode(200),
                 &serde_json::json!({"ready": true}),
@@ -661,6 +704,14 @@ impl Bridge {
                 .state_response(origin.as_deref(), |state| {
                     Ok(serde_json::to_value(state.list_workspaces(100)?)?)
                 }),
+            (&Method::Post, "/api/v1/workspaces") => self.with_json::<CreateWorkspaceRequest, _>(
+                &mut request,
+                origin.as_deref(),
+                |body| {
+                    let state = StateStore::open(&self.project)?;
+                    Ok(serde_json::to_value(state.create_workspace(&body.name)?)?)
+                },
+            ),
             (&Method::Post, "/api/v1/sessions") => {
                 self.with_json::<SessionsRequest, _>(&mut request, origin.as_deref(), |body| {
                     let state = StateStore::open(&self.project)?;
@@ -669,6 +720,30 @@ impl Bridge {
                     )?)
                 })
             }
+            (&Method::Post, "/api/v1/sessions/create") => self
+                .with_json::<CreateSessionRequest, _>(&mut request, origin.as_deref(), |body| {
+                    let state = StateStore::open(&self.project)?;
+                    Ok(serde_json::to_value(
+                        state.create_session(&body.workspace, &body.title)?,
+                    )?)
+                }),
+            (&Method::Post, "/api/v1/sessions/events") => {
+                self.with_json::<SessionEventRequest, _>(&mut request, origin.as_deref(), |body| {
+                    let mut state = StateStore::open(&self.project)?;
+                    Ok(serde_json::to_value(state.append_event(
+                        &body.session,
+                        &body.kind,
+                        &body.body,
+                    )?)?)
+                })
+            }
+            (&Method::Post, "/api/v1/sessions/complete") => self
+                .with_json::<CompleteSessionRequest, _>(&mut request, origin.as_deref(), |body| {
+                    let state = StateStore::open(&self.project)?;
+                    Ok(serde_json::to_value(
+                        state.complete_session(&body.session)?,
+                    )?)
+                }),
             (&Method::Post, "/api/v1/memory") => {
                 self.with_json::<MemoryRequest, _>(&mut request, origin.as_deref(), |body| {
                     let state = StateStore::open(&self.project)?;
@@ -683,6 +758,16 @@ impl Bridge {
                 self.with_json::<RecapRequest, _>(&mut request, origin.as_deref(), |body| {
                     let state = StateStore::open(&self.project)?;
                     Ok(serde_json::to_value(state.generate_recap(&body.session)?)?)
+                })
+            }
+            (&Method::Post, "/api/v1/memories") => {
+                self.with_json::<RememberRequest, _>(&mut request, origin.as_deref(), |body| {
+                    let mut state = StateStore::open(&self.project)?;
+                    Ok(serde_json::to_value(state.remember(
+                        &body.workspace,
+                        &body.body,
+                        &body.tags,
+                    )?)?)
                 })
             }
             _ => json_error(StatusCode(404), "route not found", origin.as_deref()),

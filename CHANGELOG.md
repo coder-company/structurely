@@ -3,6 +3,25 @@
 All notable changes are documented here. Structurely follows semantic
 versioning after the initial `0.1.0` release.
 
+## 0.5.0 — 2026-08-04
+
+- Rebuild the private dashboard around the ArcXiv-derived editorial design
+  language with warm-paper light mode, teal-black dark mode, consistent corner
+  geometry, responsive top navigation, and WCAG-audited primary views.
+- Complete authenticated browser workflows for evidence-backed search,
+  research, impact analysis, path tracing, workspaces, sessions, recaps, and
+  durable memory without weakening the local-first security boundary.
+- Add first-run onboarding, explicit connection and authentication recovery,
+  source snippets, line references, confidence, and bounded-result uncertainty
+  disclosure.
+- Exercise a real paired browser-to-binary evidence-to-memory journey in CI and
+  formalize every dashboard read and write API contract in native tests.
+- Add a versioned twelve-query retrieval contract with rank-one expectations
+  and source-fixture leakage protection while retaining the pinned Perseus
+  retrieval advantage.
+- Verify the native installer round trip across Linux x86-64, macOS Apple
+  silicon, macOS Intel, and Windows x86-64 release targets.
+
 ## 0.4.0 — 2026-08-01
 
 - Add `structurely doctor`, a read-only readiness report for the project,

@@ -12,17 +12,22 @@ pairing codes, or bearer tokens.
 
 ## Interface system
 
-The console uses Structurely's dark product track: a deep-navy shell, one
-electric-indigo action color, thin editorial headings, tabular figures for
-index metrics, pill-shaped controls, and a warm cream privacy band. It uses
-only local font fallbacks and static assets, so rendering never requires a
-font, image, analytics, or component request to a third party.
+The console uses a restrained editorial system derived from the ArcXiv design
+language: warm paper in light mode, teal-black in dark mode, turquoise action
+geometry, compact typography, and consistent 4/8/12-pixel corner radii. The
+four primary destinations are Overview, Search, Analyze, and Knowledge; each
+result keeps evidence, confidence, source snippets, and line references close
+to the action that produced it. It uses only local font fallbacks and static
+assets, so rendering never requires a font, image, analytics, or component
+request to a third party.
 
 Desktop, tablet, and mobile layouts share the same information hierarchy.
-Mobile controls have a minimum 44-pixel target, navigation exposes its current
-page to assistive technology, and reduced-motion preferences disable the
-shell's reveal, shimmer, orbit, and status animations. Empty, loading, error,
-disconnected, and authenticated states are part of the browser contract.
+The console follows the browser's color preference by default and also offers
+explicit light and dark modes. Mobile controls have a minimum 44-pixel target,
+navigation exposes its current page to assistive technology, focus is restored
+after view changes, and reduced-motion preferences disable nonessential
+animation. Empty, loading, error, disconnected, authenticated, and first-run
+states are part of the browser contract.
 
 The static contract and real Chromium interaction suite can be run directly:
 
@@ -31,6 +36,8 @@ python3 scripts/test_dashboard_ui.py
 npm ci --ignore-scripts
 npx playwright install chromium
 npm run test:dashboard
+cargo build --locked
+npm run test:dashboard:live
 ```
 
 ## Start locally
@@ -94,8 +101,8 @@ To inspect the shell before deploying it:
 structurely dashboard export /empty/output/directory
 ```
 
-The export contains `index.html`, `app.js`, `styles.css`, `_headers`, and
-`vercel.json`.
+The export contains `index.html`, `app.js`, `styles.css`, `theme.js`,
+`favicon.svg`, `_headers`, and `vercel.json`.
 
 ## Browser local-network permission
 

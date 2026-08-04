@@ -11,19 +11,31 @@ cargo fmt --check
 cargo test --all-targets --locked
 cargo clippy --all-targets --all-features -- -D warnings
 cargo build --release --locked
+npm ci --ignore-scripts
+npx playwright install chromium
+npm run test:dashboard
+STRUCTURELY_TEST_BINARY=target/release/structurely npm run test:dashboard:live
 python3 -m unittest \
   scripts/test_compare_benchmarks.py \
   scripts/test_differential_mcp.py \
-  scripts/test_benchmark_perseus_acceptance.py
+  scripts/test_benchmark_perseus_acceptance.py \
+  scripts/test_search_quality.py
 python3 scripts/check_docs.py
+python3 scripts/search_quality.py \
+  --structurely target/release/structurely \
+  --project .
 ```
 
 CI runs on the `coder-company` self-hosted Linux runner pool. It verifies the
 semantic fixture, requires a source-only update to avoid graph
 rematerialization and become durable within one second, and enforces the pinned
-Perseus retrieval advantage. The pinned real-repository harness supplies
+Perseus retrieval advantage. A separate versioned twelve-query contract covers
+security, durable state, project resolution, distribution, framework behavior,
+content, operations, storage, and protocol retrieval without allowing its query
+manifest to become indexed evidence. The pinned real-repository harness supplies
 tighter per-project wall budgets. Release-tag builds separately exercise the
-supported native packaging targets.
+supported native packaging targets and run the native installer round trip on
+Linux, Intel macOS, Apple Silicon macOS, and Windows.
 
 ## Verify semantic quality
 

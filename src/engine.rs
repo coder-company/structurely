@@ -64,6 +64,8 @@ pub struct ProjectStatus {
     pub database: String,
     pub epoch: u64,
     pub indexed_files: usize,
+    pub symbols: usize,
+    pub relationships: usize,
     pub pending_files: usize,
     pub skipped_files: usize,
     pub storage: StorageMetrics,
@@ -491,6 +493,7 @@ impl Engine {
 
     pub fn status(&self) -> Result<ProjectStatus> {
         let indexed = self.store.indexed_file_hashes()?;
+        let (symbols, relationships) = self.store.graph_counts()?;
         let delta = ProjectInventory::new(&self.root)?.delta(&indexed, false)?;
         let pending = delta.changed.len() + delta.deleted.len();
         Ok(ProjectStatus {
@@ -498,6 +501,8 @@ impl Engine {
             database: self.store.path().display().to_string(),
             epoch: self.store.epoch()?,
             indexed_files: indexed.len(),
+            symbols,
+            relationships,
             pending_files: pending,
             skipped_files: delta.files_skipped,
             storage: self.store.storage_metrics()?,

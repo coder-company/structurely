@@ -33,7 +33,7 @@ verifies its SHA-256 checksum, smoke-tests it, and publishes it atomically for
 your user. Rerun the same command to upgrade or repair an installation; a
 failed download or checksum never replaces the working binary. You do not
 need Rust or administrator access. Set
-`STRUCTURELY_VERSION=v0.4.0` before the command to install a specific release.
+`STRUCTURELY_VERSION=v0.5.0` before the command to install a specific release.
 
 ## Set up your project
 

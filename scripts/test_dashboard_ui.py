@@ -94,20 +94,22 @@ def main() -> int:
     assert "prefers-reduced-motion" in css
     assert ":focus-visible" in css
     assert "overflow-x" in css
-    assert '<meta name="theme-color" content="#1c1e54">' in html
+    assert '<meta name="theme-color" content="#fbfaf4">' in html
     assert 'aria-current="page"' in html
-    assert 'aria-controls="primary-navigation"' in html
-    assert 'font-feature-settings: "ss01"' in css
-    assert 'font-feature-settings: "tnum"' in css
+    assert '<nav class="nav-list" id="primary-navigation">' in html
+    for destination in ["Overview", "Search", "Analyze", "Knowledge"]:
+        assert f">{destination}</button>" in html
     for token in [
-        "--bg: #11133b",
-        "--panel: #1c1e54",
-        "--accent: #665efd",
-        "--accent-press: #4434d4",
-        "--cream: #f5e9d4",
-        "border-radius: 9999px",
-        "font-weight: 300",
-        "@media (max-width: 1023px)",
+        "--bg: #fbfaf4",
+        "--surface: #fffefa",
+        "--accent: #20808d",
+        "--accent-press: #115b64",
+        ':root[data-theme="dark"]',
+        "--bg: #091717",
+        "border-radius: 4px",
+        "border-radius: 8px",
+        "border-radius: 12px",
+        "@media (max-width: 1100px)",
         "@media (max-width: 767px)",
         "min-height: 44px",
     ]:

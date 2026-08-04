@@ -104,6 +104,11 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked
 
+      - name: Verify live dashboard workflow in Chromium
+        run: |
+          STRUCTURELY_TEST_BINARY=target/release/structurely \
+            npm run test:dashboard:live
+
       - name: Enforce dashboard bridge budget
         run: |
           target/release/structurely init . >/dev/null
@@ -121,3 +126,10 @@ jobs:
             --structurely target/release/structurely \
             --project . \
             --output /tmp/structurely-perseus-acceptance.json
+
+      - name: Enforce broad search-quality contract
+        run: |
+          python3 scripts/search_quality.py \
+            --structurely target/release/structurely \
+            --project . \
+            --output /tmp/structurely-search-quality.json

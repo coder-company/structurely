@@ -56,6 +56,14 @@ jobs:
         shell: pwsh
         run: ./scripts/test_installer.ps1 -Binary "${{ matrix.binary }}"
 
+      - name: Verify Unix installer round-trip
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          python3 scripts/test_installer.py \
+            --binary "${{ matrix.binary }}" \
+            --platform "${{ matrix.name }}"
+
       - name: Package Unix archive
         if: runner.os != 'Windows'
         shell: bash
