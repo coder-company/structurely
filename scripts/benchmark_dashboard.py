@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import subprocess
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -57,13 +59,19 @@ def main() -> int:
     if not 5 <= arguments.iterations <= 1000:
         parser.error("--iterations must be between 5 and 1000")
 
+    dashboard_home = tempfile.TemporaryDirectory(prefix="structurely-dashboard-benchmark-")
+    environment = {**os.environ, "STRUCTURELY_HOME": dashboard_home.name}
+    subprocess.run(
+        [str(arguments.binary), "add", str(arguments.project)],
+        env=environment,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
     process = subprocess.Popen(
         [
             str(arguments.binary),
             "dashboard",
-            "serve",
-            "--path",
-            str(arguments.project),
+            "start",
             "--port",
             "0",
         ],
@@ -71,6 +79,7 @@ def main() -> int:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=environment,
     )
     try:
         assert process.stdout is not None
@@ -136,6 +145,7 @@ def main() -> int:
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait()
+        dashboard_home.cleanup()
     return 0
 
 
