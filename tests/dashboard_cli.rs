@@ -21,12 +21,20 @@ impl Drop for ChildGuard {
 #[test]
 fn dashboard_bridge_pairs_once_and_enforces_auth_and_origins() {
     let project = tempfile::tempdir().unwrap();
+    let second_project = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
     fs::write(
         project.path().join("main.rs"),
         "fn publish_atomically() {}\n",
     )
     .unwrap();
     Engine::init(project.path()).unwrap();
+    fs::write(
+        second_project.path().join("other.rs"),
+        "fn second_root() { second_leaf(); }\nfn second_leaf() {}\n",
+    )
+    .unwrap();
+    Engine::init(second_project.path()).unwrap();
     let state = StateStore::open(project.path()).unwrap();
     let workspace = state.create_workspace("Release work").unwrap();
     let session = state
@@ -46,17 +54,41 @@ fn dashboard_bridge_pairs_once_and_enforces_auth_and_origins() {
         .unwrap();
     drop(state);
 
+    let second = Command::new(env!("CARGO_BIN_EXE_structurely"))
+        .args(["add", second_project.path().to_str().unwrap()])
+        .env("STRUCTURELY_HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let second_id = serde_json::from_slice::<Value>(&second.stdout).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let add = Command::new(env!("CARGO_BIN_EXE_structurely"))
+        .args(["add", project.path().to_str().unwrap()])
+        .env("STRUCTURELY_HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(
+        add.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+
     let mut child = Command::new(env!("CARGO_BIN_EXE_structurely"))
         .args([
             "dashboard",
-            "serve",
-            "--path",
-            project.path().to_str().unwrap(),
+            "start",
             "--port",
             "0",
             "--allow-origin",
             "https://console.example",
         ])
+        .env("STRUCTURELY_HOME", home.path())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -118,6 +150,25 @@ fn dashboard_bridge_pairs_once_and_enforces_auth_and_origins() {
     );
 
     let authorization = format!("Bearer {token}");
+    let projects = request(
+        address,
+        "GET",
+        "/api/v1/projects",
+        &[
+            ("Origin", "https://console.example"),
+            ("Authorization", &authorization),
+        ],
+        "",
+    );
+    assert_eq!(projects.0, 200, "{}", projects.1);
+    assert_eq!(
+        serde_json::from_str::<Value>(&projects.1)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
     let status = request(
         address,
         "GET",
@@ -133,6 +184,22 @@ fn dashboard_bridge_pairs_once_and_enforces_auth_and_origins() {
     assert_eq!(status_json["indexed_files"], 1);
     assert_eq!(status_json["symbols"], 2);
     assert_eq!(status_json["relationships"], 1);
+    let second_status = request(
+        address,
+        "GET",
+        "/api/v1/status",
+        &[
+            ("Origin", "https://console.example"),
+            ("Authorization", &authorization),
+            ("X-Structurely-Project", &second_id),
+        ],
+        "",
+    );
+    assert_eq!(second_status.0, 200, "{}", second_status.1);
+    assert_ne!(
+        serde_json::from_str::<Value>(&second_status.1).unwrap()["symbols"],
+        status_json["symbols"]
+    );
 
     let post_json = |path: &str, body: &str| {
         let response = request(
@@ -250,22 +317,12 @@ fn dashboard_bridge_pairs_once_and_enforces_auth_and_origins() {
     );
     assert_eq!(request(address, "GET", "/", &[], "").0, 200);
 
-    let status_report = cli_json(&[
-        "dashboard",
-        "status",
-        "--path",
-        project.path().to_str().unwrap(),
-    ]);
+    let status_report = cli_json(home.path(), &["dashboard", "status"]);
     assert_eq!(status_report["running"], true);
     assert_eq!(status_report["generation"], 1);
     assert!(status_report["pairing_code"].is_null());
 
-    let rotated = cli_json(&[
-        "dashboard",
-        "rotate-token",
-        "--path",
-        project.path().to_str().unwrap(),
-    ]);
+    let rotated = cli_json(home.path(), &["dashboard", "rotate-token"]);
     assert_eq!(rotated["generation"], 2);
     let next_code = rotated["pairing_code"].as_str().unwrap();
     assert_eq!(
@@ -303,12 +360,7 @@ fn dashboard_bridge_pairs_once_and_enforces_auth_and_origins() {
         .0,
         429
     );
-    let reconnected = cli_json(&[
-        "dashboard",
-        "reconnect",
-        "--path",
-        project.path().to_str().unwrap(),
-    ]);
+    let reconnected = cli_json(home.path(), &["dashboard", "reconnect"]);
     assert_eq!(reconnected["generation"], 3);
     let next_code = reconnected["pairing_code"].as_str().unwrap();
     let repaired = request(
@@ -348,12 +400,7 @@ fn dashboard_bridge_pairs_once_and_enforces_auth_and_origins() {
         .0,
         429
     );
-    let stopped = cli_json(&[
-        "dashboard",
-        "stop",
-        "--path",
-        project.path().to_str().unwrap(),
-    ]);
+    let stopped = cli_json(home.path(), &["dashboard", "stop"]);
     assert_eq!(stopped["stopped"], true);
     drop(guard);
 }
@@ -440,6 +487,7 @@ fn dashboard_deploy_uses_provider_cli_and_verifies_static_shell() {
                 "private-console",
             ])
             .env("PATH", path)
+            .env("STRUCTURELY_HOME", directory.path().join("home"))
             .output()
             .unwrap();
         assert!(
@@ -451,6 +499,15 @@ fn dashboard_deploy_uses_provider_cli_and_verifies_static_shell() {
         assert_eq!(report["provider"], provider);
         assert_eq!(report["verified"], true);
         assert_eq!(report["project_data_uploaded"], false);
+        let origins: Value = serde_json::from_slice(
+            &fs::read(directory.path().join("home/dashboard-origins.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(origins
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|origin| origin == "https://private-console.example"));
         let arguments = fs::read_to_string(&log).unwrap();
         assert!(arguments.contains("private-console"));
         assert!(arguments.contains("structurely-dashboard-"));
@@ -475,9 +532,10 @@ fn wait_until_ready(address: &str) {
     panic!("dashboard bridge did not accept connections");
 }
 
-fn cli_json(arguments: &[&str]) -> Value {
+fn cli_json(home: &std::path::Path, arguments: &[&str]) -> Value {
     let output = Command::new(env!("CARGO_BIN_EXE_structurely"))
         .args(arguments)
+        .env("STRUCTURELY_HOME", home)
         .output()
         .unwrap();
     assert!(

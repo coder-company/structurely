@@ -200,7 +200,8 @@ case "$dashboard_setup" in
   local)
     say ""
     printf '  %sDashboard ready for local use%s\n' "$bold" "$reset"
-    say "    structurely dashboard serve"
+    say "    structurely add ."
+    say "    structurely dashboard start"
     ;;
   skip|"") ;;
   *) warn "Ignoring STRUCTURELY_DASHBOARD_SETUP=$dashboard_setup; expected cloudflare, vercel, local, skip, or prompt." ;;

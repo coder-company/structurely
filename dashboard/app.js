@@ -8,6 +8,7 @@ const servedBridgeUrl = location.protocol === "http:" &&
 const state = {
   bridgeUrl: localStorage.getItem("structurely.bridgeUrl") || servedBridgeUrl,
   token: sessionStorage.getItem("structurely.token") || "",
+  project: localStorage.getItem("structurely.project") || "",
   connected: false,
   view: "overview",
   theme: localStorage.getItem("structurely.theme") || "system"
@@ -17,6 +18,8 @@ const endpoints = {
   health: "/api/v1/health",
   pair: "/api/v1/pair",
   status: "/api/v1/status",
+  projects: "/api/v1/projects",
+  activateProject: "/api/v1/projects/activate",
   search: "/api/v1/search",
   research: "/api/v1/research",
   impact: "/api/v1/impact",
@@ -73,6 +76,7 @@ async function bridgeRequest(path, options = {}) {
   const headers = { "Accept": "application/json", ...(options.headers || {}) };
   if (options.body) headers["Content-Type"] = "application/json";
   if (state.token) headers.Authorization = `Bearer ${state.token}`;
+  if (state.project && !path.startsWith("/api/v1/projects")) headers["X-Structurely-Project"] = state.project;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
   try {
@@ -452,12 +456,48 @@ async function refreshStatus() {
   }
 }
 
+async function loadProjects() {
+  if (!state.token) return;
+  const projects = await bridgeRequest(endpoints.projects);
+  const available = projects.filter(project => project.available);
+  const selected = available.find(project => project.id === state.project)
+    || available.find(project => project.active)
+    || available[0];
+  state.project = selected?.id || "";
+  if (state.project) localStorage.setItem("structurely.project", state.project);
+  const select = $("#project-select");
+  select.disabled = available.length === 0;
+  select.innerHTML = available.length
+    ? available.map(item => `<option value="${escapeHtml(item.id)}"${item.id === state.project ? " selected" : ""}>${escapeHtml(item.name)}</option>`).join("")
+    : "<option>No available projects</option>";
+  $("#project-count").textContent = String(projects.length);
+  $("#project-list").innerHTML = projects.length
+    ? projects.map(item => `<button type="button" class="project-row${item.id === state.project ? " is-active" : ""}" data-project-id="${escapeHtml(item.id)}"${item.available ? "" : " disabled"}><span><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.path)}</small><small>${item.available ? `${escapeHtml(item.health?.indexed_files ?? 0)} files · ${escapeHtml(item.health?.symbols ?? 0)} symbols` : escapeHtml(item.error || "Unavailable")}</small></span><i>${item.available ? (item.id === state.project ? "Active" : "Open") : "Unavailable"}</i></button>`).join("")
+    : '<div class="empty-compact"><p>No projects registered</p></div>';
+}
+
+async function selectProject(project) {
+  await bridgeRequest(endpoints.activateProject, { method: "POST", body: JSON.stringify({ project }) });
+  state.project = project;
+  localStorage.setItem("structurely.project", project);
+  await loadProjects();
+  await refreshStatus();
+  announce("Project switched");
+}
+
+async function addProject() {
+  const path = window.prompt("Local path to an initialized Structurely project");
+  if (!path?.trim()) return;
+  const project = await bridgeRequest(endpoints.projects, { method: "POST", body: JSON.stringify({ path: path.trim() }) });
+  await selectProject(project.id);
+}
+
 function connectionMessage(error) {
-  if (error?.status === 401) return ["Pairing expired", "The bridge no longer accepts this tab. Generate a new one-time code with structurely dashboard reconnect --path ."];
-  if (error?.status === 409) return ["Pairing code already used", "Generate a fresh code with structurely dashboard reconnect --path ."];
-  if (error?.status === 410) return ["Pairing code expired", "Generate a fresh code with structurely dashboard reconnect --path ."];
-  if (error?.status === 429) return ["Bridge is protecting itself", "Wait a minute or run structurely dashboard reconnect --path . to rotate access."];
-  return ["Local bridge unavailable", `Start or restart it with structurely dashboard serve --path . The console will reconnect to ${state.bridgeUrl}.`];
+  if (error?.status === 401) return ["Pairing expired", "Run structurely dashboard reconnect for a new code."];
+  if (error?.status === 409) return ["Pairing code already used", "Run structurely dashboard reconnect for a new code."];
+  if (error?.status === 410) return ["Pairing code expired", "Run structurely dashboard reconnect for a new code."];
+  if (error?.status === 429) return ["Request limit reached", "Wait a minute or reconnect to rotate access."];
+  return ["Bridge unavailable", `Run structurely dashboard start. This console connects to ${state.bridgeUrl}.`];
 }
 
 function renderConnectionIssue(error) {
@@ -506,6 +546,7 @@ async function pair(event) {
     form.pairCode.value = "";
     $("#connect-dialog").close();
     announce("Local bridge connected");
+    await loadProjects();
     await refreshStatus();
   } catch (error) {
     const [title, recovery] = connectionMessage(error);
@@ -549,6 +590,8 @@ function init() {
   $$("[data-view-link]").forEach(button => button.addEventListener("click", () => showView(button.dataset.viewLink)));
   $("#connection-button").addEventListener("click", openConnection);
   $("#connect-form").addEventListener("submit", pair);
+  $("#project-select").addEventListener("change", event => selectProject(event.target.value));
+  $("#add-project-button").addEventListener("click", () => state.token ? addProject() : openConnection());
   $$("[data-tool-form]").forEach(form => form.addEventListener("submit", event => {
     event.preventDefault();
     if (!state.token) return openConnection();
@@ -567,6 +610,11 @@ function init() {
     const completion = event.target.closest("[data-complete-session]");
     if (completion) {
       completeSession(completion.dataset.completeSession);
+      return;
+    }
+    const project = event.target.closest("[data-project-id]");
+    if (project) {
+      selectProject(project.dataset.projectId);
       return;
     }
     const context = event.target.closest("[data-context-view]");
@@ -614,7 +662,7 @@ function init() {
     openConnection();
     $("#pair-code").value = pairingCode;
   } else if (state.token) {
-    refreshStatus();
+    loadProjects().then(refreshStatus).catch(error => renderConnectionIssue(error));
   }
   renderContextNavigation(state.view);
 }

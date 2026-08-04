@@ -4,7 +4,8 @@
 //! static UI assets; every repository query is evaluated by this process.
 
 use crate::{
-    atomic_file, engine::PROJECT_DIR, state::StateStore, workflow::WorkflowService, Engine,
+    atomic_file, dashboard_registry::DashboardRegistry, state::StateStore,
+    workflow::WorkflowService, Engine,
 };
 use anyhow::{Context, Result};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -13,7 +14,7 @@ use std::{
     fs,
     io::{IsTerminal, Read, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -46,18 +47,22 @@ const CSP: &str = "default-src 'self'; connect-src http://127.0.0.1:* http://loc
 
 #[derive(Debug, Clone)]
 pub struct BridgeOptions {
-    pub project: PathBuf,
     pub port: u16,
     pub allowed_origins: Vec<String>,
 }
 
 impl BridgeOptions {
-    pub fn new(project: impl Into<PathBuf>) -> Self {
+    pub fn new() -> Self {
         Self {
-            project: project.into(),
             port: DEFAULT_PORT,
             allowed_origins: Vec::new(),
         }
+    }
+}
+
+impl Default for BridgeOptions {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -65,7 +70,8 @@ impl BridgeOptions {
 pub struct BridgeReady {
     pub address: SocketAddr,
     pub pairing_code: String,
-    pub project: String,
+    pub projects: usize,
+    pub active_project: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,7 +79,8 @@ pub struct DashboardStatus {
     pub running: bool,
     pub pid: u32,
     pub address: SocketAddr,
-    pub project: String,
+    pub projects: usize,
+    pub active_project: Option<String>,
     pub allowed_origins: Vec<String>,
     pub pairing_code: Option<String>,
     pub pairing_expires_unix_ms: Option<u128>,
@@ -87,7 +94,7 @@ pub struct DashboardStop {
     pub removed_state: bool,
 }
 
-pub fn offer_after_setup(project: &std::path::Path) {
+pub fn offer_after_setup() {
     let selection = match std::env::var("STRUCTURELY_DASHBOARD_SETUP") {
         Ok(value) if value != "prompt" => Some(value),
         Ok(_) => prompt_dashboard_selection(),
@@ -102,13 +109,10 @@ pub fn offer_after_setup(project: &std::path::Path) {
     match selection.trim().to_ascii_lowercase().as_str() {
         "" | "skip" | "4" => {}
         "local" | "local-only" | "3" => {
-            eprintln!(
-                "\nPrivate dashboard (local only):\n  structurely dashboard serve --path \"{}\"\n",
-                project.display()
-            );
+            eprintln!("\nUniversal dashboard (local only):\n  structurely dashboard start\n");
         }
-        "vercel" | "1" => offer_deployment("vercel", project),
-        "cloudflare" | "2" => offer_deployment("cloudflare", project),
+        "vercel" | "1" => offer_deployment("vercel"),
+        "cloudflare" | "2" => offer_deployment("cloudflare"),
         other => eprintln!(
             "Dashboard setup choice {other:?} is invalid; use vercel, cloudflare, local, or skip."
         ),
@@ -132,13 +136,10 @@ fn prompt_dashboard_selection() -> Option<String> {
     }
 }
 
-fn offer_deployment(provider: &str, project: &std::path::Path) {
+fn offer_deployment(provider: &str) {
     match deploy(provider, None) {
         Ok(report) => eprintln!(
-            "\nDashboard deployed: {}\nStart the private bridge:\n  structurely dashboard serve \
-             --path \"{}\" --allow-origin \"{}\"\n",
-            report.url,
-            project.display(),
+            "\nDashboard deployed: {}\nStart the universal bridge:\n  structurely dashboard start\n",
             report.url
         ),
         Err(error) => eprintln!(
@@ -303,6 +304,8 @@ pub fn deploy(provider: &str, project_name: Option<&str>) -> Result<DashboardDep
         verified,
         "dashboard deployed but did not pass HTTP verification: {url}"
     );
+    validate_origins(std::slice::from_ref(&url))?;
+    DashboardRegistry::open_default()?.remember_dashboard_origin(&url)?;
     drop(cleanup);
     Ok(DashboardDeployment {
         provider,
@@ -313,12 +316,9 @@ pub fn deploy(provider: &str, project_name: Option<&str>) -> Result<DashboardDep
     })
 }
 
-pub fn status(project: impl Into<PathBuf>) -> Result<Option<DashboardStatus>> {
-    let project = project.into();
-    let project = project
-        .canonicalize()
-        .with_context(|| format!("resolve dashboard project {}", project.display()))?;
-    let path = project.join(PROJECT_DIR).join(STATE_FILE);
+pub fn status() -> Result<Option<DashboardStatus>> {
+    let registry = DashboardRegistry::open_default()?;
+    let path = registry.control_path(STATE_FILE);
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -330,15 +330,15 @@ pub fn status(project: impl Into<PathBuf>) -> Result<Option<DashboardStatus>> {
     Ok(Some(state))
 }
 
-pub fn rotate(project: impl Into<PathBuf>) -> Result<DashboardStatus> {
-    let project = project.into().canonicalize()?;
-    let current = status(&project)?.context("dashboard bridge is not running")?;
+pub fn rotate() -> Result<DashboardStatus> {
+    let registry = DashboardRegistry::open_default()?;
+    let current = status()?.context("dashboard bridge is not running")?;
     anyhow::ensure!(current.running, "dashboard bridge is not running");
-    let rotate = project.join(PROJECT_DIR).join(ROTATE_FILE);
+    let rotate = registry.control_path(ROTATE_FILE);
     fs::write(&rotate, b"rotate\n").context("request dashboard token rotation")?;
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if let Some(next) = status(&project)? {
+        if let Some(next) = status()? {
             if next.running && next.generation > current.generation {
                 return Ok(next);
             }
@@ -351,26 +351,26 @@ pub fn rotate(project: impl Into<PathBuf>) -> Result<DashboardStatus> {
     }
 }
 
-pub fn stop(project: impl Into<PathBuf>) -> Result<DashboardStop> {
-    let project = project.into().canonicalize()?;
-    let Some(current) = status(&project)? else {
+pub fn stop() -> Result<DashboardStop> {
+    let registry = DashboardRegistry::open_default()?;
+    let Some(current) = status()? else {
         return Ok(DashboardStop {
             stopped: false,
             removed_state: false,
         });
     };
     if !current.running {
-        let removed_state = remove_if_present(&project.join(PROJECT_DIR).join(STATE_FILE)).is_ok();
+        let removed_state = remove_if_present(&registry.control_path(STATE_FILE)).is_ok();
         return Ok(DashboardStop {
             stopped: false,
             removed_state,
         });
     }
-    fs::write(project.join(PROJECT_DIR).join(STOP_FILE), b"stop\n")
+    fs::write(registry.control_path(STOP_FILE), b"stop\n")
         .context("request dashboard bridge stop")?;
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if status(&project)?.is_none() {
+        if status()?.is_none() {
             return Ok(DashboardStop {
                 stopped: true,
                 removed_state: true,
@@ -384,11 +384,11 @@ pub fn stop(project: impl Into<PathBuf>) -> Result<DashboardStop> {
     }
 }
 
-pub fn remove(project: impl Into<PathBuf>) -> Result<DashboardStop> {
-    let project = project.into().canonicalize()?;
-    let mut report = stop(&project)?;
+pub fn remove() -> Result<DashboardStop> {
+    let registry = DashboardRegistry::open_default()?;
+    let mut report = stop()?;
     for name in [STATE_FILE, STOP_FILE, ROTATE_FILE] {
-        remove_if_present(&project.join(PROJECT_DIR).join(name))?;
+        remove_if_present(&registry.control_path(name))?;
     }
     report.removed_state = true;
     Ok(report)
@@ -403,7 +403,7 @@ impl Drop for TemporaryDirectory {
 }
 
 struct Bridge {
-    project: PathBuf,
+    registry: DashboardRegistry,
     pairing_code: Mutex<Option<String>>,
     token: Mutex<String>,
     allowed_origins: Vec<String>,
@@ -419,6 +419,16 @@ struct Bridge {
 #[derive(Debug, Deserialize)]
 struct PairRequest {
     code: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RegisterProjectRequest {
+    path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SelectProjectRequest {
+    project: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -525,13 +535,16 @@ fn default_trace_depth() -> usize {
 }
 
 pub fn serve(options: BridgeOptions) -> Result<BridgeReady> {
-    let project = options
-        .project
-        .canonicalize()
-        .with_context(|| format!("resolve dashboard project {}", options.project.display()))?;
-    // Fail before opening a listener if the project is not initialized.
-    Engine::open_read_only(&project)?;
-    let mut allowed_origins = validate_origins(&options.allowed_origins)?;
+    let registry = DashboardRegistry::open_default()?;
+    let projects = registry.list()?;
+    anyhow::ensure!(
+        projects.iter().any(|project| project.available),
+        "dashboard has no available projects; run structurely add <path>"
+    );
+    let active_project = registry.resolve(None)?.id;
+    let mut configured_origins = registry.dashboard_origins()?;
+    configured_origins.extend(options.allowed_origins);
+    let mut allowed_origins = validate_origins(&configured_origins)?;
     let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), options.port);
     let server = Server::http(address)
         .map_err(|error| anyhow::anyhow!("bind dashboard bridge at {address}: {error}"))?;
@@ -549,10 +562,9 @@ pub fn serve(options: BridgeOptions) -> Result<BridgeReady> {
     allowed_origins.dedup();
 
     let pairing_code = random_decimal_code()?;
-    let dashboard_directory = project.join(PROJECT_DIR);
-    let state_path = dashboard_directory.join(STATE_FILE);
-    let stop_path = dashboard_directory.join(STOP_FILE);
-    let rotate_path = dashboard_directory.join(ROTATE_FILE);
+    let state_path = registry.control_path(STATE_FILE);
+    let stop_path = registry.control_path(STOP_FILE);
+    let rotate_path = registry.control_path(ROTATE_FILE);
     let _ = fs::remove_file(&stop_path);
     let _ = fs::remove_file(&rotate_path);
     let started_unix_ms = SystemTime::now()
@@ -560,7 +572,7 @@ pub fn serve(options: BridgeOptions) -> Result<BridgeReady> {
         .unwrap_or_default()
         .as_millis();
     let bridge = Bridge {
-        project: project.clone(),
+        registry,
         pairing_code: Mutex::new(Some(pairing_code.clone())),
         token: Mutex::new(random_token()?),
         allowed_origins: allowed_origins.clone(),
@@ -576,7 +588,8 @@ pub fn serve(options: BridgeOptions) -> Result<BridgeReady> {
     let ready = BridgeReady {
         address,
         pairing_code,
-        project: project.display().to_string(),
+        projects: projects.len(),
+        active_project: Some(active_project),
     };
     println!("{}", serde_json::to_string(&ready)?);
     std::io::stdout().flush()?;
@@ -659,38 +672,67 @@ impl Bridge {
                 "dashboard request rate exceeded",
                 origin.as_deref(),
             ),
-            (&Method::Get, "/api/v1/status") => self.engine_response(origin.as_deref(), |engine| {
-                serde_json::to_value(engine.status()?).map_err(Into::into)
-            }),
-            (&Method::Post, "/api/v1/search") => {
-                self.with_json::<SearchRequest, _>(&mut request, origin.as_deref(), |body| {
-                    let engine = Engine::open_read_only(&self.project)?;
+            (&Method::Get, "/api/v1/projects") => match self.registry.list() {
+                Ok(projects) => json_response(StatusCode(200), &projects, origin.as_deref()),
+                Err(error) => json_error(StatusCode(500), &error.to_string(), origin.as_deref()),
+            },
+            (&Method::Post, "/api/v1/projects") => self.with_json::<RegisterProjectRequest, _>(
+                &mut request,
+                origin.as_deref(),
+                |body| Ok(serde_json::to_value(self.registry.register(body.path)?)?),
+            ),
+            (&Method::Post, "/api/v1/projects/activate") => self
+                .with_json::<SelectProjectRequest, _>(&mut request, origin.as_deref(), |body| {
+                    Ok(serde_json::to_value(
+                        self.registry.activate(&body.project)?,
+                    )?)
+                }),
+            (&Method::Post, "/api/v1/projects/remove") => self
+                .with_json::<SelectProjectRequest, _>(&mut request, origin.as_deref(), |body| {
+                    Ok(serde_json::to_value(self.registry.remove(&body.project)?)?)
+                }),
+            (&Method::Get, "/api/v1/status") => {
+                self.engine_response(&request, origin.as_deref(), |engine| {
+                    serde_json::to_value(engine.status()?).map_err(Into::into)
+                })
+            }
+            (&Method::Post, "/api/v1/search") => self.with_project_json::<SearchRequest, _>(
+                &mut request,
+                origin.as_deref(),
+                |project, body| {
+                    let engine = Engine::open_read_only(project)?;
                     Ok(serde_json::to_value(
                         engine.search(&body.query, body.limit)?,
                     )?)
-                })
-            }
-            (&Method::Post, "/api/v1/research") => {
-                self.with_json::<ResearchRequest, _>(&mut request, origin.as_deref(), |body| {
-                    let engine = Engine::open_read_only(&self.project)?;
+                },
+            ),
+            (&Method::Post, "/api/v1/research") => self.with_project_json::<ResearchRequest, _>(
+                &mut request,
+                origin.as_deref(),
+                |project, body| {
+                    let engine = Engine::open_read_only(project)?;
                     Ok(serde_json::to_value(
                         WorkflowService::new(&engine).research(&body.query, body.max_files)?,
                     )?)
-                })
-            }
-            (&Method::Post, "/api/v1/impact") => {
-                self.with_json::<ImpactRequest, _>(&mut request, origin.as_deref(), |body| {
-                    let engine = Engine::open_read_only(&self.project)?;
+                },
+            ),
+            (&Method::Post, "/api/v1/impact") => self.with_project_json::<ImpactRequest, _>(
+                &mut request,
+                origin.as_deref(),
+                |project, body| {
+                    let engine = Engine::open_read_only(project)?;
                     Ok(serde_json::to_value(engine.impact_named(
                         &body.symbol,
                         body.file.as_deref(),
                         body.depth,
                     )?)?)
-                })
-            }
-            (&Method::Post, "/api/v1/trace") => {
-                self.with_json::<TraceRequest, _>(&mut request, origin.as_deref(), |body| {
-                    let engine = Engine::open_read_only(&self.project)?;
+                },
+            ),
+            (&Method::Post, "/api/v1/trace") => self.with_project_json::<TraceRequest, _>(
+                &mut request,
+                origin.as_deref(),
+                |project, body| {
+                    let engine = Engine::open_read_only(project)?;
                     Ok(serde_json::to_value(engine.trace_path_named(
                         &body.source,
                         body.source_file.as_deref(),
@@ -698,78 +740,99 @@ impl Bridge {
                         body.target_file.as_deref(),
                         body.depth,
                     )?)?)
-                })
-            }
-            (&Method::Get, "/api/v1/workspaces") => self
-                .state_response(origin.as_deref(), |state| {
-                    Ok(serde_json::to_value(state.list_workspaces(100)?)?)
-                }),
-            (&Method::Post, "/api/v1/workspaces") => self.with_json::<CreateWorkspaceRequest, _>(
-                &mut request,
-                origin.as_deref(),
-                |body| {
-                    let state = StateStore::open(&self.project)?;
-                    Ok(serde_json::to_value(state.create_workspace(&body.name)?)?)
                 },
             ),
-            (&Method::Post, "/api/v1/sessions") => {
-                self.with_json::<SessionsRequest, _>(&mut request, origin.as_deref(), |body| {
-                    let state = StateStore::open(&self.project)?;
+            (&Method::Get, "/api/v1/workspaces") => {
+                self.state_response(&request, origin.as_deref(), |state| {
+                    Ok(serde_json::to_value(state.list_workspaces(100)?)?)
+                })
+            }
+            (&Method::Post, "/api/v1/workspaces") => self
+                .with_project_json::<CreateWorkspaceRequest, _>(
+                    &mut request,
+                    origin.as_deref(),
+                    |project, body| {
+                        let state = StateStore::open(project)?;
+                        Ok(serde_json::to_value(state.create_workspace(&body.name)?)?)
+                    },
+                ),
+            (&Method::Post, "/api/v1/sessions") => self.with_project_json::<SessionsRequest, _>(
+                &mut request,
+                origin.as_deref(),
+                |project, body| {
+                    let state = StateStore::open(project)?;
                     Ok(serde_json::to_value(
                         state.list_sessions(body.workspace.as_deref(), body.limit)?,
                     )?)
-                })
-            }
+                },
+            ),
             (&Method::Post, "/api/v1/sessions/create") => self
-                .with_json::<CreateSessionRequest, _>(&mut request, origin.as_deref(), |body| {
-                    let state = StateStore::open(&self.project)?;
-                    Ok(serde_json::to_value(
-                        state.create_session(&body.workspace, &body.title)?,
-                    )?)
-                }),
-            (&Method::Post, "/api/v1/sessions/events") => {
-                self.with_json::<SessionEventRequest, _>(&mut request, origin.as_deref(), |body| {
-                    let mut state = StateStore::open(&self.project)?;
-                    Ok(serde_json::to_value(state.append_event(
-                        &body.session,
-                        &body.kind,
-                        &body.body,
-                    )?)?)
-                })
-            }
+                .with_project_json::<CreateSessionRequest, _>(
+                    &mut request,
+                    origin.as_deref(),
+                    |project, body| {
+                        let state = StateStore::open(project)?;
+                        Ok(serde_json::to_value(
+                            state.create_session(&body.workspace, &body.title)?,
+                        )?)
+                    },
+                ),
+            (&Method::Post, "/api/v1/sessions/events") => self
+                .with_project_json::<SessionEventRequest, _>(
+                    &mut request,
+                    origin.as_deref(),
+                    |project, body| {
+                        let mut state = StateStore::open(project)?;
+                        Ok(serde_json::to_value(state.append_event(
+                            &body.session,
+                            &body.kind,
+                            &body.body,
+                        )?)?)
+                    },
+                ),
             (&Method::Post, "/api/v1/sessions/complete") => self
-                .with_json::<CompleteSessionRequest, _>(&mut request, origin.as_deref(), |body| {
-                    let state = StateStore::open(&self.project)?;
-                    Ok(serde_json::to_value(
-                        state.complete_session(&body.session)?,
-                    )?)
-                }),
-            (&Method::Post, "/api/v1/memory") => {
-                self.with_json::<MemoryRequest, _>(&mut request, origin.as_deref(), |body| {
-                    let state = StateStore::open(&self.project)?;
+                .with_project_json::<CompleteSessionRequest, _>(
+                    &mut request,
+                    origin.as_deref(),
+                    |project, body| {
+                        let state = StateStore::open(project)?;
+                        Ok(serde_json::to_value(
+                            state.complete_session(&body.session)?,
+                        )?)
+                    },
+                ),
+            (&Method::Post, "/api/v1/memory") => self.with_project_json::<MemoryRequest, _>(
+                &mut request,
+                origin.as_deref(),
+                |project, body| {
+                    let state = StateStore::open(project)?;
                     Ok(serde_json::to_value(state.search_memories(
                         &body.workspace,
                         &body.query,
                         body.limit,
                     )?)?)
-                })
-            }
-            (&Method::Post, "/api/v1/recap") => {
-                self.with_json::<RecapRequest, _>(&mut request, origin.as_deref(), |body| {
-                    let state = StateStore::open(&self.project)?;
+                },
+            ),
+            (&Method::Post, "/api/v1/recap") => self.with_project_json::<RecapRequest, _>(
+                &mut request,
+                origin.as_deref(),
+                |project, body| {
+                    let state = StateStore::open(project)?;
                     Ok(serde_json::to_value(state.generate_recap(&body.session)?)?)
-                })
-            }
-            (&Method::Post, "/api/v1/memories") => {
-                self.with_json::<RememberRequest, _>(&mut request, origin.as_deref(), |body| {
-                    let mut state = StateStore::open(&self.project)?;
+                },
+            ),
+            (&Method::Post, "/api/v1/memories") => self.with_project_json::<RememberRequest, _>(
+                &mut request,
+                origin.as_deref(),
+                |project, body| {
+                    let mut state = StateStore::open(project)?;
                     Ok(serde_json::to_value(state.remember(
                         &body.workspace,
                         &body.body,
                         &body.tags,
                     )?)?)
-                })
-            }
+                },
+            ),
             _ => json_error(StatusCode(404), "route not found", origin.as_deref()),
         };
         let _ = request.respond(response);
@@ -892,21 +955,66 @@ impl Bridge {
         }
     }
 
-    fn engine_response<F>(&self, origin: Option<&str>, operation: F) -> BridgeResponse
+    fn with_project_json<T, F>(
+        &self,
+        request: &mut Request,
+        origin: Option<&str>,
+        operation: F,
+    ) -> BridgeResponse
+    where
+        T: DeserializeOwned,
+        F: FnOnce(&Path, T) -> Result<serde_json::Value>,
+    {
+        let project = match self.project_for(request) {
+            Ok(project) => project,
+            Err(error) => return json_error(StatusCode(400), &error.to_string(), origin),
+        };
+        self.with_json::<T, _>(request, origin, |body| {
+            operation(Path::new(&project.path), body)
+        })
+    }
+
+    fn project_for(
+        &self,
+        request: &Request,
+    ) -> Result<crate::dashboard_registry::RegisteredProject> {
+        self.registry
+            .resolve(header(request, "X-Structurely-Project"))
+    }
+
+    fn engine_response<F>(
+        &self,
+        request: &Request,
+        origin: Option<&str>,
+        operation: F,
+    ) -> BridgeResponse
     where
         F: FnOnce(&Engine) -> Result<serde_json::Value>,
     {
-        match Engine::open_read_only(&self.project).and_then(|engine| operation(&engine)) {
+        let project = match self.project_for(request) {
+            Ok(project) => project,
+            Err(error) => return json_error(StatusCode(400), &error.to_string(), origin),
+        };
+        match Engine::open_read_only(&project.path).and_then(|engine| operation(&engine)) {
             Ok(value) => json_response(StatusCode(200), &value, origin),
             Err(error) => json_error(StatusCode(500), &error.to_string(), origin),
         }
     }
 
-    fn state_response<F>(&self, origin: Option<&str>, operation: F) -> BridgeResponse
+    fn state_response<F>(
+        &self,
+        request: &Request,
+        origin: Option<&str>,
+        operation: F,
+    ) -> BridgeResponse
     where
         F: FnOnce(&StateStore) -> Result<serde_json::Value>,
     {
-        match StateStore::open(&self.project).and_then(|state| operation(&state)) {
+        let project = match self.project_for(request) {
+            Ok(project) => project,
+            Err(error) => return json_error(StatusCode(400), &error.to_string(), origin),
+        };
+        match StateStore::open(&project.path).and_then(|state| operation(&state)) {
             Ok(value) => json_response(StatusCode(200), &value, origin),
             Err(error) => json_error(StatusCode(500), &error.to_string(), origin),
         }
@@ -960,7 +1068,8 @@ impl Bridge {
             running: true,
             pid: std::process::id(),
             address: self.address,
-            project: self.project.display().to_string(),
+            projects: self.registry.list()?.len(),
+            active_project: self.registry.resolve(None).ok().map(|project| project.id),
             allowed_origins: self.allowed_origins.clone(),
             pairing_code,
             pairing_expires_unix_ms,
@@ -1051,7 +1160,7 @@ fn empty_response(
     let mut response = json_response(status, &serde_json::json!({}), origin);
     response.add_header(header_value(
         "Access-Control-Allow-Headers",
-        "Authorization, Content-Type",
+        "Authorization, Content-Type, X-Structurely-Project",
     ));
     response.add_header(header_value(
         "Access-Control-Allow-Methods",

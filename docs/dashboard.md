@@ -42,10 +42,12 @@ npm run test:dashboard:live
 
 ## Start locally
 
-Initialize the project, then start the foreground bridge:
+Register initialized projects, then start the one foreground bridge:
 
 ```bash
-structurely dashboard serve --path /absolute/project
+structurely add /absolute/project
+structurely add /absolute/other-project
+structurely dashboard start
 ```
 
 Open `http://127.0.0.1:4765`, choose **Connect bridge**, and enter the
@@ -57,7 +59,7 @@ tab discards it. Only the loopback URL is kept in `localStorage`.
 Use port `0` to select an available port:
 
 ```bash
-structurely dashboard serve --path /absolute/project --port 0
+structurely dashboard start --port 0
 ```
 
 The command prints the selected address and pairing code as JSON.
@@ -83,12 +85,11 @@ reported HTTPS URL, and removes the temporary directory. The JSON report sets
 `project_data_uploaded` to `false`; no Structurely project data is included in
 the deployment.
 
-Allow the exact deployed origin when starting the bridge:
+The verified deployment origin is saved automatically. Future `dashboard start`
+commands allow it without another flag. To allow an additional origin manually:
 
 ```bash
-structurely dashboard serve \
-  --path /absolute/project \
-  --allow-origin https://your-dashboard.example
+structurely dashboard start --allow-origin https://your-dashboard.example
 ```
 
 Origins must be exact HTTPS origins without paths, credentials, queries, or
@@ -116,7 +117,7 @@ for current browser behavior.
 
 If the browser blocks the request before showing a prompt:
 
-1. confirm the bridge with `structurely dashboard status --path <project>`;
+1. confirm the bridge with `structurely dashboard status`;
 2. confirm the dashboard's exact origin is present in `allowed_origins`;
 3. open the browser's site permissions and allow local-network access;
 4. use `structurely dashboard reconnect` to issue a fresh pairing code.
@@ -124,11 +125,14 @@ If the browser blocks the request before showing a prompt:
 ## Pairing lifecycle
 
 ```bash
-structurely dashboard status --path /absolute/project
-structurely dashboard rotate-token --path /absolute/project
-structurely dashboard reconnect --path /absolute/project
-structurely dashboard stop --path /absolute/project
-structurely dashboard remove --path /absolute/project
+structurely projects list
+structurely projects activate <project-id>
+structurely projects remove <project-id>
+structurely dashboard status
+structurely dashboard rotate-token
+structurely dashboard reconnect
+structurely dashboard stop
+structurely dashboard remove
 ```
 
 `status` probes the recorded loopback address and shows the unused pairing
@@ -181,7 +185,7 @@ or a successful project setup. The message includes the exact command to retry.
   Do not include a trailing slash or path.
 
 `pairing code was already used`
-: Run `structurely dashboard reconnect --path <project>` and pair again.
+: Run `structurely dashboard reconnect` and pair again.
 
 `pairing is required`
 : Pair the tab again. Tokens intentionally do not survive a closed tab or token

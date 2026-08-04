@@ -70,7 +70,7 @@ test("shows actionable connection recovery", async ({ page }) => {
   await expect(page.locator(".setup-steps li")).toHaveCount(2);
   await page.evaluate(() => renderConnectionIssue({ status: 401 }));
   await expect(page.locator("#health-content")).toContainText("Pairing expired");
-  await expect(page.locator("#health-content")).toContainText("structurely dashboard reconnect --path .");
+  await expect(page.locator("#health-content")).toContainText("structurely dashboard reconnect");
   await expect(page.locator("[data-retry-connection]")).toBeVisible();
   await expect(page.locator("[data-open-connect]")).toBeVisible();
 });

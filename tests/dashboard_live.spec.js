@@ -7,6 +7,7 @@ const readline = require("node:readline");
 
 let bridge;
 let project;
+let structurelyHome;
 let ready;
 
 test.beforeAll(async () => {
@@ -14,15 +15,17 @@ test.beforeAll(async () => {
     process.env.STRUCTURELY_TEST_BINARY || "target/debug/structurely"
   );
   project = mkdtempSync(path.join(tmpdir(), "structurely-browser-live-"));
+  structurelyHome = mkdtempSync(path.join(tmpdir(), "structurely-browser-home-"));
   writeFileSync(
     path.join(project, "main.rs"),
     "fn publish_atomically() {}\nfn main() { publish_atomically(); }\n"
   );
   execFileSync(binary, ["init", project], { stdio: "ignore" });
+  execFileSync(binary, ["add", project], { stdio: "ignore", env: { ...process.env, STRUCTURELY_HOME: structurelyHome } });
   bridge = spawn(
     binary,
-    ["dashboard", "serve", "--path", project, "--port", "0"],
-    { stdio: ["ignore", "pipe", "pipe"] }
+    ["dashboard", "start", "--port", "0"],
+    { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, STRUCTURELY_HOME: structurelyHome } }
   );
   ready = await new Promise((resolve, reject) => {
     const lines = readline.createInterface({ input: bridge.stdout });
@@ -45,6 +48,7 @@ test.afterAll(async () => {
     await new Promise(resolve => bridge.once("exit", resolve));
   }
   if (project) rmSync(project, { recursive: true, force: true });
+  if (structurelyHome) rmSync(structurelyHome, { recursive: true, force: true });
 });
 
 test("pairs and completes the evidence-to-memory workflow", async ({ page }) => {

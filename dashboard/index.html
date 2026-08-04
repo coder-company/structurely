@@ -36,6 +36,7 @@
           <nav class="context-navigation" id="context-navigation" aria-label="Section navigation"></nav>
         </div>
         <div class="topbar-actions">
+          <label class="project-switcher" for="project-select"><span>Project</span><select id="project-select" aria-label="Active project" disabled><option>Connect first</option></select></label>
           <button class="command-key" id="command-key" aria-label="Open quick search"><span>Quick search</span><kbd>⌘ K</kbd></button>
           <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch color theme">Theme</button>
           <button class="connection-chip" id="connection-button" aria-haspopup="dialog">
@@ -47,13 +48,17 @@
 
       <div id="announcement" class="sr-only" aria-live="polite"></div>
       <section class="view is-visible" data-view-panel="overview" aria-labelledby="overview-title">
-        <div class="page-heading"><h1 id="overview-title">Overview</h1></div>
+        <div class="page-heading"><h1 id="overview-title">Projects</h1><button class="button secondary" id="add-project-button" type="button">Add project</button></div>
         <div class="overview-grid">
+          <section class="project-panel surface">
+            <div class="section-label"><span>Registered projects</span><span id="project-count">0</span></div>
+            <div id="project-list" class="project-list"><div class="empty-compact"><p>Connect to load projects</p></div></div>
+          </section>
           <section class="hero-status surface">
             <div class="section-label"><span>Index health</span><span id="health-time">Waiting for bridge</span></div>
             <div id="health-content" class="health-empty">
               <div class="signal-orbit" aria-hidden="true"><span></span><i></i></div>
-              <div class="onboarding"><h2>Connect</h2><ol class="setup-steps"><li><span>1</span><div><code>structurely dashboard serve --path .</code></div></li><li><span>2</span><div>Enter the terminal pairing code.</div></li></ol></div>
+              <div class="onboarding"><h2>Connect</h2><ol class="setup-steps"><li><span>1</span><div><code>structurely dashboard start</code></div></li><li><span>2</span><div>Enter the terminal pairing code.</div></li></ol></div>
               <button class="button primary" data-open-connect>Connect bridge</button>
             </div>
           </section>

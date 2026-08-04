@@ -27,3 +27,7 @@
   containing no project data or credentials.
 - **Dashboard bridge** — the token-paired loopback-only Adapter that exposes
   bounded engine and state operations to one local browser session.
+- **Dashboard registry** — the user-local catalog of initialized Projects
+  available through one Dashboard bridge. It owns canonical paths, stable
+  project IDs, active selection, and stale-project reporting; graph and durable
+  state remain project-local.
