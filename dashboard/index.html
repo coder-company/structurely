@@ -47,44 +47,32 @@
 
       <div id="announcement" class="sr-only" aria-live="polite"></div>
       <section class="view is-visible" data-view-panel="overview" aria-labelledby="overview-title">
-        <div class="page-heading heading-grid">
-          <div>
-            <p class="eyebrow">Local intelligence</p>
-            <h1 id="overview-title">Understand the system before you change it.</h1>
-          </div>
-          <p class="heading-copy">Search code, follow evidence-backed relationships, and preserve decisions across sessions. Everything runs through your loopback bridge.</p>
-        </div>
+        <div class="page-heading"><h1 id="overview-title">Overview</h1></div>
         <div class="overview-grid">
           <section class="hero-status surface">
             <div class="section-label"><span>Index health</span><span id="health-time">Waiting for bridge</span></div>
             <div id="health-content" class="health-empty">
               <div class="signal-orbit" aria-hidden="true"><span></span><i></i></div>
-              <div class="onboarding"><h2>Connect your local bridge</h2><p>Repository data stays on this machine.</p><ol class="setup-steps"><li><span>1</span><div><strong>Start the bridge</strong><code>structurely dashboard serve --path .</code></div></li><li><span>2</span><div><strong>Pair this tab</strong><small>Enter the one-time code printed in your terminal.</small></div></li><li><span>3</span><div><strong>Explore the project</strong><small>Begin with Search or ask a repository question.</small></div></li></ol></div>
+              <div class="onboarding"><h2>Connect</h2><ol class="setup-steps"><li><span>1</span><div><code>structurely dashboard serve --path .</code></div></li><li><span>2</span><div>Enter the terminal pairing code.</div></li></ol></div>
               <button class="button primary" data-open-connect>Connect bridge</button>
             </div>
           </section>
           <section class="activity-panel">
             <div class="section-label"><span>Recent activity</span><button class="text-button" data-view-link="sessions">View sessions</button></div>
             <div id="activity-list" class="activity-list">
-              <div class="empty-compact"><span class="empty-mark" aria-hidden="true"></span><p>Session events will appear here after pairing.</p></div>
+              <div class="empty-compact"><span class="empty-mark" aria-hidden="true"></span><p>No session activity</p></div>
             </div>
           </section>
           <section class="quick-actions">
-            <button class="action-tile" data-view-link="search"><span>Search symbols</span><small>Find definitions and references</small><i aria-hidden="true">↗</i></button>
-            <button class="action-tile" data-view-link="research"><span>Research a question</span><small>Gather repository-wide evidence</small><i aria-hidden="true">↗</i></button>
-            <button class="action-tile" data-view-link="impact"><span>Assess a change</span><small>Map downstream impact</small><i aria-hidden="true">↗</i></button>
-          </section>
-          <section class="privacy-panel">
-            <div class="privacy-rule"></div>
-            <p class="eyebrow">Data boundary</p>
-            <h2>Static shell.<br>Local knowledge.</h2>
-            <p>This page can be hosted anywhere. Repository data is requested directly from <code>127.0.0.1</code>, rendered in memory, and never persisted by this dashboard.</p>
+            <button class="action-tile" data-view-link="search"><span>Search</span><i aria-hidden="true">↗</i></button>
+            <button class="action-tile" data-view-link="research"><span>Research</span><i aria-hidden="true">↗</i></button>
+            <button class="action-tile" data-view-link="impact"><span>Impact</span><i aria-hidden="true">↗</i></button>
           </section>
         </div>
       </section>
 
       <section class="view" data-view-panel="search" aria-labelledby="search-title">
-        <div class="page-heading tool-heading"><div><p class="eyebrow">Symbol intelligence</p><h1 id="search-title">Search the code graph</h1></div><p class="heading-copy">Find symbols, files, routes, and components in the current index.</p></div>
+        <div class="page-heading"><h1 id="search-title">Search</h1></div>
         <form class="query-bar" data-tool-form="search">
           <div class="field grow"><label for="search-query">Search query</label><input id="search-query" name="query" type="search" maxlength="1000" placeholder="e.g. publish_atomic" required autocomplete="off"></div>
           <div class="field compact"><label for="search-limit">Results</label><select id="search-limit" name="limit"><option>10</option><option>20</option><option>50</option></select></div>
@@ -94,7 +82,7 @@
       </section>
 
       <section class="view" data-view-panel="research" aria-labelledby="research-title">
-        <div class="page-heading tool-heading"><div><p class="eyebrow">Repository synthesis</p><h1 id="research-title">Research with evidence</h1></div><p class="heading-copy">Ask a focused question and inspect the files and symbols behind the answer.</p></div>
+        <div class="page-heading"><h1 id="research-title">Research</h1></div>
         <form class="query-bar" data-tool-form="research">
           <div class="field grow"><label for="research-query">Research question</label><input id="research-query" name="query" maxlength="1000" placeholder="How are releases verified?" required></div>
           <div class="field compact"><label for="research-files">Max files</label><select id="research-files" name="maxFiles"><option>8</option><option selected>12</option><option>20</option></select></div>
@@ -104,7 +92,7 @@
       </section>
 
       <section class="view" data-view-panel="impact" aria-labelledby="impact-title">
-        <div class="page-heading tool-heading"><div><p class="eyebrow">Change planning</p><h1 id="impact-title">Map downstream impact</h1></div><p class="heading-copy">See which symbols and files are exposed before modifying a contract.</p></div>
+        <div class="page-heading"><h1 id="impact-title">Impact</h1></div>
         <form class="query-bar query-grid" data-tool-form="impact">
           <div class="field"><label for="impact-symbol">Symbol</label><input id="impact-symbol" name="symbol" maxlength="500" placeholder="publish" required></div>
           <div class="field"><label for="impact-file">File hint <span>optional</span></label><input id="impact-file" name="file" maxlength="500" placeholder="src/store.rs"></div>
@@ -115,7 +103,7 @@
       </section>
 
       <section class="view" data-view-panel="trace" aria-labelledby="trace-title">
-        <div class="page-heading tool-heading"><div><p class="eyebrow">Relationship path</p><h1 id="trace-title">Trace symbol to symbol</h1></div><p class="heading-copy">Follow the shortest bounded, evidence-backed path through the graph.</p></div>
+        <div class="page-heading"><h1 id="trace-title">Path trace</h1></div>
         <form class="query-bar query-grid trace-form" data-tool-form="trace">
           <div class="field"><label for="trace-source">Source</label><input id="trace-source" name="source" maxlength="500" placeholder="publish" required></div>
           <div class="trace-arrow" aria-hidden="true">→</div>
@@ -127,7 +115,7 @@
       </section>
 
       <section class="view" data-view-panel="workspaces" aria-labelledby="workspaces-title">
-        <div class="page-heading tool-heading"><div><p class="eyebrow">Team context</p><h1 id="workspaces-title">Workspaces</h1></div><button class="button secondary" data-refresh="workspaces">Refresh</button></div>
+        <div class="page-heading tool-heading"><h1 id="workspaces-title">Workspaces</h1><button class="button secondary" data-refresh="workspaces">Refresh</button></div>
         <form class="query-bar" data-state-form="workspace">
           <div class="field grow"><label for="workspace-name">Workspace name</label><input id="workspace-name" name="name" maxlength="200" placeholder="Compiler reliability" required></div>
           <button class="button primary" type="submit">Create workspace</button>
@@ -135,7 +123,7 @@
         <div class="result-region" data-collection="workspaces"></div>
       </section>
       <section class="view" data-view-panel="sessions" aria-labelledby="sessions-title">
-        <div class="page-heading tool-heading"><div><p class="eyebrow">Durable history</p><h1 id="sessions-title">Sessions</h1></div><button class="button secondary" data-refresh="sessions">Refresh</button></div>
+        <div class="page-heading tool-heading"><h1 id="sessions-title">Sessions</h1><button class="button secondary" data-refresh="sessions">Refresh</button></div>
         <div class="workflow-forms">
           <form class="query-bar" data-state-form="session">
             <div class="field"><label for="session-workspace">Workspace ID</label><input id="session-workspace" name="workspace" maxlength="256" placeholder="ws_…" required></div>
@@ -152,7 +140,7 @@
         <div class="result-region" data-collection="sessions"></div>
       </section>
       <section class="view" data-view-panel="recaps" aria-labelledby="recaps-title">
-        <div class="page-heading tool-heading"><div><p class="eyebrow">Decision record</p><h1 id="recaps-title">Recaps</h1></div><p class="heading-copy">Generate a deterministic summary from one local session.</p></div>
+        <div class="page-heading"><h1 id="recaps-title">Recaps</h1></div>
         <form class="query-bar" data-tool-form="recap">
           <div class="field grow"><label for="recap-session">Session ID</label><input id="recap-session" name="session" maxlength="256" placeholder="session_…" required></div>
           <button class="button primary" type="submit">Generate recap</button>
@@ -160,7 +148,7 @@
         <div class="result-region" data-result="recap"></div>
       </section>
       <section class="view" data-view-panel="memory" aria-labelledby="memory-title">
-        <div class="page-heading tool-heading"><div><p class="eyebrow">Local knowledge</p><h1 id="memory-title">Memory</h1></div><button class="button secondary" data-refresh="memory">Refresh</button></div>
+        <div class="page-heading tool-heading"><h1 id="memory-title">Memory</h1><button class="button secondary" data-refresh="memory">Refresh</button></div>
         <form class="query-bar" data-tool-form="memory">
           <div class="field"><label for="memory-workspace">Workspace ID</label><input id="memory-workspace" name="workspace" maxlength="256" placeholder="workspace_…" required></div>
           <div class="field grow"><label for="memory-query">Recall knowledge</label><input id="memory-query" name="query" maxlength="1000" placeholder="What did we decide about atomic writes?" required></div>
@@ -179,14 +167,14 @@
 
   <dialog id="connect-dialog" class="connect-dialog" aria-labelledby="connect-title">
     <form method="dialog" class="dialog-close-row"><button class="icon-button" value="cancel" aria-label="Close connection dialog">×</button></form>
-    <div class="dialog-intro"><p class="eyebrow">Private pairing</p><h2 id="connect-title">Connect to Structurely</h2><p>The dashboard talks directly to a loopback-only bridge. Tokens remain in this browser tab and are cleared when the tab closes.</p></div>
+    <div class="dialog-intro"><h2 id="connect-title">Connect</h2></div>
     <form id="connect-form" class="connect-form">
       <div class="field"><label for="bridge-url">Bridge address</label><input id="bridge-url" name="bridgeUrl" type="url" value="http://127.0.0.1:4765" pattern="http://(127\.0\.0\.1|localhost)(:[0-9]+)?" required><small>Only <code>127.0.0.1</code> or <code>localhost</code> are accepted.</small></div>
       <div class="field"><label for="pair-code">Pairing code</label><input id="pair-code" name="pairCode" type="password" maxlength="256" autocomplete="one-time-code" placeholder="Paste the one-time code" required><small>Find this in the terminal where you started the bridge.</small></div>
       <p id="connect-error" class="form-error" role="alert"></p>
       <button class="button primary wide" type="submit">Pair this tab</button>
     </form>
-    <div class="dialog-security"><span aria-hidden="true"></span><p><strong>No cloud sync</strong>Vercel, Cloudflare, and Structurely do not receive repository content through this console.</p></div>
+    <div class="dialog-security"><span aria-hidden="true"></span><p>Loopback only · token cleared when this tab closes</p></div>
   </dialog>
 </body>
 </html>
