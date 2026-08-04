@@ -154,27 +154,27 @@ pub fn run(
         )),
     }
 
-    match dashboard::status(project.clone()) {
+    match dashboard::status() {
         Ok(Some(status)) if status.running => checks.push(pass(
             "dashboard",
             format!(
-                "The optional private bridge is listening at http://{}.",
+            "The universal dashboard is listening at http://{}.",
                 status.address
             ),
         )),
         Ok(Some(_)) => checks.push(warn(
             "dashboard",
-            "Dashboard control state exists, but the optional bridge is stopped.",
-            "Run structurely dashboard serve --path <project>, or remove stale control state.",
+            "Dashboard control state exists, but the bridge is stopped.",
+            "Run structurely dashboard start, or clear stale state with structurely dashboard remove.",
         )),
         Ok(None) => checks.push(pass(
             "dashboard",
-            "The optional dashboard is not configured; core agent workflows are unaffected.",
+            "The universal dashboard is stopped.",
         )),
         Err(error) => checks.push(warn(
             "dashboard",
-            format!("Optional dashboard state could not be read: {error}"),
-            "Run structurely dashboard remove --path <project> to clear stale control state.",
+            format!("Dashboard state could not be read: {error}"),
+            "Run structurely dashboard remove to clear stale control state.",
         )),
     }
 

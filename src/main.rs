@@ -42,6 +42,17 @@ enum Command {
         #[arg(long)]
         replace_codegraph: bool,
     },
+    /// Register an initialized project in the universal dashboard.
+    Add {
+        /// Initialized project root.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Manage projects in the universal dashboard.
+    Projects {
+        #[command(subcommand)]
+        command: ProjectsCommand,
+    },
     /// Create or rebuild the project index.
     Init {
         /// Project root to index.
@@ -347,11 +358,8 @@ enum IntegrationCommand {
 
 #[derive(Subcommand)]
 enum DashboardCommand {
-    /// Serve the token-paired bridge on the loopback interface.
-    Serve {
-        /// Initialized project root.
-        #[arg(long, default_value = ".")]
-        path: PathBuf,
+    /// Start the universal token-paired bridge.
+    Start {
         /// Loopback port. Use 0 to select an available port.
         #[arg(long, default_value_t = 4765)]
         port: u16,
@@ -373,35 +381,25 @@ enum DashboardCommand {
         project_name: Option<String>,
     },
     /// Show bridge health and the current one-time pairing code.
-    Status {
-        /// Initialized project root.
-        #[arg(long, default_value = ".")]
-        path: PathBuf,
-    },
+    Status,
     /// Invalidate every paired tab and issue a new one-time code.
-    RotateToken {
-        /// Initialized project root.
-        #[arg(long, default_value = ".")]
-        path: PathBuf,
-    },
+    RotateToken,
     /// Issue a fresh pairing code for reconnecting this browser.
-    Reconnect {
-        /// Initialized project root.
-        #[arg(long, default_value = ".")]
-        path: PathBuf,
-    },
+    Reconnect,
     /// Stop the local dashboard bridge.
-    Stop {
-        /// Initialized project root.
-        #[arg(long, default_value = ".")]
-        path: PathBuf,
-    },
+    Stop,
     /// Stop the bridge and remove local dashboard control files.
-    Remove {
-        /// Initialized project root.
-        #[arg(long, default_value = ".")]
-        path: PathBuf,
-    },
+    Remove,
+}
+
+#[derive(Subcommand)]
+enum ProjectsCommand {
+    /// List registered projects and availability.
+    List,
+    /// Select the default project for new dashboard sessions.
+    Activate { project: String },
+    /// Remove a project from the dashboard without deleting its local data.
+    Remove { project: String },
 }
 
 #[derive(Subcommand)]
@@ -549,12 +547,42 @@ fn main() -> Result<()> {
             let client = structurely::integrations::AgentClient::parse(&client)?;
             let executable = std::env::current_exe()?;
             let report = structurely::setup::run(path, client, executable, replace_codegraph)?;
+            structurely::dashboard_registry::DashboardRegistry::open_default()?
+                .register(&report.project)?;
             if human_output {
                 print!("{}", format_setup_human(&report));
             } else {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             }
-            structurely::dashboard::offer_after_setup(std::path::Path::new(&report.project));
+            structurely::dashboard::offer_after_setup();
+        }
+        Command::Add { path } => {
+            let project = structurely::dashboard_registry::DashboardRegistry::open_default()?
+                .register(path)?;
+            println!("{}", serde_json::to_string_pretty(&project)?);
+        }
+        Command::Projects { command } => {
+            let registry = structurely::dashboard_registry::DashboardRegistry::open_default()?;
+            match command {
+                ProjectsCommand::List => {
+                    println!("{}", serde_json::to_string_pretty(&registry.list()?)?);
+                }
+                ProjectsCommand::Activate { project } => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&registry.activate(&project)?)?
+                    );
+                }
+                ProjectsCommand::Remove { project } => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "project": project,
+                            "removed": registry.remove(&project)?,
+                        }))?
+                    );
+                }
+            }
         }
         Command::Init { path } => {
             let (_, report) = Engine::init(path)?;
@@ -890,14 +918,12 @@ fn main() -> Result<()> {
         }
         Command::Dashboard {
             command:
-                DashboardCommand::Serve {
-                    path,
+                DashboardCommand::Start {
                     port,
                     allowed_origins,
                 },
         } => {
             structurely::dashboard::serve(structurely::dashboard::BridgeOptions {
-                project: path,
                 port,
                 allowed_origins,
             })?;
@@ -926,43 +952,43 @@ fn main() -> Result<()> {
             );
         }
         Command::Dashboard {
-            command: DashboardCommand::Status { path },
+            command: DashboardCommand::Status,
         } => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&structurely::dashboard::status(path)?)?
+                serde_json::to_string_pretty(&structurely::dashboard::status()?)?
             );
         }
         Command::Dashboard {
-            command: DashboardCommand::RotateToken { path },
+            command: DashboardCommand::RotateToken,
         } => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&structurely::dashboard::rotate(path)?)?
+                serde_json::to_string_pretty(&structurely::dashboard::rotate()?)?
             );
         }
         Command::Dashboard {
-            command: DashboardCommand::Reconnect { path },
+            command: DashboardCommand::Reconnect,
         } => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&structurely::dashboard::rotate(path)?)?
+                serde_json::to_string_pretty(&structurely::dashboard::rotate()?)?
             );
         }
         Command::Dashboard {
-            command: DashboardCommand::Stop { path },
+            command: DashboardCommand::Stop,
         } => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&structurely::dashboard::stop(path)?)?
+                serde_json::to_string_pretty(&structurely::dashboard::stop()?)?
             );
         }
         Command::Dashboard {
-            command: DashboardCommand::Remove { path },
+            command: DashboardCommand::Remove,
         } => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&structurely::dashboard::remove(path)?)?
+                serde_json::to_string_pretty(&structurely::dashboard::remove()?)?
             );
         }
         Command::Integrations {

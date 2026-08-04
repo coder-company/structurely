@@ -3,6 +3,22 @@
 All notable changes are documented here. Structurely follows semantic
 versioning after the initial `0.1.0` release.
 
+## 1.0.0 — 2026-08-04
+
+- Replace project-specific dashboards with one user-local product catalog in
+  `~/.structurely/projects.json` while keeping graph and durable state inside
+  each repository.
+- Add `structurely add`, project listing, activation, removal, aggregate index
+  health, and project-isolated browser workflows through one loopback bridge.
+- Replace `dashboard serve --path` with the universal `dashboard start`
+  lifecycle and automatically register projects after successful setup.
+- Add a compact project switcher and project health surface to the dashboard
+  without changing its ArcXiv-derived layout, typography, and corner system.
+- Remember verified Vercel and Cloudflare deployment origins so a deployed
+  static shell and local bridge work without repeating CORS configuration.
+- Verify two-project isolation, deployment persistence, accessibility, static
+  shell privacy, and a real paired browser workflow.
+
 ## 0.5.0 — 2026-08-04
 
 - Rebuild the private dashboard around the ArcXiv-derived editorial design

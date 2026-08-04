@@ -196,7 +196,7 @@ if [ "${STRUCTURELY_TEST_DEPLOY_FAIL:-}" = "1" ]; then exit 42; fi
                     "STRUCTURELY_DASHBOARD_SETUP": "local",
                 },
             )
-            assert "structurely dashboard serve" in local.stdout
+            assert "structurely dashboard start" in local.stdout
 
             unsupported = subprocess.run(
                 ["sh", "scripts/install.sh"],

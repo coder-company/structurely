@@ -166,19 +166,23 @@ preserve unrelated settings.
 ## Run the private dashboard
 
 ```bash
-structurely dashboard serve --path <project> [--port <port>] \
+structurely add <project>
+structurely projects list
+structurely projects activate <project-id>
+structurely projects remove <project-id>
+structurely dashboard start [--port <port>] \
   [--allow-origin <https-origin>]...
-structurely dashboard status --path <project>
-structurely dashboard reconnect --path <project>
-structurely dashboard rotate-token --path <project>
-structurely dashboard stop --path <project>
-structurely dashboard remove --path <project>
+structurely dashboard status
+structurely dashboard reconnect
+structurely dashboard rotate-token
+structurely dashboard stop
+structurely dashboard remove
 ```
 
-`serve` binds only to loopback and prints a one-time pairing code. Hosted
-origins must be explicitly allowed. `reconnect` and `rotate-token` invalidate
-every existing browser token. See the [dashboard security and privacy
-guide](dashboard.md).
+`start` serves every registered project on loopback and prints a one-time
+pairing code. A successful deployment saves its exact HTTPS origin for future
+starts. `reconnect` and `rotate-token` invalidate every existing browser token.
+See the [dashboard security and privacy guide](dashboard.md).
 
 Export or deploy only the static shell:
 

@@ -42,7 +42,7 @@ irm https://raw.githubusercontent.com/coder-company/structurely/main/install.ps1
 
 The installer selects the native archive, verifies its SHA-256 checksum,
 smoke-tests the binary, and publishes it atomically. It needs neither Rust nor
-administrator access. Pin a release with `STRUCTURELY_VERSION=v0.5.0`.
+administrator access. Pin a release with `STRUCTURELY_VERSION=v1.0.0`.
 
 ## First run
 
@@ -65,12 +65,15 @@ structurely impact publish
 ### Private dashboard
 
 ```bash
-structurely dashboard serve --path .
+structurely add .
+structurely dashboard start
 ```
 
-Open the printed loopback URL and enter its one-time pairing code. The browser
-talks directly to the local bridge; repository data, queries, sessions, and
-memory do not pass through a hosting provider. Read the
+Open the printed loopback URL and enter its one-time pairing code. Add every
+initialized repository once with `structurely add <path>`; the same dashboard
+then switches between them. The global `~/.structurely/projects.json` catalog
+stores paths and selection only. Each repository keeps its own index and state.
+Repository data, queries, sessions, and memory never pass through a hosting provider. Read the
 [dashboard guide](docs/dashboard.md) for local and static-shell deployment.
 
 ## What it does

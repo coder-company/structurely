@@ -3,6 +3,7 @@ pub mod budget;
 pub mod content;
 pub mod daemon;
 pub mod dashboard;
+pub mod dashboard_registry;
 pub mod doctor;
 pub mod engine;
 pub mod integrations;
