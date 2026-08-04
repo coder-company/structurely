@@ -42,8 +42,8 @@ establishes the archive's build origin and workflow identity.
 4. Create and push an annotated tag:
 
    ```bash
-   git tag -a v0.4.0 -m "Structurely v0.4.0"
-   git push origin v0.4.0
+   git tag -a v0.5.0 -m "Structurely v0.5.0"
+   git push origin v0.5.0
    ```
 
 5. Wait for every release matrix job and the publication job to succeed.
